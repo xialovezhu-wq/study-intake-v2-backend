@@ -352,7 +352,7 @@ class ModelDrivenMcpArchitectureTests(unittest.TestCase):
             source = inspect.getsource(method)
             self.assertGreaterEqual(source.count("_execute_prompt("), 2)
         execute_source = inspect.getsource(CodexRunner._execute_prompt)
-        self.assertIn("_model_request_config_args()", execute_source)
+        self.assertIn("_model_request_config_args(model_role)", execute_source)
         self.assertIn('"--ignore-user-config"', execute_source)
 
     def test_service_tier_override_or_wrong_model_contract_fails_before_provider(self) -> None:

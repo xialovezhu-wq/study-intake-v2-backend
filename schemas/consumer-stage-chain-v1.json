@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/study-intake/consumer-stage-chain-v1.json",
+  "title": "Study Intake successor consumer stage chain v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "chain_id", "capture_id", "source_kind", "input_sha256",
+    "durable_gate", "stages", "sol_formal_write_complete", "status",
+    "formal_write_count", "chain_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "study-intake-consumer-stage-chain-v1"},
+    "chain_id": {"$ref": "#/$defs/safe_id"},
+    "capture_id": {"$ref": "#/$defs/safe_id"},
+    "source_kind": {"enum": ["canonical", "synthetic"]},
+    "input_sha256": {"$ref": "#/$defs/sha256"},
+    "durable_gate": {"const": true},
+    "stages": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {"$ref": "#/$defs/capture_durable"},
+        {"$ref": "#/$defs/terra_analysis"},
+        {"$ref": "#/$defs/luna_analysis"},
+        {"$ref": "#/$defs/terra_critical_review"},
+        {"$ref": "#/$defs/sol_formal_write"}
+      ],
+      "items": false
+    },
+    "sol_formal_write_complete": {"const": true},
+    "status": {"const": "complete"},
+    "formal_write_count": {"type": "integer", "minimum": 0},
+    "chain_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safe_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "json_value": {
+      "type": ["object", "array", "string", "number", "boolean", "null"]
+    },
+    "count": {"type": "integer", "minimum": 0},
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "lease_id", "writer_identity", "scope", "mode",
+        "status", "action_count", "formal_write_count"
+      ],
+      "properties": {
+        "schema_version": {"const": "study-intake-global-writer-lease-receipt-v1"},
+        "lease_id": {"$ref": "#/$defs/safe_id"},
+        "writer_identity": {"$ref": "#/$defs/safe_id"},
+        "scope": {"const": "study-intake-consumer-stage-chain-v1"},
+        "mode": {"const": "controlled_write"},
+        "status": {"const": "closed"},
+        "action_count": {"$ref": "#/$defs/count"},
+        "formal_write_count": {"$ref": "#/$defs/count"}
+      }
+    },
+    "commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "commit_id", "transaction_id", "lease_id",
+        "global_writer_lease_receipt_sha256", "writer_identity", "mode",
+        "status", "action_count", "formal_write_count"
+      ],
+      "properties": {
+        "schema_version": {"const": "study-intake-sol-commit-receipt-v1"},
+        "commit_id": {"$ref": "#/$defs/safe_id"},
+        "transaction_id": {"$ref": "#/$defs/safe_id"},
+        "lease_id": {"$ref": "#/$defs/safe_id"},
+        "global_writer_lease_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "writer_identity": {"$ref": "#/$defs/safe_id"},
+        "mode": {"const": "controlled_write"},
+        "status": {"const": "closed"},
+        "action_count": {"$ref": "#/$defs/count"},
+        "formal_write_count": {"$ref": "#/$defs/count"}
+      }
+    },
+    "transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "transaction_id", "commit_id", "commit_receipt_sha256",
+        "writer_identity", "mode", "status", "action_count", "formal_write_count"
+      ],
+      "properties": {
+        "schema_version": {"const": "study-intake-sol-transaction-receipt-v1"},
+        "transaction_id": {"$ref": "#/$defs/safe_id"},
+        "commit_id": {"$ref": "#/$defs/safe_id"},
+        "commit_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "writer_identity": {"$ref": "#/$defs/safe_id"},
+        "mode": {"const": "controlled_write"},
+        "status": {"const": "closed"},
+        "action_count": {"$ref": "#/$defs/count"},
+        "formal_write_count": {"$ref": "#/$defs/count"}
+      }
+    },
+    "sol_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "global_writer_lease_receipt", "global_writer_lease_receipt_sha256",
+        "writer_identity", "commit_receipt", "commit_receipt_sha256",
+        "transaction_receipt", "transaction_receipt_sha256", "action_count",
+        "formal_write_count", "complete"
+      ],
+      "properties": {
+        "global_writer_lease_receipt": {"$ref": "#/$defs/lease"},
+        "global_writer_lease_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "writer_identity": {"$ref": "#/$defs/safe_id"},
+        "commit_receipt": {"$ref": "#/$defs/commit"},
+        "commit_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "transaction_receipt": {"$ref": "#/$defs/transaction"},
+        "transaction_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "action_count": {"$ref": "#/$defs/count"},
+        "formal_write_count": {"$ref": "#/$defs/count"},
+        "complete": {"const": true}
+      }
+    },
+    "capture_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "capture_id", "source_kind", "durable", "payload",
+        "payload_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "study-intake-consumer-capture-input-v1"},
+        "capture_id": {"$ref": "#/$defs/safe_id"},
+        "source_kind": {"enum": ["canonical", "synthetic"]},
+        "durable": {"const": true},
+        "payload": {"$ref": "#/$defs/json_value"},
+        "payload_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "read_only_stage": {
+      "allOf": [
+        {"$ref": "#/$defs/stage"},
+        {"properties": {
+          "status": {"const": "closed"},
+          "sandbox": {"const": "read_only"},
+          "tool_mode": {"const": "read_only"},
+          "formal_write_count": {"const": 0},
+          "complete": {"const": false},
+          "writer_identity": {"type": "null"},
+          "global_writer_lease_receipt": {"type": "null"},
+          "global_writer_lease_receipt_sha256": {"type": "null"},
+          "commit_receipt": {"type": "null"},
+          "commit_receipt_sha256": {"type": "null"},
+          "transaction_receipt": {"type": "null"},
+          "transaction_receipt_sha256": {"type": "null"}
+        }}
+      ]
+    },
+    "capture_durable": {
+      "allOf": [
+        {"$ref": "#/$defs/read_only_stage"},
+        {"properties": {
+          "stage_name": {"const": "capture_durable"},
+          "sequence": {"const": 1},
+          "runtime_identity": {"const": "canonical"},
+          "model": {"const": "none"},
+          "effort": {"const": "none"},
+          "reasoning_effort": {"const": "none"},
+          "previous_output_sha256": {"type": "null"},
+          "tool_policy_sha256": {"const": "2f45c7d8b2ad6b186dd9d360752381d7819a7fcbe896d09a0bde937c504f247b"}
+        }}
+      ]
+    },
+    "terra_analysis": {
+      "allOf": [
+        {"$ref": "#/$defs/read_only_stage"},
+        {"properties": {
+          "stage_name": {"const": "terra_analysis"},
+          "sequence": {"const": 2},
+          "runtime_identity": {"const": "gpt-5.6-terra"},
+          "model": {"const": "gpt-5.6-terra"},
+          "effort": {"const": "max"},
+          "reasoning_effort": {"const": "max"},
+          "tool_policy_sha256": {"const": "1b4ef95de1fe3dc13a412d7a3c3692a3e31dc72ce0acda0626d44db925511206"}
+        }}
+      ]
+    },
+    "luna_analysis": {
+      "allOf": [
+        {"$ref": "#/$defs/read_only_stage"},
+        {"properties": {
+          "stage_name": {"const": "luna_analysis"},
+          "sequence": {"const": 3},
+          "runtime_identity": {"const": "gpt-5.6-luna"},
+          "model": {"const": "gpt-5.6-luna"},
+          "effort": {"const": "max"},
+          "reasoning_effort": {"const": "max"},
+          "tool_policy_sha256": {"const": "7493f9049acf4ef9108ee3ad619acd63a659b2bd082a40d56bf2f33750b04b80"}
+        }}
+      ]
+    },
+    "terra_critical_review": {
+      "allOf": [
+        {"$ref": "#/$defs/read_only_stage"},
+        {"properties": {
+          "stage_name": {"const": "terra_critical_review"},
+          "sequence": {"const": 4},
+          "runtime_identity": {"const": "gpt-5.6-terra"},
+          "model": {"const": "gpt-5.6-terra"},
+          "effort": {"const": "max"},
+          "reasoning_effort": {"const": "max"},
+          "tool_policy_sha256": {"const": "4a3d7e6b4fe4448142ec44642f94a346b2efe3c71ba9fc6f310ee8797a650e69"}
+        }}
+      ]
+    },
+    "sol_formal_write": {
+      "allOf": [
+        {"$ref": "#/$defs/stage"},
+        {"properties": {
+          "stage_name": {"const": "sol_formal_write"},
+          "sequence": {"const": 5},
+          "status": {"const": "complete"},
+          "runtime_identity": {"const": "sol"},
+          "model": {"const": "none"},
+          "effort": {"const": "none"},
+          "reasoning_effort": {"const": "none"},
+          "sandbox": {"const": "controlled_write"},
+          "tool_mode": {"const": "controlled_write"},
+          "tool_policy_sha256": {"const": "1a6dd9ff08c15f50fa22c85128c4a76649dfde40ed4d2d26f9e0c5f08e1ff80d"},
+          "output": {"$ref": "#/$defs/sol_output"},
+          "formal_write_count": {"$ref": "#/$defs/count"},
+          "complete": {"const": true},
+          "writer_identity": {"$ref": "#/$defs/safe_id"},
+          "global_writer_lease_receipt": {"$ref": "#/$defs/lease"},
+          "global_writer_lease_receipt_sha256": {"$ref": "#/$defs/sha256"},
+          "commit_receipt": {"$ref": "#/$defs/commit"},
+          "commit_receipt_sha256": {"$ref": "#/$defs/sha256"},
+          "transaction_receipt": {"$ref": "#/$defs/transaction"},
+          "transaction_receipt_sha256": {"$ref": "#/$defs/sha256"}
+        }}
+      ]
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "chain_id", "capture_id", "stage_name", "sequence",
+        "status", "runtime_identity", "model", "effort", "reasoning_effort",
+        "sandbox", "tool_mode", "tool_policy_sha256", "input_sha256",
+        "output_sha256", "previous_output_sha256", "output", "durable", "closed",
+        "eligible", "formal_write_count", "complete", "writer_identity",
+        "global_writer_lease_receipt", "global_writer_lease_receipt_sha256",
+        "commit_receipt", "commit_receipt_sha256", "transaction_receipt",
+        "transaction_receipt_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "study-intake-consumer-stage-v1"},
+        "chain_id": {"$ref": "#/$defs/safe_id"},
+        "capture_id": {"$ref": "#/$defs/safe_id"},
+        "stage_name": {"enum": [
+          "capture_durable", "terra_analysis", "luna_analysis",
+          "terra_critical_review", "sol_formal_write"
+        ]},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
+        "status": {"enum": ["closed", "complete"]},
+        "runtime_identity": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "effort": {"type": "string", "minLength": 1},
+        "reasoning_effort": {"type": "string", "minLength": 1},
+        "sandbox": {"enum": ["read_only", "controlled_write"]},
+        "tool_mode": {"enum": ["read_only", "controlled_write"]},
+        "tool_policy_sha256": {"$ref": "#/$defs/sha256"},
+        "input_sha256": {"$ref": "#/$defs/sha256"},
+        "output_sha256": {"$ref": "#/$defs/sha256"},
+        "previous_output_sha256": {"oneOf": [
+          {"$ref": "#/$defs/sha256"},
+          {"type": "null"}
+        ]},
+        "output": {"$ref": "#/$defs/json_value"},
+        "durable": {"const": true},
+        "closed": {"const": true},
+        "eligible": {"const": true},
+        "formal_write_count": {"$ref": "#/$defs/count"},
+        "complete": {"type": "boolean"},
+        "writer_identity": {"oneOf": [
+          {"$ref": "#/$defs/safe_id"},
+          {"type": "null"}
+        ]},
+        "global_writer_lease_receipt": {"oneOf": [
+          {"$ref": "#/$defs/lease"},
+          {"type": "null"}
+        ]},
+        "global_writer_lease_receipt_sha256": {"oneOf": [
+          {"$ref": "#/$defs/sha256"},
+          {"type": "null"}
+        ]},
+        "commit_receipt": {"oneOf": [
+          {"$ref": "#/$defs/commit"},
+          {"type": "null"}
+        ]},
+        "commit_receipt_sha256": {"oneOf": [
+          {"$ref": "#/$defs/sha256"},
+          {"type": "null"}
+        ]},
+        "transaction_receipt": {"oneOf": [
+          {"$ref": "#/$defs/transaction"},
+          {"type": "null"}
+        ]},
+        "transaction_receipt_sha256": {"oneOf": [
+          {"$ref": "#/$defs/sha256"},
+          {"type": "null"}
+        ]}
+      }
+    }
+  }
+}

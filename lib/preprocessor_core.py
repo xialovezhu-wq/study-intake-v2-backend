@@ -17716,9 +17716,34 @@ class CodexRunner:
             raise PreprocessorError("model_task_context_missing")
         return root
 
-    def _model_request_config_args(self) -> list[str]:
+    def _model_request_config_args(self, role_name: str | None = None) -> list[str]:
         """Return the explicit request contract used under ignore-user-config."""
 
+        if role_name is not None:
+            expected_models = {
+                "terra_analysis": "gpt-5.6-terra",
+                "luna_analysis": "gpt-5.6-luna",
+                "terra_critical_review": "gpt-5.6-terra",
+            }
+            expected_model = expected_models.get(role_name)
+            roles = self.config.get("models")
+            role = roles.get(role_name) if isinstance(roles, Mapping) else None
+            if (
+                expected_model is None
+                or not isinstance(role, Mapping)
+                or role.get("model") != expected_model
+                or role.get("reasoning_effort") != "max"
+                or role.get("sandbox_mode") != "read-only"
+                or role.get("agents_enabled") is not False
+                or "service_tier" in role
+            ):
+                raise PreprocessorError("consumer_model_role_invalid")
+            return [
+                "--model",
+                expected_model,
+                "--config",
+                'model_reasoning_effort="max"',
+            ]
         if self.config.get("model") != "gpt-5.6-luna":
             raise PreprocessorError("config_model_must_be_luna")
         if self.config.get("reasoning_effort") != "max":
@@ -21144,6 +21169,7 @@ class CodexRunner:
         processing_context: Mapping[str, Any] | None = None,
         allow_empty_predeclared_evidence_refs: bool = False,
         math_source_bundle_formalization_mode: bool = False,
+        model_role: str | None = None,
     ) -> StructuredStageResult:
         codex_path = Path(str(self.config["codex_path"]))
         if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
@@ -21152,7 +21178,23 @@ class CodexRunner:
             raise PreprocessorError(f"{stage_name}_output_schema_missing")
         if len(prompt.encode("utf-8")) > max_prompt_bytes:
             raise PreprocessorError(f"{stage_name}_prompt_too_large")
-        model_request_config_args = self._model_request_config_args()
+        model_request_config_args = self._model_request_config_args(model_role)
+        role_config = (
+            self.config.get("models", {}).get(model_role)
+            if model_role is not None
+            and isinstance(self.config.get("models"), Mapping)
+            else None
+        )
+        requested_model = (
+            str(role_config["model"])
+            if isinstance(role_config, Mapping)
+            else str(self.config["model"])
+        )
+        requested_reasoning_effort = (
+            str(role_config["reasoning_effort"])
+            if isinstance(role_config, Mapping)
+            else str(self.config["reasoning_effort"])
+        )
         prevalidated_mcp_config_args: list[str] | None = None
         if allow_empty_predeclared_evidence_refs:
             binding = (
@@ -21219,7 +21261,7 @@ class CodexRunner:
         temp_dir = self._model_temp_dir()
         execution_root = self._model_execution_root()
         fd, output_name = tempfile.mkstemp(
-            prefix=f"luna-{stage_name}-", suffix=".json", dir=temp_dir
+            prefix=f"model-{stage_name}-", suffix=".json", dir=temp_dir
         )
         os.close(fd)
         output_path = Path(output_name)
@@ -21293,7 +21335,7 @@ class CodexRunner:
             )
             schema_sha256 = provider_schema_sha256
             schema_fd, schema_name = tempfile.mkstemp(
-                prefix=f"luna-{stage_name}-", suffix=".schema.json", dir=temp_dir
+                prefix=f"model-{stage_name}-", suffix=".schema.json", dir=temp_dir
             )
             schema_path = Path(schema_name)
             os.fchmod(schema_fd, 0o600)
@@ -21674,10 +21716,10 @@ class CodexRunner:
             )
             if (
                 runtime_model is not None
-                and runtime_model != self.config["model"]
+                and runtime_model != requested_model
             ) or (
                 runtime_effort is not None
-                and runtime_effort != self.config["reasoning_effort"]
+                and runtime_effort != requested_reasoning_effort
             ):
                 error_code = f"{stage_name}_runtime_identity_mismatch"
                 output_sha256 = hashlib.sha256(raw_output).hexdigest()
@@ -22205,6 +22247,8 @@ class CodexRunner:
         format_stage_name: str | None = None,
         normalized_payload: Mapping[str, Any] | None = None,
         normalization_warnings: Sequence[Mapping[str, Any]] = (),
+        requested_model: str | None = None,
+        requested_reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         effective_normalized_payload = (
             normalized_payload
@@ -22248,8 +22292,10 @@ class CodexRunner:
             "result_sha256": result_sha256,
             "output_sha256": result.output_sha256,
             "duration_ms": result.duration_ms,
-            "requested_model": self.config["model"],
-            "requested_reasoning_effort": self.config["reasoning_effort"],
+            "requested_model": requested_model or self.config["model"],
+            "requested_reasoning_effort": (
+                requested_reasoning_effort or self.config["reasoning_effort"]
+            ),
             "runtime_model": result.runtime_model,
             "runtime_reasoning_effort": result.runtime_reasoning_effort,
             "runtime_metadata_provenance": result.runtime_metadata_provenance,
@@ -24895,6 +24941,15 @@ class CodexRunner:
         )
 
     def run(self, candidate: Candidate) -> ModelResult:
+        consumer_chain = self.config.get("consumer_stage_chain")
+        if (
+            isinstance(consumer_chain, Mapping)
+            and consumer_chain.get("enabled") is True
+            and self.config.get("execution_mode") == "live_authorized"
+        ):
+            raise PreprocessorError(
+                "consumer_stage_chain_live_driver_not_integrated"
+            )
         if candidate.subject == "english":
             return self._run_english(candidate)
         math_profile = self.config.get(MATH_V2_PROFILE)
@@ -26111,6 +26166,9 @@ class Worker:
             dict(config.get("fixture_execution") or {})
         )
         model_config["models"] = copy.deepcopy(dict(config.get("models") or {}))
+        model_config["consumer_stage_chain"] = copy.deepcopy(
+            dict(config.get("consumer_stage_chain") or {})
+        )
         model_config["branch_scheduler"] = copy.deepcopy(
             dict(config.get("branch_scheduler") or {})
         )

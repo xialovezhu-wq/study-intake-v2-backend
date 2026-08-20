@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import tomllib
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -19,6 +20,18 @@ CODEX_CACHEBUSTER_RE = re.compile(
 )
 COMPONENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 SUBJECTS = ("math", "cs408", "english")
+LEGACY_MULTI_AGENT_ROLES = frozenset(
+    {"orchestrator", "reader", "critical_reviewer"}
+)
+CONSUMER_STAGE_ROLE_ORDER = (
+    "terra_analysis",
+    "luna_analysis",
+    "terra_critical_review",
+)
+CONSUMER_STAGE_ROLES = frozenset(CONSUMER_STAGE_ROLE_ORDER)
+ACTIVE_MULTI_AGENT_ROLES = frozenset(
+    {*LEGACY_MULTI_AGENT_ROLES, *CONSUMER_STAGE_ROLES}
+)
 EXTERNAL_RUNTIME_SOURCE_NAMES = frozenset(
     {
         "math_status_script",
@@ -765,6 +778,92 @@ def validate_mcp_release_contract(
             raise SystemExit("MCP subject launcher policy drift")
 
 
+def _validate_consumer_stage_chain(
+    value: Mapping[str, Any], *, role_names: set[str]
+) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"enabled", "stages", "formal_write_count"}
+        or value.get("enabled") is not True
+        or value.get("formal_write_count") != 0
+    ):
+        raise SystemExit("invalid consumer stage chain")
+    stages = value.get("stages")
+    if not isinstance(stages, list) or len(stages) != len(CONSUMER_STAGE_ROLE_ORDER):
+        raise SystemExit("invalid consumer stage chain stages")
+    if not CONSUMER_STAGE_ROLES.issubset(role_names):
+        raise SystemExit("consumer stage chain roles missing")
+    observed: list[str] = []
+    for expected, row in zip(CONSUMER_STAGE_ROLE_ORDER, stages):
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"stage", "role"}
+            or row.get("stage") != expected
+            or row.get("role") != expected
+        ):
+            raise SystemExit("consumer stage chain role binding invalid")
+        observed.append(str(row["role"]))
+    if set(observed) != CONSUMER_STAGE_ROLES or len(observed) != len(set(observed)):
+        raise SystemExit("consumer stage chain role binding invalid")
+
+
+def _validate_phase3_agent_asset(
+    *, role: str, config_path: Path, policy_path: Path
+) -> None:
+    if (
+        config_path.is_symlink()
+        or not config_path.is_file()
+        or policy_path.is_symlink()
+        or not policy_path.is_file()
+    ):
+        raise SystemExit(f"missing Phase 3 agent asset: {role}")
+    try:
+        agent = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        raise SystemExit(f"invalid Phase 3 agent asset: {role}") from exc
+    if (
+        agent.get("model")
+        != {
+            "terra_analysis": "gpt-5.6-terra",
+            "luna_analysis": "gpt-5.6-luna",
+            "terra_critical_review": "gpt-5.6-terra",
+        }[role]
+        or agent.get("model_reasoning_effort") != "max"
+        or agent.get("sandbox_mode") != "read-only"
+        or agent.get("approval_policy") != "never"
+        or not isinstance(agent.get("agents"), Mapping)
+        or agent["agents"].get("enabled") is not False
+        or not isinstance(agent.get("study_intake"), Mapping)
+        or agent["study_intake"].get("role") != role
+        or agent["study_intake"].get("formal_write_allowed") is not False
+        or agent["study_intake"].get("file_mutation_allowed") is not False
+        or agent["study_intake"].get("shell_allowed") is not False
+    ):
+        raise SystemExit(f"Phase 3 agent config drift: {role}")
+    forbidden_policy_tokens = {
+        "formal_writer",
+        "write_records",
+        "file_mutation",
+        "file_write",
+        "file_delete",
+        "shell",
+        "terminal",
+        "spawn_agent",
+    }
+    if (
+        not isinstance(policy, Mapping)
+        or policy.get("schema_version") != "study-intake-agent-tool-policy-v1"
+        or policy.get("role") != role
+        or policy.get("formal_write_count") != 0
+        or not isinstance(policy.get("allow"), list)
+        or not isinstance(policy.get("deny"), list)
+        or not forbidden_policy_tokens.issubset(set(policy["deny"]))
+        or forbidden_policy_tokens.intersection(policy["allow"])
+    ):
+        raise SystemExit(f"Phase 3 tool policy is not read-only: {role}")
+
+
 def validate_registry_contract(
     registry: dict[str, Any],
     *,
@@ -991,6 +1090,25 @@ def validate_registry_contract(
         or not (ROOT / preflight_policy).is_file()
     ):
         raise SystemExit("invalid Sol MCP preflight tool policy")
+    try:
+        preflight_policy_value = json.loads(
+            (ROOT / preflight_policy).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("invalid Sol MCP preflight tool policy") from exc
+    if (
+        not isinstance(preflight_policy_value, Mapping)
+        or preflight_policy_value.get("purpose") != "infrastructure_preflight"
+        or preflight_policy_value.get("write_tools_allowed") is not False
+        or preflight_policy_value.get("candidate_eligible") is not False
+        or preflight_policy_value.get("production_evidence") is not False
+        or preflight_policy_value.get("formal_write_allowed") is not False
+        or any(
+            token in set(preflight_policy_value.get("enabled_tools") or [])
+            for token in {"formal_writer", "write_records", "file_mutation"}
+        )
+    ):
+        raise SystemExit("Sol MCP preflight cannot be a writer")
     legacy_server_names = mcp.get("legacy_server_names")
     if (
         not isinstance(legacy_server_names, list)
@@ -1066,11 +1184,22 @@ def validate_registry_contract(
         "orchestrator": ("gpt-5.6-terra", "ultra", True, False),
         "reader": ("gpt-5.6-luna", "max", False, False),
         "critical_reviewer": ("gpt-5.6-terra", "ultra", False, True),
+        "terra_analysis": ("gpt-5.6-terra", "max", False, True),
+        "luna_analysis": ("gpt-5.6-luna", "max", False, True),
+        "terra_critical_review": ("gpt-5.6-terra", "max", False, True),
     }
     roles = multi_agent.get("roles")
-    if not isinstance(roles, dict) or set(roles) != set(expected_roles):
+    if (
+        not isinstance(roles, dict)
+        or set(roles) not in (
+            set(LEGACY_MULTI_AGENT_ROLES),
+            set(CONSUMER_STAGE_ROLES),
+            set(ACTIVE_MULTI_AGENT_ROLES),
+        )
+    ):
         raise SystemExit("invalid multi-agent role registry")
-    for role, (model, effort, agents_enabled, fresh_context) in expected_roles.items():
+    for role in roles:
+        model, effort, agents_enabled, fresh_context = expected_roles[role]
         value = roles.get(role)
         expected_keys = {
             "model", "reasoning_effort", "agents_enabled",
@@ -1078,6 +1207,8 @@ def validate_registry_contract(
         }
         if fresh_context:
             expected_keys.add("fresh_context")
+        if role in CONSUMER_STAGE_ROLES:
+            expected_keys.add("sandbox_mode")
         if (
             not isinstance(value, dict)
             or set(value) != expected_keys
@@ -1097,6 +1228,17 @@ def validate_registry_contract(
                 or not asset.is_file()
             ):
                 raise SystemExit(f"missing multi-agent asset: {role}:{field}")
+        if role in CONSUMER_STAGE_ROLES:
+            if value.get("sandbox_mode") != "read-only":
+                raise SystemExit(f"Phase 3 role sandbox is not read-only: {role}")
+            _validate_phase3_agent_asset(
+                role=role,
+                config_path=ROOT / str(value["agent_config"]),
+                policy_path=ROOT / str(value["tool_policy"]),
+            )
+    chain = multi_agent.get("consumer_stage_chain")
+    if chain is not None:
+        _validate_consumer_stage_chain(chain, role_names=set(roles))
     fixture_contracts = registry.get("fixture_contracts")
     if (
         not isinstance(fixture_contracts, dict)

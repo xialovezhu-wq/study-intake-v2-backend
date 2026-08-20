@@ -202,7 +202,52 @@
         "fresh_context": true,
         "agent_config": "agents/terra-critical-reviewer.toml",
         "tool_policy": "agents/terra-critical-reviewer-tool-policy.json"
+      },
+      "terra_analysis": {
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "max",
+        "agents_enabled": false,
+        "fresh_context": true,
+        "sandbox_mode": "read-only",
+        "agent_config": "agents/terra-analysis.toml",
+        "tool_policy": "agents/terra-analysis-tool-policy.json"
+      },
+      "luna_analysis": {
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "max",
+        "agents_enabled": false,
+        "fresh_context": true,
+        "sandbox_mode": "read-only",
+        "agent_config": "agents/luna-analysis.toml",
+        "tool_policy": "agents/luna-analysis-tool-policy.json"
+      },
+      "terra_critical_review": {
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "max",
+        "agents_enabled": false,
+        "fresh_context": true,
+        "sandbox_mode": "read-only",
+        "agent_config": "agents/terra-critical-review.toml",
+        "tool_policy": "agents/terra-critical-review-tool-policy.json"
       }
+    },
+    "consumer_stage_chain": {
+      "enabled": true,
+      "stages": [
+        {
+          "stage": "terra_analysis",
+          "role": "terra_analysis"
+        },
+        {
+          "stage": "luna_analysis",
+          "role": "luna_analysis"
+        },
+        {
+          "stage": "terra_critical_review",
+          "role": "terra_critical_review"
+        }
+      ],
+      "formal_write_count": 0
     },
     "logical_branch_limit": null,
     "physical_concurrency_mode": "dynamic",

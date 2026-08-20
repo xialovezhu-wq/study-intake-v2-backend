@@ -195,6 +195,51 @@ REQUIRED_MODEL_CONTRACT = {
                 "plugin/kaoyan-study-intake/agents/terra-critical-reviewer-tool-policy.json"
             ),
         },
+        "terra_analysis": {
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "max",
+            "agents_enabled": False,
+            "fresh_context": True,
+            "sandbox_mode": "read-only",
+            "agent_config": "plugin/kaoyan-study-intake/agents/terra-analysis.toml",
+            "agent_config_sha256": _release_asset_sha256(
+                "plugin/kaoyan-study-intake/agents/terra-analysis.toml"
+            ),
+            "tool_policy": "plugin/kaoyan-study-intake/agents/terra-analysis-tool-policy.json",
+            "tool_policy_sha256": _release_asset_sha256(
+                "plugin/kaoyan-study-intake/agents/terra-analysis-tool-policy.json"
+            ),
+        },
+        "luna_analysis": {
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+            "agents_enabled": False,
+            "fresh_context": True,
+            "sandbox_mode": "read-only",
+            "agent_config": "plugin/kaoyan-study-intake/agents/luna-analysis.toml",
+            "agent_config_sha256": _release_asset_sha256(
+                "plugin/kaoyan-study-intake/agents/luna-analysis.toml"
+            ),
+            "tool_policy": "plugin/kaoyan-study-intake/agents/luna-analysis-tool-policy.json",
+            "tool_policy_sha256": _release_asset_sha256(
+                "plugin/kaoyan-study-intake/agents/luna-analysis-tool-policy.json"
+            ),
+        },
+        "terra_critical_review": {
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "max",
+            "agents_enabled": False,
+            "fresh_context": True,
+            "sandbox_mode": "read-only",
+            "agent_config": "plugin/kaoyan-study-intake/agents/terra-critical-review.toml",
+            "agent_config_sha256": _release_asset_sha256(
+                "plugin/kaoyan-study-intake/agents/terra-critical-review.toml"
+            ),
+            "tool_policy": "plugin/kaoyan-study-intake/agents/terra-critical-review-tool-policy.json",
+            "tool_policy_sha256": _release_asset_sha256(
+                "plugin/kaoyan-study-intake/agents/terra-critical-review-tool-policy.json"
+            ),
+        },
     },
     "orchestrate_skill": {
         "id": "multi-agent-read-orchestrate",
@@ -210,6 +255,12 @@ REQUIRED_MODEL_CONTRACT = {
     "drop_policy": "never",
     "formal_write_count": 0,
 }
+CONSUMER_STAGE_ROLE_ORDER = (
+    "terra_analysis",
+    "luna_analysis",
+    "terra_critical_review",
+)
+CONSUMER_STAGE_ROLE_NAMES = frozenset(CONSUMER_STAGE_ROLE_ORDER)
 HISTORICAL_PRIORITY_MODEL_CONTRACT = {
     "model": "gpt-5.6-luna",
     "reasoning_effort": "max",
@@ -2967,6 +3018,39 @@ def _verify_target_external_status_script_contract(
         raise ReleaseError(invalid)
 
 
+def _validate_consumer_stage_chain_config(
+    config: Mapping[str, Any], *, available_roles: set[str]
+) -> None:
+    """Validate the optional Phase 3 chain while retaining old config support."""
+
+    chain = config.get("consumer_stage_chain")
+    if chain is None:
+        return
+    if (
+        not isinstance(chain, Mapping)
+        or set(chain) != {"enabled", "stages", "formal_write_count"}
+        or chain.get("enabled") is not True
+        or chain.get("formal_write_count") != 0
+        or not CONSUMER_STAGE_ROLE_NAMES.issubset(available_roles)
+    ):
+        raise ReleaseError("release_consumer_stage_chain_invalid")
+    stages = chain.get("stages")
+    if not isinstance(stages, list) or len(stages) != len(CONSUMER_STAGE_ROLE_ORDER):
+        raise ReleaseError("release_consumer_stage_chain_invalid")
+    observed: list[str] = []
+    for expected, row in zip(CONSUMER_STAGE_ROLE_ORDER, stages):
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"stage", "role"}
+            or row.get("stage") != expected
+            or row.get("role") != expected
+        ):
+            raise ReleaseError("release_consumer_stage_chain_invalid")
+        observed.append(str(row["role"]))
+    if set(observed) != CONSUMER_STAGE_ROLE_NAMES or len(observed) != len(set(observed)):
+        raise ReleaseError("release_consumer_stage_chain_invalid")
+
+
 def _validate_target_release_config(
     config: Mapping[str, Any],
     *,
@@ -3037,9 +3121,23 @@ def _validate_target_release_config(
                         or supplied.get("fresh_context") is not True
                     )
                 )
+                or (
+                    role in CONSUMER_STAGE_ROLE_NAMES
+                    and (
+                        supplied.get("sandbox_mode") != "read-only"
+                        or supplied.get("fresh_context") is not True
+                    )
+                )
             ):
                 role_config_valid = False
                 break
+        if role_config_valid:
+            try:
+                _validate_consumer_stage_chain_config(
+                    config, available_roles=set(models)
+                )
+            except ReleaseError:
+                role_config_valid = False
     if (
         not isinstance(model, Mapping)
         or not _model_contract_config_matches(model, target_model_contract)

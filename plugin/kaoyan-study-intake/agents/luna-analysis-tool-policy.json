@@ -1,0 +1,7 @@
+{
+  "schema_version": "study-intake-agent-tool-policy-v1",
+  "role": "luna_analysis",
+  "allow": ["get_task_context", "read_task_artifact", "read_plan", "read_bundle", "read_candidate", "read_receipt", "list_records", "get_records", "search_records", "query_relations"],
+  "deny": ["subject_database_write", "formal_writer", "write_records", "file_mutation", "file_write", "file_delete", "spawn_agent", "shell", "terminal", "web", "sql", "arbitrary_path"],
+  "formal_write_count": 0
+}
