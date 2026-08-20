@@ -48,15 +48,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dashboard/tests -p 'test_*.py'
 ```
 
-The four blocking historical tests require an explicit, content-addressed,
-read-only external test-input manifest. Missing or drifting inputs fail instead
-of skipping:
+The default suite uses repository-owned synthetic builders for historical
+replay shapes and never depends on a user fixture root. An exact historical
+evidence lane, when separately authorized, must still use an explicit,
+content-addressed, read-only manifest; it is not part of default discovery and
+must never be substituted with mutable local files.
 
-```sh
-STUDY_PREPROCESSOR_HISTORICAL_TEST_INPUT_MANIFEST=/absolute/path/sha256.json \
-  python3 -m unittest \
-  tests.test_math_shadow_backaudit.RealAugustFourthBackauditTests
-```
+No default test command consumes that external manifest. A dedicated evidence
+lane must name both its test target and manifest explicitly.
 
 ## Immutable release workflow
 
@@ -72,6 +71,16 @@ The current target contract is
 `fast_mode_effective=not_requested`. Historical priority releases and the
 pre-plugin no-tier release remain byte-for-byte reopenable for explicit
 rollback, but cannot pass a target build or activation gate.
+
+The Phase 3 successor contract is independently versioned as
+`study-intake-consumer-stage-chain-v1`. It binds durable Capture, Terra Max
+analysis, Luna Max analysis, Terra Max critical review, and a lease-bound Sol
+formal commit. All model stages are read-only with agents and mutation tools
+disabled. The role assets, single successor schema, zero-model executor, and
+hash/receipt validators are source-complete. The live driver is deliberately
+fail-closed with `consumer_stage_chain_live_driver_not_integrated`; a release
+must not fall back to the historical Luna/Luna path when live authorization is
+requested. This state is contract-ready, not production-ready.
 
 Build and verify the default `concurrent_v2` profile without changing the active
 runtime or LaunchAgents. A non-skipped build requires the formal-surface guard:
