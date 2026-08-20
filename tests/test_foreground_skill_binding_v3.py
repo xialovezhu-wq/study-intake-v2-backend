@@ -34,23 +34,158 @@ class CandidateFixture:
     input_fingerprint: str
 
 
+_SUBJECT_FIXTURE_LAYOUT = {
+    "math": {
+        "canonical_root": "kaoyan-math",
+        "descriptor": Path(
+            "数学一回滚复习系统/schema/producer-binding-v1.json"
+        ),
+        "helper": Path(
+            "数学一回滚复习系统/scripts/producer_binding_attestation.py"
+        ),
+        "producer": (
+            Path("数学一回滚复习系统/scripts/quick_intake.py"),
+            Path("数学一回滚复习系统/scripts/producer_binding_attestation.py"),
+        ),
+        "skill": Path(
+            "codex-skill-sources/kaoyan-math-wrong-intake/SKILL.md"
+        ),
+        "attestation_root": "数学一回滚复习系统/快速入库绑定证明",
+    },
+    "cs408": {
+        "canonical_root": "kaoyan-408",
+        "descriptor": Path("schema/producer-binding-v1.json"),
+        "helper": Path("scripts/producer_binding_attestation_408.py"),
+        "producer": (
+            Path("scripts/intake_fact_capture_408.py"),
+            Path("scripts/producer_binding_attestation_408.py"),
+        ),
+        "skill": Path("codex-skill-sources/kaoyan-408-wrong-intake/SKILL.md"),
+        "attestation_root": ".producer-binding-attestations",
+    },
+    "english": {
+        "canonical_root": "kaoyan-english",
+        "descriptor": Path("schema/english_pipeline/producer-binding-v1.json"),
+        "helper": Path("english_pipeline/producer_binding_attestation.py"),
+        "producer": (
+            Path("english_pipeline/events.py"),
+            Path("english_pipeline/producer_binding_attestation.py"),
+        ),
+        "skill": Path(
+            "codex-skill-sources/kaoyan-english-intensive-reading/SKILL.md"
+        ),
+        "attestation_root": "producer-attestations",
+    },
+}
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _copy_canonical_or_synthetic(
+    source: Path, destination: Path, *, label: str
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_file():
+        shutil.copy2(source, destination)
+    elif destination.suffix == ".json":
+        destination.write_text('{"synthetic": true}\n', encoding="utf-8")
+    else:
+        destination.write_text(f"# synthetic canonical fixture: {label}\n", encoding="utf-8")
+
+
+def _build_subject_fixture(base: Path, subject: str, label: str) -> dict[str, Path]:
+    layout = _SUBJECT_FIXTURE_LAYOUT[subject]
+    root = (base / label / subject).resolve()
+    canonical_root = ROOT.parent / str(layout["canonical_root"])
+
+    producer_paths: list[Path] = []
+    for relative in layout["producer"]:  # type: ignore[union-attr]
+        destination = root / relative
+        _copy_canonical_or_synthetic(
+            canonical_root / relative,
+            destination,
+            label=f"{subject}:{relative}",
+        )
+        producer_paths.append(destination)
+
+    authoritative = root / "skills/authoritative/SKILL.md"
+    installed = root / "skills/installed/SKILL.md"
+    skill_relative = layout["skill"]  # type: ignore[assignment]
+    _copy_canonical_or_synthetic(
+        canonical_root / skill_relative,
+        authoritative,
+        label=f"{subject}:authoritative-skill",
+    )
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(authoritative, installed)
+
+    contract = root / "contracts/capture-contract.json"
+    contract.parent.mkdir(parents=True, exist_ok=True)
+    contract.write_text('{"synthetic": true}\n', encoding="utf-8")
+    contract_rows = [{"path": str(contract), "sha256": _sha256_file(contract)}]
+    source_rows = [
+        {"path": str(path), "sha256": _sha256_file(path)}
+        for path in producer_paths
+    ]
+    core = {
+        "schema_version": "producer_binding_descriptor_v1",
+        "subject": subject,
+        "attestation_required_after": "2026-08-17T00:00:00+00:00",
+        "foreground_skill": {
+            "authoritative_path": str(authoritative),
+            "authoritative_sha256": _sha256_file(authoritative),
+            "installed_path": str(installed),
+            "installed_sha256": _sha256_file(installed),
+        },
+        "producer": {
+            "source_files": source_rows,
+            "source_closure_sha256": hashlib.sha256(
+                _canonical_bytes(source_rows)
+            ).hexdigest(),
+        },
+        "capture_contract": {
+            "files": contract_rows,
+            "files_sha256": hashlib.sha256(
+                _canonical_bytes(contract_rows)
+            ).hexdigest(),
+        },
+        "attestation_relative_root": str(layout["attestation_root"]),
+        "formal_write_count": 0,
+    }
+    descriptor = root / layout["descriptor"]  # type: ignore[arg-type]
+    descriptor.parent.mkdir(parents=True, exist_ok=True)
+    descriptor.write_bytes(
+        _canonical_bytes(
+            {**core, "descriptor_content_sha256": hashlib.sha256(
+                _canonical_bytes(core)
+            ).hexdigest()}
+        )
+    )
+    return {
+        "root": root,
+        "descriptor": descriptor,
+        "helper": root / layout["helper"],  # type: ignore[arg-type]
+    }
+
+
 class ForegroundSkillBindingV3Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.repo = Path(self.temp.name).resolve() / "math"
-        self.descriptor = (
-            self.repo
-            / "数学一回滚复习系统"
-            / "schema"
-            / "producer-binding-v1.json"
+        self.fixture = _build_subject_fixture(
+            Path(self.temp.name).resolve(), "math", "primary"
         )
-        self.descriptor.parent.mkdir(parents=True)
-        source_descriptor = Path(
-            "/Users/xiazhibin/Documents/kaoyan-math/"
-            "数学一回滚复习系统/schema/producer-binding-v1.json"
-        )
-        shutil.copyfile(source_descriptor, self.descriptor)
+        self.repo = self.fixture["root"]
+        self.descriptor = self.fixture["descriptor"]
         value = json.loads(self.descriptor.read_text(encoding="utf-8"))
         self.binding = {
             "descriptor_path": str(self.descriptor),
@@ -114,10 +249,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
         )
 
     def _publish_sidecar(self) -> Path:
-        module_path = Path(
-            "/Users/xiazhibin/Documents/kaoyan-math/"
-            "数学一回滚复习系统/scripts/producer_binding_attestation.py"
-        )
+        module_path = self.fixture["helper"]
         spec = importlib.util.spec_from_file_location("math_attest_test", module_path)
         assert spec and spec.loader
         module = importlib.util.module_from_spec(spec)
@@ -178,31 +310,13 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "foreground_skill_binding_mismatch")
 
     def test_authoritative_installed_mismatch_fails_for_every_subject(self) -> None:
-        cases = {
-            "math": (
-                Path(
-                    "/Users/xiazhibin/Documents/kaoyan-math/"
-                    "数学一回滚复习系统/schema/producer-binding-v1.json"
-                ),
-                Path("数学一回滚复习系统/schema/producer-binding-v1.json"),
-            ),
-            "cs408": (
-                Path(
-                    "/Users/xiazhibin/Documents/kaoyan-408/"
-                    "schema/producer-binding-v1.json"
-                ),
-                Path("schema/producer-binding-v1.json"),
-            ),
-            "english": (
-                Path(
-                    "/Users/xiazhibin/Documents/kaoyan-english/"
-                    "schema/english_pipeline/producer-binding-v1.json"
-                ),
-                Path("schema/english_pipeline/producer-binding-v1.json"),
-            ),
-        }
-        for index, (subject, (source, relative)) in enumerate(cases.items()):
+        for index, subject in enumerate(("math", "cs408", "english")):
             with self.subTest(subject=subject):
+                source_fixture = _build_subject_fixture(
+                    Path(self.temp.name).resolve(), subject, f"parity-source-{index}"
+                )
+                source = source_fixture["descriptor"]
+                relative = _SUBJECT_FIXTURE_LAYOUT[subject]["descriptor"]
                 repo = Path(self.temp.name).resolve() / f"parity-{index}"
                 descriptor = repo / relative
                 descriptor.parent.mkdir(parents=True)
@@ -350,13 +464,6 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
         cases = [
             {
                 "subject": "cs408",
-                "descriptor_source": Path(
-                    "/Users/xiazhibin/Documents/kaoyan-408/schema/producer-binding-v1.json"
-                ),
-                "descriptor_relative": Path("schema/producer-binding-v1.json"),
-                "helper": Path(
-                    "/Users/xiazhibin/Documents/kaoyan-408/scripts/producer_binding_attestation_408.py"
-                ),
                 "candidate_id": "CAP-20260817-fixture",
                 "unit_id": "CAP-20260817-fixture",
                 "content_hash": "7" * 64,
@@ -369,15 +476,6 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
             },
             {
                 "subject": "english",
-                "descriptor_source": Path(
-                    "/Users/xiazhibin/Documents/kaoyan-english/schema/english_pipeline/producer-binding-v1.json"
-                ),
-                "descriptor_relative": Path(
-                    "schema/english_pipeline/producer-binding-v1.json"
-                ),
-                "helper": Path(
-                    "/Users/xiazhibin/Documents/kaoyan-english/english_pipeline/producer_binding_attestation.py"
-                ),
                 "candidate_id": "EN-20260817-fixture",
                 "unit_id": "EVT-20260817-FIXTURE",
                 "content_hash": "8" * 64,
@@ -400,10 +498,20 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
         ]
         for index, case in enumerate(cases):
             with self.subTest(subject=case["subject"]):
+                fixture = _build_subject_fixture(
+                    Path(self.temp.name).resolve(),
+                    case["subject"],
+                    f"scanner-{index}",
+                )
+                source_descriptor = fixture["descriptor"]
+                helper = fixture["helper"]
                 repo = Path(self.temp.name).resolve() / f"repo-{index}"
-                descriptor = repo / case["descriptor_relative"]
+                descriptor_relative = _SUBJECT_FIXTURE_LAYOUT[case["subject"]][
+                    "descriptor"
+                ]
+                descriptor = repo / descriptor_relative
                 descriptor.parent.mkdir(parents=True)
-                shutil.copyfile(case["descriptor_source"], descriptor)
+                shutil.copyfile(source_descriptor, descriptor)
                 descriptor_value = json.loads(
                     descriptor.read_text(encoding="utf-8")
                 )
@@ -468,7 +576,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 spec = importlib.util.spec_from_file_location(
-                    f"attestation_{index}", case["helper"]
+                    f"attestation_{index}", helper
                 )
                 assert spec and spec.loader
                 module = importlib.util.module_from_spec(spec)

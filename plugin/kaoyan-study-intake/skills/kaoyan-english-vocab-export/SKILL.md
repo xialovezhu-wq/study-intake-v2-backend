@@ -74,7 +74,7 @@ Do not treat article completion as permission for formal curation. Only the exac
 
 1. Confirm article-end or stage-end export intent.
 2. Resolve the active source from an explicit path, title, year/Text, recent verified context or user-provided filename.
-3. Read references/article-completion-contract.md. Call `python3 /Users/xiazhibin/Documents/kaoyan-english/scripts/english_learning_pipeline.py complete-article` with the canonical state directory, stable article ID and a stable idempotency key. Parse the JSON receipt before claiming completion.
+3. Read references/article-completion-contract.md. Call `python3 -m english_pipeline.cli complete-article --state-dir <state-dir>` with the canonical state directory, stable article ID and a stable idempotency key. Parse the JSON receipt before claiming completion.
 4. Use the returned effective capture snapshot plus verified article evidence to build the foreground A/B/C output immediately. Do not invoke, poll or wait for Luna; Luna candidates are for the later dated curation flow.
 5. Read mastered_items first and exclude matches from A/B/C.
 6. Read master_bank and classify each remaining candidate as new, existing, duplicate-like or needs checking.

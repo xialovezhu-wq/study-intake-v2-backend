@@ -33,9 +33,9 @@ from math_live_business_fixture import (  # noqa: E402
 SPEC_SCHEMA = "study-intake-controlled-replay-spec-v1"
 EXTERNAL_SCHEMA = "study-intake-controlled-replay-math-capture-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-DEFAULT_MATH_SOURCE_ROOT = Path("/Users/xiazhibin/Documents/kaoyan-math")
+DEFAULT_MATH_SOURCE_ROOT = Path(f"{Path.home()}/Documents/kaoyan-math")
 DEFAULT_MATH_BUSINESS_MANIFEST = Path(
-    "/Users/xiazhibin/Documents/kaoyan-math-live-capture/2026-08-09/"
+    f"{Path.home()}/Documents/kaoyan-math-live-capture/2026-08-09/"
     "luna-real-business-samples.json"
 )
 EXPECTED_DAILY_ROLES = {

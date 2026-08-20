@@ -20,10 +20,10 @@ from typing import Any, Callable, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLUGIN_ROOT = ROOT / "plugin/kaoyan-study-intake"
 DEFAULT_MCP_RELEASES_ROOT = Path(
-    "/Users/xiazhibin/.codex/local-study-read-mcp/releases"
+    f"{Path.home()}/.codex/local-study-read-mcp/releases"
 )
 DEFAULT_MCP_PYTHON = Path(
-    "/Users/xiazhibin/Documents/Codex/local-study-read-mcp/.venv/bin/python"
+    f"{Path.home()}/Documents/Codex/local-study-read-mcp/.venv/bin/python"
 )
 DEFAULT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")

@@ -8,18 +8,33 @@ from unittest import mock
 from pathlib import Path
 
 from scripts import pre_model_p0_gate as gate
+from tests.synthetic_p0_fixture import (
+    SyntheticP0Fixture,
+    build_synthetic_p0_fixture,
+)
 
 
-AUDIT_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-interface-audit-20260809"
-)
-ARTIFACT_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-model-lane-staging-20260809/artifacts/pre-model-gate"
-)
-MATRIX = ARTIFACT_ROOT / "p0-matrix.json"
-GOLDEN = ARTIFACT_ROOT / "zero-model-golden-inventory.json"
+AUDIT_ROOT: Path
+ARTIFACT_ROOT: Path
+MATRIX: Path
+GOLDEN: Path
+_P0_FIXTURE: SyntheticP0Fixture | None = None
+
+
+def setUpModule() -> None:
+    global AUDIT_ROOT, ARTIFACT_ROOT, MATRIX, GOLDEN, _P0_FIXTURE
+    _P0_FIXTURE = build_synthetic_p0_fixture()
+    AUDIT_ROOT = _P0_FIXTURE.audit_root
+    ARTIFACT_ROOT = _P0_FIXTURE.artifact_root
+    MATRIX = _P0_FIXTURE.matrix_path
+    GOLDEN = _P0_FIXTURE.golden_path
+
+
+def tearDownModule() -> None:
+    global _P0_FIXTURE
+    if _P0_FIXTURE is not None:
+        _P0_FIXTURE.cleanup()
+        _P0_FIXTURE = None
 
 
 class PreModelP0GateTests(unittest.TestCase):

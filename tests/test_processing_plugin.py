@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,10 +17,71 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
 from processing_plugin import ProcessingPluginError, ProcessingPluginHost  # noqa: E402
+from tests.portable_plugin_fixture import build_portable_plugin_fixture
 
 
 class ProcessingPluginHostTests(unittest.TestCase):
-    RELEASE_ID = "21d738a1d74586aab72c8a63dc62c680aa10c6ac837c2bd5041e757ba0e63425"
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._dependency_temp = tempfile.TemporaryDirectory(
+            prefix="processing-plugin-deps-"
+        )
+        cls.mcp_source = Path(
+            os.environ.get(
+                "STUDY_READ_MCP_SOURCE_ROOT",
+                str(ROOT.parent / "local-study-read-mcp"),
+            )
+        ).resolve()
+        venv_root = Path(cls._dependency_temp.name) / "venv"
+        commands = [
+            [sys.executable, "-m", "venv", str(venv_root)],
+            [
+                str(venv_root / "bin/python"),
+                "-m",
+                "pip",
+                "install",
+                "setuptools==80.9.0",
+            ],
+            [
+                str(venv_root / "bin/python"),
+                "-m",
+                "pip",
+                "install",
+                "--require-hashes",
+                "-r",
+                str(cls.mcp_source / "requirements.lock"),
+            ],
+            [
+                str(venv_root / "bin/python"),
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--no-build-isolation",
+                "-e",
+                str(cls.mcp_source),
+            ],
+        ]
+        for command in commands:
+            completed = subprocess.run(
+                command,
+                cwd=cls.mcp_source,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise AssertionError(
+                    "portable MCP dependency setup failed: "
+                    + completed.stderr
+                )
+        cls.portable_mcp_python = (venv_root / "bin/python").absolute()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._dependency_temp.cleanup()
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="processing-plugin-host-")
@@ -29,77 +91,32 @@ class ProcessingPluginHostTests(unittest.TestCase):
         self.key_path.parent.mkdir(parents=True)
         self.key_path.write_bytes(b"k" * 32)
         self.key_path.chmod(0o600)
-        self.mcp_source_root = Path("/Users/xiazhibin/Documents/Codex/local-study-read-mcp")
-        self.mcp_root = Path("/Users/xiazhibin/.codex/local-study-read-mcp/releases") / self.RELEASE_ID
-        # Keep the shared component lock byte-identical.  Tests bind the
-        # private 3.1.1 English Skill through an ephemeral plugin overlay.
-        plugin_overlay = Path(self.temp.name) / "plugin-overlay/kaoyan-study-intake"
-        shutil.copytree(ROOT / "plugin/kaoyan-study-intake", plugin_overlay)
+        portable = build_portable_plugin_fixture(
+            Path(self.temp.name),
+            ROOT,
+            mcp_python=self.portable_mcp_python,
+        )
+        self.mcp_source_root = portable.mcp_source_root
+        self.mcp_root = portable.mcp_root
+        self.mcp_python = portable.mcp_python
+        self.RELEASE_ID = portable.release_id
+        plugin_overlay = portable.plugin_root
         lock_path = plugin_overlay / "component-lock.json"
-        lock = json.loads(lock_path.read_text(encoding="utf-8"))
-        manifest_path = self.mcp_root / "release.json"
-        launcher_path = self.mcp_root / "scripts/sealed_launcher.py"
-        release_manifest_sha256 = hashlib.sha256(
-            manifest_path.read_bytes()
-        ).hexdigest()
-        sealed_launcher_sha256 = hashlib.sha256(
-            launcher_path.read_bytes()
-        ).hexdigest()
-        lock.update({
-            "registry_sha256": hashlib.sha256(
-                (plugin_overlay / "components.json").read_bytes()
-            ).hexdigest(),
-            "launcher_sha256": hashlib.sha256(
-                (plugin_overlay / "bin/kaoyan-read").read_bytes()
-            ).hexdigest(),
-            "mcp_release_root": str(self.mcp_root),
-            "mcp_release_id": self.RELEASE_ID,
-            "mcp_release_manifest_sha256": release_manifest_sha256,
-            "mcp_server_release": "0.4.1+sha256." + self.RELEASE_ID,
-            "mcp_sealed_runtime": {
-                "python_executable": str(
-                    self.mcp_source_root / ".venv/bin/python"
-                ),
-                "python_flags": ["-I", "-S"],
-                "sealed_launcher_path": str(launcher_path),
-                "sealed_launcher_sha256": sealed_launcher_sha256,
-                "release_root": str(self.mcp_root),
-                "release_id": self.RELEASE_ID,
-                "release_manifest_sha256": release_manifest_sha256,
-            },
-        })
-        english_skill = (
-            plugin_overlay
-            / "skills/background-english-processing/SKILL.md"
-        )
-        lock["skills"]["background-english-processing"] = {
-            "sha256": hashlib.sha256(english_skill.read_bytes()).hexdigest(),
-            "version": "3.1.1",
-        }
-        lock_path.chmod(0o600)
-        lock_path.write_text(
-            json.dumps(
-                lock,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        lock_path.chmod(0o400)
         self.config = {
             "enabled": True,
             "root": str(plugin_overlay),
             "component_lock_path": str(lock_path),
-            "mcp_client_python": str(self.mcp_source_root / ".venv/bin/python"),
+            "mcp_client_python": str(self.mcp_python),
             "mcp_project_root": str(self.mcp_root),
             "authority_key_path": str(self.key_path),
             "profile": "background",
             "timeout_seconds": 5,
         }
         self.host = ProcessingPluginHost(
-            self.config, runtime_root=self.runtime, candidate_release_id="a" * 64
+            self.config,
+            runtime_root=self.runtime,
+            candidate_release_id="a" * 64,
+            subject_roots=portable.subject_roots,
         )
         self.server_release = "0.4.1+sha256." + self.RELEASE_ID
 
@@ -695,7 +712,7 @@ class ProcessingPluginHostTests(unittest.TestCase):
             mode="client",
             arguments=["--profile", "background", "--subject", "math"],
         )
-        self.assertEqual(command[0], str(self.mcp_source_root / ".venv/bin/python"))
+        self.assertEqual(command[0], str(self.mcp_python))
         self.assertEqual(command[1], "-I")
         self.assertEqual(command[2], "-S")
         self.assertEqual(
@@ -712,6 +729,10 @@ class ProcessingPluginHostTests(unittest.TestCase):
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONSAFEPATH": "1",
+                "STUDY_READ_MATH_ROOT": str(self.runtime.resolve()),
+                "STUDY_READ_CS408_ROOT": str(self.runtime.resolve()),
+                "STUDY_READ_ENGLISH_ROOT": str(self.runtime.resolve()),
+                "STUDY_INTAKE_RUNTIME_ROOT": str(self.runtime.resolve()),
             },
         )
 

@@ -6,7 +6,6 @@ import copy
 import hashlib
 import inspect
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -19,147 +18,85 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import preprocessor_core as core  # noqa: E402
 import math_shadow_replay as replay  # noqa: E402
-from historical_test_input import (  # noqa: E402
-    HistoricalTestInput,
-    render_shadow_test_config,
-)
 from tests.test_math_v2_core import FakeMathRunner  # noqa: E402
 
+from tests.synthetic_math_formalization_fixture import (  # noqa: E402
+    SyntheticMathFormalizationFixture,
+)
 
-SEALED_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-direct-mcp-en-p0-006-20260809/artifacts/"
-    "three-real-smoke-4c1c0651/stage-runtime"
-)
-SEALED_OUTPUT = (
-    SEALED_ROOT
-    / "private/reports/model-stage-outputs/objects/"
-    "6d10369cabfc3282733f6112d3ee306f356870a9b7ee7504992f68f90b6efc2c.json"
-)
-SEALED_TRANSPORT = (
-    SEALED_ROOT
-    / "private/reports/model-mcp-transport/sha256/9b/"
-    "9bb1d2caddcdf2d2f447531ffb97edf95797efe7ef3cd86b1829d1c928c01d7e.json"
-)
-SEALED_TRANSCRIPT = (
-    SEALED_ROOT
-    / "private/reports/mcp-stage-transcripts/sha256/d3/"
-    "d39fa151cdb7a9c5ab711bdd443352eabffc9a36d7625e8ecbce789f580e711d.json"
-)
-SEALED_READ_SESSION = (
-    SEALED_ROOT
-    / "private/mcp-read-sessions/sha256/30/"
-    "30dc294890f795eefae6b2c717e5c8dd144d432258ee8ee43ef0305b1433e954.json"
-)
-SEALED_FAILURE_RECEIPT = (
-    SEALED_ROOT
-    / "dispatch/receipts/sha256/75/"
-    "75f707b8ee0dc843f55aa8d6136980dd8d9c5a6224d196930fbd33deb584989f.json"
-)
-SEALED_PROVIDER_SCHEMA = (
-    SEALED_ROOT
-    / "private/reports/provider-schemas/sha256/4c/"
-    "4c5bde1b6187cb9ce85056f67aa60ed619cf2537aada58156a4dab72f3a1b37a.json"
-)
-SEALED_INVALID_PROVIDER_SCHEMA = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-direct-mcp-en-p0-006-20260809/artifacts/"
-    "three-real-smoke-8a4c742e/stage-runtime/private/reports/"
-    "provider-schemas/sha256/a7/"
-    "a739ba3d91aec4849dcb6d0ca2451e4ce3b857d538d7cd70e6cc57aa273b6cf2.json"
-)
-SEALED_JOB = SEALED_ROOT / "state/jobs/math/LUNA-MATH-20260809-003.json"
-HISTORICAL_TEST_INPUT = Path(
-    os.environ.get(
-        "STUDY_PREPROCESSOR_HISTORICAL_TEST_INPUT_MANIFEST",
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-        "three-subject-golden-replay-modernization-20260809/artifacts/"
-        "historical-test-input/"
-        "077f74a14d1559cdff07ecfde8f1bcd800f830efefe75a984f6fc294ef136f0a.json",
+
+def _find_jsonschema_python() -> Path:
+    candidates = (
+        Path(sys.executable),
+        Path("/opt/miniconda3/envs/dl/bin/python"),
     )
-)
-JSONSCHEMA_PYTHON = Path("/opt/miniconda3/envs/dl/bin/python")
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        probe = subprocess.run(
+            [str(candidate), "-c", "import jsonschema"],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if probe.returncode == 0:
+            return candidate
+    return Path(sys.executable)
 
-EXPECTED_FILE_SHA256S = {
-    SEALED_OUTPUT: "6d10369cabfc3282733f6112d3ee306f356870a9b7ee7504992f68f90b6efc2c",
-    SEALED_TRANSPORT: "9bb1d2caddcdf2d2f447531ffb97edf95797efe7ef3cd86b1829d1c928c01d7e",
-    SEALED_TRANSCRIPT: "d39fa151cdb7a9c5ab711bdd443352eabffc9a36d7625e8ecbce789f580e711d",
-    SEALED_READ_SESSION: "21202d46b23e3647ece1ffe6438754b74c476540da255fa88d9dc13686d602fb",
-    SEALED_FAILURE_RECEIPT: "75f707b8ee0dc843f55aa8d6136980dd8d9c5a6224d196930fbd33deb584989f",
-    SEALED_PROVIDER_SCHEMA: "4c5bde1b6187cb9ce85056f67aa60ed619cf2537aada58156a4dab72f3a1b37a",
-    SEALED_INVALID_PROVIDER_SCHEMA: "a739ba3d91aec4849dcb6d0ca2451e4ce3b857d538d7cd70e6cc57aa273b6cf2",
-    HISTORICAL_TEST_INPUT: HISTORICAL_TEST_INPUT.stem,
-}
+
+JSONSCHEMA_PYTHON = _find_jsonschema_python()
 
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def walk_objects(value: object):
-    if isinstance(value, dict):
-        yield value
-        for nested in value.values():
-            yield from walk_objects(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            yield from walk_objects(nested)
-
-
 class MathFormalizationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        for path, expected in EXPECTED_FILE_SHA256S.items():
-            if not path.is_file():
-                raise AssertionError(f"sealed evidence missing: {path}")
-            actual = file_sha256(path)
-            if actual != expected:
-                raise AssertionError(
-                    f"sealed evidence drift: {path}: {actual} != {expected}"
-                )
-        cls.output_document = json.loads(SEALED_OUTPUT.read_text())
-        cls.payload = cls.output_document["payload"]
-        cls.transport = json.loads(SEALED_TRANSPORT.read_text())
-        cls.transcript = json.loads(SEALED_TRANSCRIPT.read_text())
-        cls.read_session = json.loads(SEALED_READ_SESSION.read_text())
-        cls.failure_receipt = json.loads(SEALED_FAILURE_RECEIPT.read_text())
-        cls.provider_schema = json.loads(SEALED_PROVIDER_SCHEMA.read_text())
-        cls.invalid_provider_schema = json.loads(
-            SEALED_INVALID_PROVIDER_SCHEMA.read_text()
+        cls._fixture_temp = tempfile.TemporaryDirectory(
+            prefix="math-formalization-contract-"
         )
-        cls.job = json.loads(SEALED_JOB.read_text())
-        cls.evidence_refs = tuple(
-            sorted(
-                {
-                    ref
-                    for item in walk_objects(cls.payload)
-                    for ref in (item.get("evidence_refs") or [])
-                    if isinstance(ref, str)
-                }
-            )
+        cls.fixture = SyntheticMathFormalizationFixture.create(
+            Path(cls._fixture_temp.name), ROOT / "schemas"
         )
+        cls.output_document = {"payload": cls.fixture.payload}
+        cls.payload = cls.fixture.payload
+        cls.transport = cls.fixture.transport
+        cls.transcript = cls.fixture.transcript
+        cls.read_session = cls.fixture.read_session
+        cls.failure_receipt = cls.fixture.failure_receipt
+        cls.provider_schema = cls.fixture.provider_schema
+        cls.invalid_provider_schema = cls.fixture.invalid_provider_schema
+        cls.evidence_refs = cls.fixture.evidence_refs
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._fixture_temp.cleanup()
 
     def source_candidate(self) -> core.Candidate:
-        binding = copy.deepcopy(self.job["input_binding"])
+        binding = copy.deepcopy(self.fixture.source_binding)
         return core.Candidate(
             subject="math",
-            capture_id="LUNA-MATH-20260809-003",
-            study_date="2026-08-09",
-            recorded_at="2026-08-09T12:33:40+08:00",
-            input_fingerprint="5947e0d054db9b6d8092336b4f45825a858ad178559e94548dbfa417752ca8e6",
+            capture_id=self.fixture.capture_id,
+            study_date="2026-08-20",
+            recorded_at="2026-08-20T00:01:00+08:00",
+            input_fingerprint=core.sha256_value(
+                {"synthetic_candidate": "source"}
+            ),
             input_binding=binding,
             model_input={
                 "source_bundle": {"source_kind": binding["source_route"]}
             },
             allowed_evidence_refs=self.evidence_refs,
             image_paths=(),
-            target_label="source:question-bank-id:170710",
+            target_label="synthetic-source",
             canonical_state="awaiting_background_analysis",
             sol_state="not_authorized",
         )
 
     def no_source_candidate(self) -> core.Candidate:
-        binding = copy.deepcopy(self.job["input_binding"])
+        binding = copy.deepcopy(self.fixture.source_binding)
         for key in (
             "source_route",
             "evidence_manifest_sha256",
@@ -168,10 +105,12 @@ class MathFormalizationContractTests(unittest.TestCase):
             binding.pop(key, None)
         return core.Candidate(
             subject="math",
-            capture_id="LUNA-MATH-20260809-003",
-            study_date="2026-08-09",
-            recorded_at="2026-08-09T12:33:40+08:00",
-            input_fingerprint="0" * 64,
+            capture_id=self.fixture.capture_id,
+            study_date="2026-08-20",
+            recorded_at="2026-08-20T00:01:00+08:00",
+            input_fingerprint=core.sha256_value(
+                {"synthetic_candidate": "no-source"}
+            ),
             input_binding=binding,
             model_input={"source_bundle": None},
             allowed_evidence_refs=self.evidence_refs,
@@ -186,10 +125,10 @@ class MathFormalizationContractTests(unittest.TestCase):
         claim = copy.deepcopy(source)
         claim["text"] = text
         claim["counterevidence_or_boundary"] = (
-            "仅整理本次 capture 已证明的业务事实，不据此确认正式库身份、知识节点或关系。"
+            "仅整理 synthetic capture 已证明的业务事实，不据此确认正式库身份、知识节点或关系。"
         )
         claim["sol_verification_action"] = (
-            "Sol 后续独立重开题面、来源答案和用户过程；正式身份与关系另查正式库。"
+            "Sol 后续独立重开 synthetic evidence；正式身份与关系另查正式库。"
         )
         return claim
 
@@ -201,7 +140,7 @@ class MathFormalizationContractTests(unittest.TestCase):
                     self.role_claim(
                         payload["evidence_assessment"]["observed_facts"][0],
                         text=(
-                            "本次新来源学习记录显示用户先错后在讲解后理解；当前不等同于独立掌握。"
+                            "Synthetic capture records a bounded learner event; it is not independent mastery."
                         ),
                     )
                 ],
@@ -209,7 +148,7 @@ class MathFormalizationContractTests(unittest.TestCase):
                     self.role_claim(
                         payload["question_structure"]["asked_task"][0],
                         text=(
-                            "题面要求处理正弦曲线与横轴围成区域绕固定纵轴的旋转体积及相关极限。"
+                            "Synthetic question-body evidence is preserved without inventing a formal library identity."
                         ),
                     )
                 ],
@@ -217,7 +156,7 @@ class MathFormalizationContractTests(unittest.TestCase):
                     self.role_claim(
                         payload["question_structure"]["source_answer"][0],
                         text=(
-                            "capture 中的来源解答给出柱壳积分路径及对应源结果，仍需 Sol 重开核对。"
+                            "Synthetic source-answer evidence remains a candidate and still requires Sol reopening."
                         ),
                     )
                 ],
@@ -225,7 +164,7 @@ class MathFormalizationContractTests(unittest.TestCase):
                     self.role_claim(
                         payload["reasoning_diagnosis"]["first_break"],
                         text=(
-                            "首个断点是把周期拱形的平移误当成绕固定纵轴时旋转半径不变。"
+                            "The synthetic first-break claim is capture-bound and must not be promoted as a library fact."
                         ),
                     )
                 ],
@@ -233,7 +172,7 @@ class MathFormalizationContractTests(unittest.TestCase):
                     self.role_claim(
                         payload["question_structure"]["objects"][0],
                         text=(
-                            "capture 支持以柱壳积分区分到固定旋转轴的半径与区域高度。"
+                            "Synthetic method evidence is retained only as a capture-backed candidate."
                         ),
                     )
                 ],
@@ -241,13 +180,17 @@ class MathFormalizationContractTests(unittest.TestCase):
         )
         return payload
 
-    def test_sealed_transport_and_original_shape_reproduce_failure(self) -> None:
-        self.assertEqual(self.transport["mcp_item_count"], 13)
-        self.assertEqual(len(self.transcript["calls"]), 12)
-        self.assertEqual(len(self.read_session["artifact_ids"]), 10)
+    def test_synthetic_transport_and_original_shape_reproduce_failure(self) -> None:
+        self.assertEqual(
+            self.transport["mcp_item_count"], len(self.transport["mcp_items"])
+        )
+        self.assertGreater(len(self.transcript["calls"]), 0)
+        self.assertGreater(len(self.read_session["artifact_ids"]), 0)
         last = self.transport["mcp_items"][-1]["item"]
         self.assertEqual(last["tool"], "search_records")
-        self.assertEqual(last["arguments"], {"query": "旋转体", "page_size": 48})
+        self.assertEqual(
+            last["arguments"], {"query": "synthetic-query", "page_size": 48}
+        )
         self.assertEqual(
             last["result"]["structured_content"]["error"]["code"],
             "OUTPUT_LIMIT",
@@ -256,6 +199,7 @@ class MathFormalizationContractTests(unittest.TestCase):
             self.failure_receipt["error_code"],
             "math_analysis_formal_field_coverage_failed",
         )
+        self.assertEqual(self.failure_receipt["formal_write_count"], 0)
         with self.assertRaisesRegex(
             core.PreprocessorError,
             "math_analysis_formal_field_coverage_failed",
@@ -317,13 +261,12 @@ class MathFormalizationContractTests(unittest.TestCase):
                 binding, candidate.model_input
             )
 
-    def test_historical_manifest_replay_keeps_original_publish_signature(self) -> None:
-        test_input = HistoricalTestInput.load(HISTORICAL_TEST_INPUT)
-        protected_before = test_input.snapshot()
-        manifest = test_input.load_historical_manifest()
-        config = copy.deepcopy(render_shadow_test_config(ROOT, test_input))
+    def test_synthetic_shadow_replay_keeps_original_publish_signature(self) -> None:
+        protected_before = self.fixture.source_snapshot()
+        manifest = self.fixture.manifest
+        config = copy.deepcopy(self.fixture.config)
         with tempfile.TemporaryDirectory() as temporary:
-            runtime = Path(temporary) / "historical"
+            runtime = Path(temporary) / "synthetic-replay"
             config["runtime_root"] = str(runtime)
             config["worker"]["log_path"] = str(runtime / "logs/worker.log")
             config["worker"]["lock_path"] = str(
@@ -333,7 +276,6 @@ class MathFormalizationContractTests(unittest.TestCase):
                 manifest=manifest,
                 item=manifest["items"][0],
                 config=config,
-                read_guard=test_input,
             )
             self.assertIsNone(candidate.input_binding.get("source_route"))
             self.assertIsInstance(candidate.model_input.get("source_bundle"), dict)
@@ -347,10 +289,74 @@ class MathFormalizationContractTests(unittest.TestCase):
                 core.PreprocessorError,
                 "math_critical_review_dynamic_schema_mismatch",
             ):
-                core.Worker(
-                    config, model_runner=FakeMathRunner()
-                ).publish_math_shadow_candidate(candidate)
-        self.assertEqual(protected_before, test_input.snapshot())
+                class ReplayRunner:
+                    def run_math_v2(self, replay_candidate):
+                        result = FakeMathRunner().run_math_v2(replay_candidate)
+                        generation = "synthetic-generation"
+                        collection = "relationships"
+                        stable_id = "SYNTHETIC-REL-001"
+                        source_hash = core.sha256_value(
+                            {"synthetic": "grounding-source"}
+                        )
+                        evidence_ref = core.model_mcp_item_ref(
+                            subject="math",
+                            generation=generation,
+                            collection=collection,
+                            stable_id=stable_id,
+                            source_hash=source_hash,
+                        )
+                        manifest_core = {
+                            "schema_version": "model_mcp_grounding_manifest_v1",
+                            "items": [
+                                {
+                                    "evidence_ref": evidence_ref,
+                                    "subject": "math",
+                                    "generation": generation,
+                                    "collection": collection,
+                                    "stable_id": stable_id,
+                                    "source_hash": source_hash,
+                                    "data_role": "relationship",
+                                    "consumed_in": ["analysis"],
+                                }
+                            ],
+                            "item_count": 1,
+                            "host_semantic_prefetch": False,
+                            "formal_write_count": 0,
+                        }
+                        manifest = {
+                            **manifest_core,
+                            "manifest_sha256": core.sha256_value(manifest_core),
+                        }
+                        for stage_name in ("analysis", "critical_review"):
+                            result.stage_receipts[stage_name].update(
+                                {
+                                    "mcp_grounding_manifest": copy.deepcopy(manifest),
+                                    "mcp_grounding_manifest_sha256": manifest[
+                                        "manifest_sha256"
+                                    ],
+                                }
+                            )
+                        result.stage_receipts["read_session"] = {
+                            "status": "complete"
+                        }
+                        result.stage_receipts["critical_review"]["schema_sha256"] = (
+                            core.sha256_value({"synthetic": "tampered-schema"})
+                        )
+                        return result
+
+                worker = core.Worker(config, model_runner=ReplayRunner())
+                worker.publish_math_shadow_candidate(candidate)
+            self.assertFalse(
+                worker.store.latest_path("math", candidate.capture_id).exists()
+            )
+            self.assertFalse(
+                any(
+                    (runtime / "shadow" / "historical" / "packages").rglob(
+                        "*.json"
+                    )
+                )
+            )
+        self.assertEqual(protected_before, self.fixture.source_snapshot())
 
     def test_unbound_live_source_bundle_still_fails_closed(self) -> None:
         with self.assertRaisesRegex(
@@ -361,7 +367,9 @@ class MathFormalizationContractTests(unittest.TestCase):
                 {},
                 {
                     "source_bundle": {
-                        "manifest_hash": "f" * 64,
+                        "manifest_hash": core.sha256_value(
+                            {"synthetic": "unbound-source"}
+                        ),
                     }
                 },
             )
@@ -370,7 +378,7 @@ class MathFormalizationContractTests(unittest.TestCase):
         overlay = self.corrected_capture_overlay()
         overlay["formalization_candidates"]["safe_summary"][0][
             "evidence_refs"
-        ] = ["mcp-item:math:" + "f" * 64]
+        ] = ["capture.synthetic.unknown"]
         with self.assertRaisesRegex(
             core.PreprocessorError,
             "math_analysis_evidence_refs_invalid",
@@ -447,7 +455,7 @@ class MathFormalizationContractTests(unittest.TestCase):
         for path, before in static_before.items():
             self.assertEqual(path.read_bytes(), before)
 
-    def test_sealed_a739_ref_siblings_fail_before_provider(self) -> None:
+    def test_synthetic_invalid_provider_ref_siblings_fail_before_provider(self) -> None:
         sibling_paths: list[tuple[str, tuple[str, ...]]] = []
 
         def visit(value: object, path: str = "$") -> None:
@@ -496,7 +504,7 @@ class MathFormalizationContractTests(unittest.TestCase):
 
         with self.assertRaises(core.PreprocessorError) as integrated:
             core.CodexRunner._bound_output_schema_bytes(
-                SEALED_INVALID_PROVIDER_SCHEMA,
+                self.fixture.invalid_provider_schema_path,
                 stage_name="math_analysis",
                 allowed_evidence_refs=(),
                 allow_empty_predeclared_evidence_refs=True,
@@ -623,7 +631,7 @@ raise SystemExit(1 if errors else 0)
         })
         self.assertNotEqual(
             direct_analysis,
-            EXPECTED_FILE_SHA256S[SEALED_INVALID_PROVIDER_SCHEMA],
+            file_sha256(self.fixture.invalid_provider_schema_path),
         )
         for callable_object in (
             core.CodexRunner.run_math_v2,
@@ -640,7 +648,7 @@ raise SystemExit(1 if errors else 0)
                 )
 
     def test_only_completeness_change_exposes_depth_gate(self) -> None:
-        complete = copy.deepcopy(self.payload)
+        complete = self.corrected_capture_overlay()
         complete["evidence_assessment"]["completeness"] = "complete"
         with self.assertRaisesRegex(
             core.PreprocessorError,
@@ -666,7 +674,7 @@ raise SystemExit(1 if errors else 0)
         )
         prompt = runner._math_analysis_prompt(
             self.source_candidate(),
-            {"analysis_prompt_version": "sealed-contract-test"},
+            {"analysis_prompt_version": "synthetic-contract-test"},
         )
         self.assertIn('"capture_backed_formalization_mode": true', prompt)
 

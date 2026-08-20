@@ -23,27 +23,8 @@ from preprocessor_core import (  # noqa: E402
     mcp_grounding_refs,
     validate_english_mcp_grounding,
 )
-
-
-SEALED_4C1_ENGLISH_TRANSPORT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-direct-mcp-en-p0-006-20260809/artifacts/"
-    "three-real-smoke-4c1c0651/stage-runtime/private/reports/"
-    "model-mcp-transport/sha256/24/"
-    "2490329a7d0cbfde65fab50a1e05a47af70283bafc0bb8179430b8e3dc916058.json"
-)
-SEALED_4C1_ENGLISH_TRANSPORT_SHA256 = (
-    "2490329a7d0cbfde65fab50a1e05a47af70283bafc0bb8179430b8e3dc916058"
-)
-SEALED_4C1_ENGLISH_READ_SESSION = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-direct-mcp-en-p0-006-20260809/artifacts/"
-    "three-real-smoke-4c1c0651/stage-runtime/private/mcp-read-sessions/"
-    "sha256/8f/"
-    "8f7104504ad0fec9f6a275329023e186a608d601f18308e856c6c3688e0c9a5a.json"
-)
-SEALED_4C1_ENGLISH_READ_SESSION_FILE_SHA256 = (
-    "03cea628189099d150c9c54f8d9a13e679c14f71d927db9204902f773df70433"
+from synthetic_e8a_sealed_fixture import (  # noqa: E402
+    build_synthetic_sealed_transport,
 )
 
 
@@ -97,34 +78,141 @@ class SealedMcpTransportReplayTests(unittest.TestCase):
             return calls, transcript_sha256, transcript_ref, transcript
 
     def _sealed_english_transport(self):
-        transport_bytes = SEALED_4C1_ENGLISH_TRANSPORT.read_bytes()
-        session_bytes = SEALED_4C1_ENGLISH_READ_SESSION.read_bytes()
-        self.assertEqual(
-            hashlib.sha256(transport_bytes).hexdigest(),
-            SEALED_4C1_ENGLISH_TRANSPORT_SHA256,
+        session = self._mcp_context("english")["mcp_read_session"]
+        required = self._required_success_events("english")
+
+        get_records_event = json.loads(
+            self.fixture._mcp_event(
+                offset=0,
+                total_count=1,
+                returned_count=1,
+                truncated=False,
+                complete=True,
+                tool="list_records",
+                subject="english",
+            )
         )
-        self.assertEqual(
-            hashlib.sha256(session_bytes).hexdigest(),
-            SEALED_4C1_ENGLISH_READ_SESSION_FILE_SHA256,
-        )
-        transport = json.loads(transport_bytes)
-        session = json.loads(session_bytes)
-        self.assertEqual(
-            transport["read_session_manifest_sha256"],
-            session["manifest_sha256"],
-        )
-        events = [
+        get_records_item = get_records_event["item"]
+        get_records_item["tool"] = "get_records"
+        get_records_item["arguments"] = {
+            "collection": "catalog",
+            "ids": ["synthetic-record"],
+            "page_size": 1,
+        }
+        get_records_item["result"]["query_sha256"] = hashlib.sha256(
             json.dumps(
-                {"type": row["event_type"], "item": row["item"]},
+                {
+                    "tool": "get_records",
+                    "arguments": get_records_item["arguments"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        get_records_event_text = json.dumps(
+            get_records_event,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        search_event = self.fixture._mcp_search_success_event(
+            subject="english",
+            query="synthetic-search-query",
+            page_size=1,
+        )
+
+        def error_event(
+            *,
+            tool: str,
+            arguments: dict,
+            code: str,
+            request_id: str,
+            status: str = "completed",
+        ) -> str:
+            event = json.loads(
+                self._mcp_error_event(
+                    subject="english",
+                    tool=tool,
+                    arguments=arguments,
+                    code=code,
+                    status=status,
+                )
+            )
+            item = event["item"]
+            text_envelope = json.loads(
+                item["result"]["content"][0]["text"]
+            )
+            text_envelope["request_id"] = request_id
+            structured_envelope = item["result"]["structured_content"]
+            structured_envelope["request_id"] = request_id
+            item["result"]["content"][0]["text"] = json.dumps(
+                text_envelope,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            for row in transport["mcp_items"]
-        ]
-        return transport, session, events
+            return json.dumps(
+                event,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
 
-    def test_sealed_4c1_duplicate_output_limit_replays_cleanly(self) -> None:
+        failed_search_arguments = {
+            "query": "synthetic-permanent-search",
+            "page_size": 48,
+        }
+        events = [
+            required[0],
+            required[1],
+            get_records_event_text,
+            required[2],
+            search_event,
+            error_event(
+                tool="get_records",
+                arguments={
+                    "collection": "catalog",
+                    "ids": ["synthetic-missing"],
+                    "page_size": 1,
+                },
+                code="NOT_FOUND",
+                request_id="a" * 16,
+            ),
+            error_event(
+                tool="search_records",
+                arguments=failed_search_arguments,
+                code="OUTPUT_LIMIT",
+                request_id="b" * 16,
+            ),
+            error_event(
+                tool="search_records",
+                arguments=failed_search_arguments,
+                code="OUTPUT_LIMIT",
+                request_id="c" * 16,
+            ),
+        ]
+        with tempfile.TemporaryDirectory(prefix="synthetic-sealed-mcp-") as temp:
+            fixture = build_synthetic_sealed_transport(
+                Path(temp), session=session, events=events
+            )
+            transport = fixture.transport
+            session = fixture.session
+            self.assertEqual(
+                transport["read_session_manifest_sha256"],
+                session["manifest_sha256"],
+            )
+            self.assertEqual(
+                fixture.transport_path.stem,
+                fixture.transport_file_sha256,
+            )
+            self.assertEqual(
+                fixture.session_path.stem,
+                fixture.session_file_sha256,
+            )
+            return transport, session, list(fixture.events)
+
+    def test_synthetic_duplicate_output_limit_replays_cleanly(self) -> None:
         transport, session, events = self._sealed_english_transport()
         self.assertEqual(transport["mcp_item_count"], 8)
         failed = [

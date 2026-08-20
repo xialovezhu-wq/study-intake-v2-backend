@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,28 +14,66 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import math_shadow_backaudit as backaudit  # noqa: E402
 import math_shadow_replay as replay  # noqa: E402
-from historical_test_input import (  # noqa: E402
-    HistoricalTestInput,
-    render_shadow_test_config,
-)
 from preprocessor_core import sha256_value  # noqa: E402
+from tests.test_math_shadow_backaudit import Fixture  # noqa: E402
 
 class MathShadowReplayTests(unittest.TestCase):
-    def test_real_manifest_builds_ten_frozen_shadow_candidates(self) -> None:
-        test_input = HistoricalTestInput.from_env()
-        before = test_input.snapshot()
-        manifest = test_input.load_historical_manifest()
-        config = render_shadow_test_config(ROOT, test_input)
-        backaudit.verify_manifest(manifest)
-        candidates = [
-            replay.build_replay_candidate(
-                manifest=manifest, item=item, config=config, read_guard=test_input
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="math-shadow-replay-")
+        self.fixture = Fixture(Path(self.temporary.name))
+        self.manifest = backaudit.build_manifest(
+            self.fixture.runtime,
+            self.fixture.repo,
+            self.fixture.study_date,
+            expected_count=len(self.fixture.capture_ids),
+        )
+        self.config = {
+            "model": {"max_images": 8},
+            "math_deep_v2": {"mode": "shadow"},
+            "adapters": {
+                "math": {
+                    "repo_root": str(self.fixture.repo),
+                    "adapter_version": "math-pending-v1",
+                }
+            },
+        }
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _candidate(self, item: dict) -> object:
+        with (
+            mock.patch.object(
+                replay,
+                "math_processing_contract",
+                return_value={"processing_contract_sha256": "c" * 64},
+            ),
+            mock.patch.object(
+                replay, "math_adapter_build_sha256", return_value="d" * 64
+            ),
+        ):
+            return replay.build_replay_candidate(
+                manifest=self.manifest,
+                item=item,
+                config=self.config,
             )
-            for item in manifest["items"]
-        ]
-        after = test_input.snapshot()
-        self.assertEqual(before, after)
-        self.assertEqual(len(candidates), 10)
+
+    def test_synthetic_manifest_builds_frozen_shadow_candidates(self) -> None:
+        before_runtime = replay._protected_runtime_hashes(self.fixture.runtime)
+        before_formal = replay._formal_hashes(
+            self.manifest, self.fixture.repo
+        )
+        manifest = self.manifest
+        backaudit.verify_manifest(manifest)
+        candidates = [self._candidate(item) for item in manifest["items"]]
+        self.assertEqual(
+            before_runtime,
+            replay._protected_runtime_hashes(self.fixture.runtime),
+        )
+        self.assertEqual(
+            before_formal, replay._formal_hashes(manifest, self.fixture.repo)
+        )
+        self.assertEqual(len(candidates), len(self.fixture.capture_ids))
         for candidate, item in zip(candidates, manifest["items"]):
             binding = candidate.input_binding
             semantic_binding = dict(binding)
@@ -66,23 +106,14 @@ class MathShadowReplayTests(unittest.TestCase):
             self.assertTrue(coverage["post_freeze_current_network_excluded"])
 
     def test_plan_hash_checks_are_read_only(self) -> None:
-        test_input = HistoricalTestInput.from_env()
-        before = test_input.snapshot()
-        manifest = test_input.load_historical_manifest()
-        config = render_shadow_test_config(ROOT, test_input)
-        runtime = test_input.runtime_data_root
-        repo = test_input.formal_surface_root
+        manifest = self.manifest
+        runtime = self.fixture.runtime
+        repo = self.fixture.repo
         before_runtime = replay._protected_runtime_hashes(runtime)
         before_formal = replay._formal_hashes(manifest, repo)
-        replay.build_replay_candidate(
-            manifest=manifest,
-            item=manifest["items"][0],
-            config=config,
-            read_guard=test_input,
-        )
+        self._candidate(manifest["items"][0])
         self.assertEqual(before_runtime, replay._protected_runtime_hashes(runtime))
         self.assertEqual(before_formal, replay._formal_hashes(manifest, repo))
-        self.assertEqual(before, test_input.snapshot())
 
 
 if __name__ == "__main__":

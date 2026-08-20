@@ -35,24 +35,24 @@ SPEC_SCHEMA = "study-intake-controlled-replay-spec-v1"
 INVENTORY_SCHEMA = "study-intake-zero-model-golden-inventory-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DEFAULT_MATH_BUSINESS_MANIFEST = Path(
-    "/Users/xiazhibin/Documents/kaoyan-math-live-capture/2026-08-09/"
+    f"{Path.home()}/Documents/kaoyan-math-live-capture/2026-08-09/"
     "luna-real-business-samples.json"
 )
 DEFAULT_MATH_SUPERSEDED_MANIFESTS = (
     Path(
-        "/Users/xiazhibin/Documents/kaoyan-math-live-capture/2026-08-09/"
+        f"{Path.home()}/Documents/kaoyan-math-live-capture/2026-08-09/"
         "luna-business-task-manifest.json"
     ),
     Path(
-        "/Users/xiazhibin/Documents/kaoyan-math-live-capture/2026-08-09/"
+        f"{Path.home()}/Documents/kaoyan-math-live-capture/2026-08-09/"
         "luna-business-task-addendum-001.json"
     ),
 )
 DEFAULT_MATH_NEGATIVE_MANIFEST = Path(
-    "/Users/xiazhibin/Documents/kaoyan-math-deferred-intake/2026-08-09/"
+    f"{Path.home()}/Documents/kaoyan-math-deferred-intake/2026-08-09/"
     "read-only-test-manifest.json"
 )
-TRUSTED_MATH_SOURCE_ROOT = Path("/Users/xiazhibin/Documents/kaoyan-math")
+TRUSTED_MATH_SOURCE_ROOT = Path(f"{Path.home()}/Documents/kaoyan-math")
 MATH_GOLDEN_ASSERTION_VALIDATOR = ROOT / "lib" / "math_live_golden_assertions.py"
 MATH_GOLDEN_ASSERTION_SCHEMA = (
     ROOT / "schemas" / "math-live-business-golden-assertion-result-v1.json"

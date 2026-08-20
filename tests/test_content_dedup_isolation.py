@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -51,6 +52,53 @@ from fixtures.scanner_worker_fake import (  # noqa: E402
 
 RELEASE_ID = "a" * 64
 PROCESSING_CONTRACT = "9" * 64
+
+
+def _prepare_english_semantic_fixture(root: Path) -> Path:
+    """Materialize the active English source closure inside the test temp root.
+
+    The semantic contract intentionally hashes the current pipeline files.  A
+    test must therefore provide every active file it names, while keeping the
+    source root hermetic and free of the user's repositories.  Where the
+    canonical source snapshot has a file, copy that code; the small set of
+    source-closure placeholders not present in this snapshot stays synthetic.
+    """
+
+    canonical_root = ROOT.parent / "kaoyan-english"
+    required = (
+        "english_pipeline/candidates.py",
+        "english_pipeline/cli.py",
+        "english_pipeline/constants.py",
+        "english_pipeline/errors.py",
+        "english_pipeline/events.py",
+        "english_pipeline/formal.py",
+        "english_pipeline/migrations.py",
+        "english_pipeline/nightly.py",
+        "english_pipeline/quick_flush.py",
+        "english_pipeline/review_status.py",
+        "english_pipeline/util.py",
+        "english_pipeline/views.py",
+        "english_pipeline/writer.py",
+        "scripts/build_old_word_memory_curve_index.py",
+        "scripts/build_review_status_proposals.py",
+        "scripts/english_learning_pipeline.py",
+        "scripts/select_bbdc_foundation.py",
+        "schema/english_pipeline/capture-event-v2.schema.json",
+        "schema/english_pipeline/luna-candidate-v2.schema.json",
+    )
+    for relative in required:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = canonical_root / relative
+        if source.is_file():
+            shutil.copy2(source, destination)
+        elif destination.suffix == ".json":
+            destination.write_text('{"synthetic": true}\n', encoding="utf-8")
+        else:
+            destination.write_text(
+                f"# synthetic active source: {relative}\n", encoding="utf-8"
+            )
+    return root.resolve()
 
 
 def english_candidate(
@@ -423,6 +471,9 @@ class ContentDedupIsolationTests(unittest.TestCase):
     def test_subject_only_prompt_changes_only_its_contract_and_fingerprint(self):
         cs408_status_script = self.runtime / "cs408-status.py"
         cs408_status_script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        english_repo = _prepare_english_semantic_fixture(
+            self.runtime / "english-semantic-source"
+        )
         config = {
             "model": {
                 "model": REQUIRED_MODEL,
@@ -487,10 +538,12 @@ class ContentDedupIsolationTests(unittest.TestCase):
                     "status_script": str(cs408_status_script),
                 },
                 "english": {
-                    "repo_root": "/Users/xiazhibin/Documents/kaoyan-english",
+                    "repo_root": str(english_repo),
                     "candidate_schema": (
-                        "/Users/xiazhibin/Documents/kaoyan-english/"
-                        "schema/english_pipeline/luna-candidate-v2.schema.json"
+                        str(
+                            english_repo
+                            / "schema/english_pipeline/luna-candidate-v2.schema.json"
+                        )
                     ),
                 }
             },

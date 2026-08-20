@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,49 +32,15 @@ from preprocessor_core import MathAdapter, PreprocessorError, sha256_value  # no
 from preprocessor_core import CodexRunner  # noqa: E402
 from process_identity import kernel_process_start_token  # noqa: E402
 from subject_sol_contract import SubjectSolRuntimeStore  # noqa: E402
+from tests.portable_plugin_fixture import (  # noqa: E402
+    build_portable_plugin_fixture,
+)
 
 
 JSONSCHEMA_PYTHON = Path("/opt/miniconda3/envs/dl/bin/python")
-PLUGIN_ROOT = ROOT / "plugin/kaoyan-study-intake"
-BASELINE_RELEASE_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/releases/"
-    "a4ff96b8932344211ca51c69edda98a06e95382bcdc4de79e2520fdcf8e343d6"
-)
 SUCCESSOR_PLUGIN_VERSION = (
     "0.6.0+codex.20260818-prelive-finalization"
 )
-SUCCESSOR_MCP_RELEASE_ID = (
-    "21d738a1d74586aab72c8a63dc62c680aa10c6ac837c2bd5041e757ba0e63425"
-)
-SUCCESSOR_MCP_MANIFEST_SHA256 = (
-    "3753175de6a66b5cd67efe6b85622a6e8bdb519bee5166834677ee0bad08a5e5"
-)
-SUCCESSOR_MCP_LAUNCHER_SHA256 = (
-    "d0bb1103adab1d606491100f528788cd111deb199db7e63a55109a318656b796"
-)
-HISTORICAL_SCHEMA_SHA256 = {
-    "mcp-authority-snapshot-v1.json": (
-        "623564ff69a8f62157aaf74e0bf316923f4840fc9e23bc7f870d56d8004b0762"
-    ),
-    "mcp-authority-snapshot-receipt-v1.json": (
-        "829c51cfd67c957ee8e0abbd55110cca51e0695eb4fd717824b846055b7b9077"
-    ),
-    "mcp-read-session-v3.json": (
-        "0e335fc450f28490b8df179a4a7542688224cbfe6d9bd6dfe531530c5e5d28a8"
-    ),
-    "three-subject-canary-activation-receipt-v2.json": (
-        "58be4202884b1b0cd54609ae8c6b2a3e0c496212c833ffd3496975d482a24b83"
-    ),
-    "three-subject-canary-activation-receipt-v3.json": (
-        "bdf101230906ad2f23909f6ededb605415e7bed361479ec546064cd26e257733"
-    ),
-    "three-subject-canary-activation-receipt-v4.json": (
-        "77c99095729ec9e1a984f410782917bd3c5cfce5037ed5ba4f4084735e1a8003"
-    ),
-    "dashboard-projection-v4.json": (
-        "6e39c1bbbb1bd72998861d252cd40eefe725f7c96d620ddda8d12f2f18ef3c79"
-    ),
-}
 SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
     {
         "concurrent-completion-v2.json",
@@ -154,6 +121,44 @@ SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
         "validation-console-technical-status-v1.json",
     }
 )
+
+
+_PORTABLE_TEMPORARY: tempfile.TemporaryDirectory[str] | None = None
+PORTABLE_FIXTURE = None
+SYNTHETIC_BASELINE_SCHEMA_ROOT: Path | None = None
+
+
+def setUpModule() -> None:
+    """Create one hermetic generated plugin tree for this test module.
+
+    The checked-in plugin deliberately excludes staging-generated manifests.
+    The baseline below is a temporary structural fixture derived from the
+    current canonical schemas; it is not a historical release snapshot.
+    """
+
+    global _PORTABLE_TEMPORARY
+    global PORTABLE_FIXTURE
+    global SYNTHETIC_BASELINE_SCHEMA_ROOT
+
+    _PORTABLE_TEMPORARY = tempfile.TemporaryDirectory(
+        prefix="successor-schema-roundtrip-portable-"
+    )
+    temporary_root = Path(_PORTABLE_TEMPORARY.name)
+    baseline_root = temporary_root / "synthetic-baseline" / "schemas"
+    baseline_root.mkdir(parents=True)
+    for path in sorted((ROOT / "schemas").glob("*.json")):
+        if path.name in SUCCESSOR_ROOT_SCHEMA_NAMES:
+            continue
+        shutil.copy2(path, baseline_root / path.name)
+    SYNTHETIC_BASELINE_SCHEMA_ROOT = baseline_root
+    PORTABLE_FIXTURE = build_portable_plugin_fixture(temporary_root, ROOT)
+
+
+def tearDownModule() -> None:
+    global _PORTABLE_TEMPORARY
+    if _PORTABLE_TEMPORARY is not None:
+        _PORTABLE_TEMPORARY.cleanup()
+        _PORTABLE_TEMPORARY = None
 
 
 def digest(label: str) -> str:
@@ -299,12 +304,26 @@ def assert_positive_and_negatives(
 
 
 class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
-    def test_historical_schema_bytes_are_unchanged(self) -> None:
-        for name, expected_sha256 in HISTORICAL_SCHEMA_SHA256.items():
-            payload = (ROOT / "schemas" / name).read_bytes()
+    def test_synthetic_baseline_is_only_a_structural_fixture(self) -> None:
+        if SYNTHETIC_BASELINE_SCHEMA_ROOT is None:
+            raise AssertionError("synthetic_baseline_not_initialized")
+        root_schemas = {
+            path.name: path
+            for path in (ROOT / "schemas").glob("*.json")
+        }
+        baseline_schemas = {
+            path.name: path
+            for path in SYNTHETIC_BASELINE_SCHEMA_ROOT.glob("*.json")
+        }
+        self.assertEqual(
+            set(root_schemas) - set(baseline_schemas),
+            SUCCESSOR_ROOT_SCHEMA_NAMES,
+        )
+        self.assertEqual(set(baseline_schemas) - set(root_schemas), set())
+        for name in sorted(set(root_schemas) & set(baseline_schemas)):
             self.assertEqual(
-                hashlib.sha256(payload).hexdigest(),
-                expected_sha256,
+                root_schemas[name].read_bytes(),
+                baseline_schemas[name].read_bytes(),
                 name,
             )
 
@@ -379,13 +398,18 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
             self.assertTrue(rejected[label], label)
 
     def test_new_root_schemas_are_exactly_mirrored_and_component_locked(self) -> None:
+        portable = PORTABLE_FIXTURE
+        if portable is None:
+            raise AssertionError("portable_plugin_fixture_not_initialized")
+        if SYNTHETIC_BASELINE_SCHEMA_ROOT is None:
+            raise AssertionError("synthetic_baseline_not_initialized")
         root_schemas = {
             path.name: path
             for path in (ROOT / "schemas").glob("*.json")
         }
         baseline_schemas = {
             path.name: path
-            for path in (BASELINE_RELEASE_ROOT / "schemas").glob("*.json")
+            for path in SYNTHETIC_BASELINE_SCHEMA_ROOT.glob("*.json")
         }
         self.assertEqual(
             set(root_schemas) - set(baseline_schemas),
@@ -402,11 +426,16 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
         )
         self.assertEqual(set(baseline_schemas) - set(root_schemas), set())
 
+        plugin_root = portable.plugin_root
+        plugin_schemas = {
+            path.name: path
+            for path in (plugin_root / "schemas").glob("*.json")
+        }
         lock = json.loads(
-            (PLUGIN_ROOT / "component-lock.json").read_text(encoding="utf-8")
+            (plugin_root / "component-lock.json").read_text(encoding="utf-8")
         )
         locked_schemas = lock["schemas"]
-        generator_path = PLUGIN_ROOT / "scripts/generate_manifests.py"
+        generator_path = plugin_root / "scripts/generate_manifests.py"
         spec = importlib.util.spec_from_file_location(
             "successor_schema_generator_contract", generator_path
         )
@@ -419,31 +448,83 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
                 generator.REQUIRED_RUNTIME_SCHEMAS
             )
         )
+        self.assertTrue(
+            generator.REQUIRED_RUNTIME_SCHEMAS.issubset(plugin_schemas)
+        )
+        self.assertTrue(
+            generator.REQUIRED_RUNTIME_SCHEMAS.issubset(locked_schemas)
+        )
+        self.assertEqual(
+            set(locked_schemas),
+            set(plugin_schemas),
+        )
+        self.assertFalse(
+            set(generator.RETIRED_SCHEMAS) & set(plugin_schemas)
+        )
+        self.assertFalse(
+            set(generator.RETIRED_SCHEMAS) & set(locked_schemas)
+        )
         for name in sorted(SUCCESSOR_ROOT_SCHEMA_NAMES):
             root_path = root_schemas[name]
-            plugin_path = PLUGIN_ROOT / "schemas" / name
+            plugin_path = plugin_schemas[name]
             self.assertEqual(plugin_path.read_bytes(), root_path.read_bytes())
             self.assertEqual(
                 locked_schemas[name], hashlib.sha256(root_path.read_bytes()).hexdigest()
             )
+        self.assertEqual(
+            locked_schemas,
+            {
+                name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for name, path in sorted(plugin_schemas.items())
+            },
+        )
+
+        check = subprocess.run(
+            [
+                sys.executable,
+                str(generator_path),
+                "--check",
+                "--math-root",
+                str(portable.subject_roots["math"]),
+                "--cs408-root",
+                str(portable.subject_roots["cs408"]),
+                "--english-root",
+                str(portable.subject_roots["english"]),
+                "--mcp-root",
+                str(portable.mcp_root),
+                "--mcp-python-executable",
+                str(portable.mcp_python),
+            ],
+            cwd=generator_path.parents[1],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            check.returncode,
+            0,
+            check.stderr or check.stdout or "portable_generator_check_failed",
+        )
 
     def test_plugin_skills_and_sealed_mcp_runtime_are_exactly_locked(self) -> None:
-        components_path = PLUGIN_ROOT / "components.json"
+        portable = PORTABLE_FIXTURE
+        if portable is None:
+            raise AssertionError("portable_plugin_fixture_not_initialized")
+        plugin_root = portable.plugin_root
+        components_path = plugin_root / "components.json"
         components = json.loads(components_path.read_text(encoding="utf-8"))
         lock = json.loads(
-            (PLUGIN_ROOT / "component-lock.json").read_text(encoding="utf-8")
+            (plugin_root / "component-lock.json").read_text(encoding="utf-8")
         )
-        # component-lock.json is staging-generated.  Bind registry-derived
-        # fields in this private view instead of rewriting the worktree copy.
-        lock["registry_sha256"] = hashlib.sha256(
-            components_path.read_bytes()
-        ).hexdigest()
-        lock["external_runtime_sources"] = components[
-            "external_runtime_sources"
-        ]
         self.assertEqual(
             lock["external_runtime_sources"],
             components["external_runtime_sources"],
+        )
+        self.assertEqual(
+            lock["registry_sha256"],
+            hashlib.sha256(components_path.read_bytes()).hexdigest(),
         )
         self.assertEqual(components["plugin"]["version"], SUCCESSOR_PLUGIN_VERSION)
         self.assertEqual(lock["plugin_version"], SUCCESSOR_PLUGIN_VERSION)
@@ -452,7 +533,7 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
             ".codex-plugin/plugin.json",
         ):
             manifest = json.loads(
-                (PLUGIN_ROOT / relative).read_text(encoding="utf-8")
+                (plugin_root / relative).read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["version"], SUCCESSOR_PLUGIN_VERSION)
 
@@ -463,7 +544,7 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
             "multi-agent-read-orchestrate": "1.0.0",
         }
         for skill_name, expected_version in expected_skill_versions.items():
-            skill_path = PLUGIN_ROOT / "skills" / skill_name / "SKILL.md"
+            skill_path = plugin_root / "skills" / skill_name / "SKILL.md"
             self.assertEqual(
                 components["skills"][skill_name], expected_version
             )
@@ -478,19 +559,16 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
         mcp = components["mcp"]
         runtime = lock["mcp_sealed_runtime"]
         release_root = Path(mcp["release_root"])
-        self.assertEqual(mcp["release_id"], SUCCESSOR_MCP_RELEASE_ID)
-        self.assertEqual(lock["mcp_release_id"], SUCCESSOR_MCP_RELEASE_ID)
-        self.assertEqual(runtime["release_id"], SUCCESSOR_MCP_RELEASE_ID)
-        self.assertEqual(
-            mcp["release_manifest_sha256"], SUCCESSOR_MCP_MANIFEST_SHA256
-        )
+        self.assertEqual(mcp["release_id"], portable.release_id)
+        self.assertEqual(lock["mcp_release_id"], mcp["release_id"])
+        self.assertEqual(runtime["release_id"], mcp["release_id"])
         self.assertEqual(
             lock["mcp_release_manifest_sha256"],
-            SUCCESSOR_MCP_MANIFEST_SHA256,
+            mcp["release_manifest_sha256"],
         )
         self.assertEqual(
             runtime["release_manifest_sha256"],
-            SUCCESSOR_MCP_MANIFEST_SHA256,
+            mcp["release_manifest_sha256"],
         )
         self.assertEqual(runtime["python_flags"], ["-I", "-S"])
         self.assertEqual(mcp["python_flags"], ["-I", "-S"])
@@ -500,18 +578,14 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
         launcher_path = release_root / "scripts/sealed_launcher.py"
         self.assertEqual(
             hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-            SUCCESSOR_MCP_MANIFEST_SHA256,
+            mcp["release_manifest_sha256"],
         )
         self.assertEqual(
             hashlib.sha256(launcher_path.read_bytes()).hexdigest(),
-            SUCCESSOR_MCP_LAUNCHER_SHA256,
+            mcp["sealed_launcher_sha256"],
         )
         self.assertEqual(
-            runtime["sealed_launcher_sha256"], SUCCESSOR_MCP_LAUNCHER_SHA256
-        )
-        self.assertEqual(
-            lock["registry_sha256"],
-            hashlib.sha256(components_path.read_bytes()).hexdigest(),
+            runtime["sealed_launcher_sha256"], mcp["sealed_launcher_sha256"]
         )
 
 

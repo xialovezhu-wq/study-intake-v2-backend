@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 from historical_test_input import assert_guarded_read  # noqa: E402
 
 DEFAULT_RUNTIME_ROOT = ROOT
-DEFAULT_REPO_ROOT = Path("/Users/xiazhibin/Documents/kaoyan-math")
+DEFAULT_REPO_ROOT = Path(f"{Path.home()}/Documents/kaoyan-math")
 DEFAULT_STUDY_DATE = "2026-08-04"
 DEFAULT_EXPECTED_COUNT = 10
 LEDGER_RELATIVE_PATH = Path("数学一回滚复习系统/快速入库事件.jsonl")

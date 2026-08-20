@@ -266,6 +266,10 @@ class FakeRunner:
 
 class PreprocessorTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._fixture_execution_previous = os.environ.get(
+            "STUDY_INTAKE_FIXTURE_EXECUTION"
+        )
+        os.environ["STUDY_INTAKE_FIXTURE_EXECUTION"] = "1"
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
         self.runtime = self.base / "runtime"
@@ -577,6 +581,12 @@ class PreprocessorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+        if self._fixture_execution_previous is None:
+            os.environ.pop("STUDY_INTAKE_FIXTURE_EXECUTION", None)
+        else:
+            os.environ["STUDY_INTAKE_FIXTURE_EXECUTION"] = (
+                self._fixture_execution_previous
+            )
 
     def test_background_mcp_failure_prevents_model_call_and_preserves_receipt_ref(
         self,

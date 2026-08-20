@@ -1271,38 +1271,40 @@ class HistoricalTestInputFixtureTests(unittest.TestCase):
             self.base = original_base
 
 
-class RealAugustFourthBackauditTests(unittest.TestCase):
-    def test_real_august_fourth_selection_is_exactly_ten(self) -> None:
-        test_input = HistoricalTestInput.from_env()
-        before = test_input.snapshot()
-        with test_input.enforce_reads():
+class SyntheticAugustFourthBackauditTests(unittest.TestCase):
+    def test_synthetic_selection_is_exact_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="math-backaudit-selection-") as raw:
+            fixture = Fixture(Path(raw))
+            ledger = fixture.repo / audit.LEDGER_RELATIVE_PATH
+            before_ledger = audit.sha256_file(ledger)
             manifest = audit.build_manifest(
-                test_input.runtime_data_root,
-                test_input.formal_surface_root,
-                audit.DEFAULT_STUDY_DATE,
-                expected_count=10,
-                historical_paths={
-                    "packages": test_input.paths_for_role("historical_package"),
-                    "adoptions": test_input.paths_for_role("historical_adoption"),
-                    "receipts": test_input.paths_for_role("historical_run_receipt"),
-                },
+                fixture.runtime,
+                fixture.repo,
+                fixture.study_date,
+                expected_count=len(fixture.capture_ids),
             )
-        after = test_input.snapshot()
-        self.assertEqual(before, after)
-        self.assertEqual(
-            {item["capture_id"]: item["replay_input_sha256"] for item in manifest["items"]},
-            test_input.expected_replay_input_sha256,
-        )
-        self.assertEqual(len(manifest["items"]), 10)
-        self.assertEqual(
-            manifest["baseline_adoption_counts"], {"modified_adopted": 10}
-        )
-        self.assertEqual(
-            {item["baseline_adoption"]["reason_code"] for item in manifest["items"]},
-            {"sol_narrowed"},
-        )
-        self.assertEqual(sum(item["visual_required"] for item in manifest["items"]), 9)
-        self.assertTrue(all(item["formal_write_count"] == 0 for item in manifest["items"]))
+            self.assertEqual(
+                [item["capture_id"] for item in manifest["items"]],
+                fixture.capture_ids,
+            )
+            self.assertEqual(audit.sha256_file(ledger), before_ledger)
+            self.assertEqual(len(manifest["items"]), len(fixture.capture_ids))
+            self.assertEqual(
+                manifest["baseline_adoption_counts"], {"modified_adopted": 2}
+            )
+            self.assertEqual(
+                {
+                    item["baseline_adoption"]["reason_code"]
+                    for item in manifest["items"]
+                },
+                {"sol_narrowed"},
+            )
+            self.assertEqual(
+                sum(item["visual_required"] for item in manifest["items"]), 1
+            )
+            self.assertTrue(
+                all(item["formal_write_count"] == 0 for item in manifest["items"])
+            )
 
 
 if __name__ == "__main__":

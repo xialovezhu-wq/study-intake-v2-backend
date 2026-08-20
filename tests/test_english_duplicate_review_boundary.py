@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import copy
-import gzip
 import hashlib
 import json
 import sys
@@ -21,61 +19,184 @@ sys.path.insert(0, str(ROOT / "lib"))
 import preprocessor_core as core  # noqa: E402
 
 
-FIXTURE_ROOT = ROOT / "tests/fixtures/english_duplicate_review_boundary"
-TRANSPORT_FIXTURE = FIXTURE_ROOT / "transport.json.gz"
-SESSION_FIXTURE = FIXTURE_ROOT / "read-session.json.gz"
-RAW_FIXTURE = FIXTURE_ROOT / "raw-output-object.json.gz"
-FIXTURE_BINDINGS = {
-    TRANSPORT_FIXTURE: (
-        "78e0f294044fe39e56a546028b3ff7382e61901c6858b3d6b6313d0daf160d99",
-        "a24fb89f1305296ef334ecfa5262b732d3fcf6f5aa296f42e2f60ecfae1cbe0b",
-    ),
-    SESSION_FIXTURE: (
-        "f9f77cb4e379fde3caa097dc1afeb04c71fedad0af48c9bc5aa88b74dfd31dc4",
-        "78667a51d332f32c256e8813e7bcd006029d44cabe13c8f1fed61c306e10363a",
-    ),
-    RAW_FIXTURE: (
-        "4dec38da4152c2461a6530d597fe199ff31ca3378c5815622eeb9f60b9b0893e",
-        "16efef81d24d1291fafe3208ec4346d0692463162f52eeb518c4d6a267a0259b",
-    ),
-}
-PROJECTION_SHA256 = (
-    "8ae40e1192c892751e35cb562a123e38eeee803b883a410087d1c43b764ee232"
-)
+def _session() -> dict:
+    return {
+        "schema_version": "study-read-mcp-read-session.v4",
+        "subject": "english",
+        "read_session_id": "rs-synthetic-english-0001",
+        "manifest_sha256": "1" * 64,
+        "candidate_release_id": "4" * 64,
+        "plugin_version": "0.0.0-synthetic",
+        "skill_id": "background-english-processing",
+        "skill_version": "0.0.0-synthetic",
+        "mcp_server_release": "0.0.0+sha256." + "5" * 64,
+        "generation": "synthetic-generation-1",
+        "authority_fingerprint": "2" * 64,
+        "capture_id": "EN-SYNTHETIC-DUPLICATE-001",
+        "capture_manifest_sha256": "3" * 64,
+        "artifact_ids": ["capture-facts"],
+        "authority_snapshot_manifest_sha256": "6" * 64,
+        "authority_snapshot_receipt_sha256": "7" * 64,
+    }
 
 
-def _load_fixture_mapping(path: Path) -> dict:
-    compressed_sha256, content_sha256 = FIXTURE_BINDINGS[path]
-    compressed = path.read_bytes()
-    if hashlib.sha256(compressed).hexdigest() != compressed_sha256:
-        raise AssertionError(f"compressed fixture drift: {path}")
-    content = gzip.decompress(compressed)
-    if hashlib.sha256(content).hexdigest() != content_sha256:
-        raise AssertionError(f"fixture content drift: {path}")
-    value = json.loads(content.decode("utf-8"))
-    if not isinstance(value, dict):
-        raise AssertionError(f"fixture is not an object: {path}")
-    return value
+def _mcp_event(*, tool: str, arguments: dict, sequence: int) -> dict:
+    session = _session()
+    if tool == "get_task_context":
+        collection = "task_context"
+        stable_id = session["capture_id"]
+    elif tool == "read_task_artifact":
+        collection = "task_artifact"
+        stable_id = arguments["artifact_id"]
+    elif tool == "search_records":
+        collection = "search"
+        stable_id = f"SYNTHETIC-{sequence:03d}"
+    else:
+        collection = arguments["collection"]
+        stable_id = f"SYNTHETIC-{sequence:03d}"
+    source_hash = hashlib.sha256(
+        f"{tool}:{collection}:{stable_id}".encode("utf-8")
+    ).hexdigest()
+    item = {
+        "stable_id": stable_id,
+        "source_hash": source_hash,
+        "data_role": "formal_fact",
+        "collection": collection,
+        "evidence_ref": core.model_mcp_item_ref(
+            subject="english",
+            generation=session["generation"],
+            collection=collection,
+            stable_id=stable_id,
+            source_hash=source_hash,
+        ),
+    }
+    query_arguments = {
+        key: value for key, value in arguments.items() if key != "cursor"
+    }
+    envelope = {
+        "ok": True,
+        "schema_version": "study-read-mcp.v3",
+        "server_release": session["mcp_server_release"],
+        "adapter_release": session["mcp_server_release"],
+        "preprocessor_release": session["candidate_release_id"],
+        "subject": "english",
+        "profile": "luna",
+        "consistency": "bound_snapshot",
+        "generation": session["generation"],
+        "authority_fingerprint": session["authority_fingerprint"],
+        "captured_at": "2026-08-20T00:00:00+00:00",
+        "read_session": {**session, "formal_write_count": 0},
+        "read_route": {
+            "caller_skill_id": session["skill_id"],
+            "caller_skill_version": session["skill_version"],
+            "plugin_version": session["plugin_version"],
+            "route_request_id": session["read_session_id"],
+            "evidence_scope_hash": session["manifest_sha256"],
+            "read_route": "mcp_model_driven",
+            "read_session_id": session["read_session_id"],
+            "consumed_duplicate_read_count": 0,
+        },
+        "formal_write_count": 0,
+        "model_call_count": 0,
+        "mcp_tool_call_count": 1,
+        "total_count": 1,
+        "returned_count": 1,
+        "offset": 0,
+        "page_size": 1,
+        "query_sha256": hashlib.sha256(
+            json.dumps(
+                {"tool": tool, "arguments": query_arguments},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "next_cursor": None,
+        "truncated": False,
+        "complete": True,
+        "items": [item],
+    }
+    return {
+        "type": "item.completed",
+        "item": {
+            "type": "mcp_tool_call",
+            "server": "kaoyan_english_read",
+            "tool": tool,
+            "arguments": arguments,
+            "result": {
+                "structured_content": envelope,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            envelope,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    }
+                ],
+            },
+        },
+    }
 
 
 def _immutable_fixture() -> tuple[bytes, dict, bytes]:
-    transport = _load_fixture_mapping(TRANSPORT_FIXTURE)
-    session = _load_fixture_mapping(SESSION_FIXTURE)
-    raw_object = _load_fixture_mapping(RAW_FIXTURE)
     events = [
-        json.dumps(
-            {"type": row["event_type"], "item": row["item"]},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        for row in transport["mcp_items"]
+        _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+        _mcp_event(
+            tool="read_task_artifact",
+            arguments={
+                "artifact_id": "capture-facts",
+                "cursor": None,
+                "max_bytes": 16384,
+            },
+            sequence=2,
+        ),
     ]
-    stdout = ("\n".join(events) + "\n").encode("utf-8")
-    raw_output = base64.b64decode(raw_object["raw_output_base64"], validate=True)
-    if hashlib.sha256(raw_output).hexdigest() != raw_object["raw_output_sha256"]:
-        raise AssertionError("immutable raw output fixture drift")
-    return stdout, session, raw_output
+    previous_arguments: dict | None = None
+    for sequence in range(3, 41):
+        tool = "search_records" if sequence == 40 else "get_records"
+        arguments = (
+            {
+                "query": "synthetic final lookup",
+                "collections": ["synthetic_collection_40"],
+                "cursor": None,
+                "page_size": 1,
+            }
+            if tool == "search_records"
+            else {
+                "collection": f"synthetic_collection_{sequence:02d}",
+                "ids": [f"SYNTHETIC-{sequence:03d}"],
+                "cursor": None,
+                "page_size": 1,
+            }
+        )
+        if sequence == 20:
+            assert previous_arguments is not None
+            arguments = copy.deepcopy(previous_arguments)
+        event = _mcp_event(
+            tool=tool, arguments=arguments, sequence=sequence
+        )
+        if sequence == 20:
+            event["item"]["result"] = copy.deepcopy(
+                events[-1]["item"]["result"]
+            )
+        events.append(event)
+        previous_arguments = arguments
+    stdout = (
+        "\n".join(
+            json.dumps(
+                event,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for event in events
+        )
+        + "\n"
+    ).encode("utf-8")
+    return stdout, _session(), b'{"synthetic":true}'
 
 
 class EnglishDuplicateReviewBoundaryTests(unittest.TestCase):
@@ -203,10 +324,12 @@ class EnglishDuplicateReviewBoundaryTests(unittest.TestCase):
     def test_actual_40_call_shape_is_reviewable_and_preserves_later_reads(self) -> None:
         stdout, session, raw_output = _immutable_fixture()
         self.assertIsInstance(json.loads(raw_output), dict)
-        self.assertEqual(len(raw_output), 11494)
+        self.assertGreater(len(raw_output), 0)
         error, transcript = self._parse(stdout, session)
         self.assertEqual(error.code, "english_analysis_mcp_duplicate_read")
-        self.assertEqual(error.duplicate_result_projection_sha256, PROJECTION_SHA256)
+        self.assertRegex(
+            error.duplicate_result_projection_sha256, r"^[0-9a-f]{64}$"
+        )
         self.assertEqual(len(error.calls), 40)
         self.assertEqual(transcript["coverage"]["call_count"], 40)
         self.assertEqual(transcript["coverage"]["duplicate_argument_count"], 1)

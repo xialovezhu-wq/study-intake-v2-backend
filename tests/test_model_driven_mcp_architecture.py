@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,7 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+ROOT = SOURCE_ROOT
 sys.path.insert(0, str(ROOT / "lib"))
 
 import preprocessor_core as core  # noqa: E402
@@ -35,6 +38,225 @@ from preprocessor_core import (  # noqa: E402
 
 
 class ModelDrivenMcpArchitectureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        global ROOT
+        cls._portable_temp = tempfile.TemporaryDirectory(
+            prefix="model-driven-portable-"
+        )
+        prepared = Path(cls._portable_temp.name) / "backend"
+        shutil.copytree(
+            SOURCE_ROOT,
+            prepared,
+            ignore=shutil.ignore_patterns(
+                ".git", "__pycache__", "*.pyc", "components.json",
+                "component-lock.json", ".mcp.json", "kaoyan-read",
+            ),
+        )
+        sibling_mcp = Path(
+            os.environ.get(
+                "STUDY_READ_MCP_SOURCE_ROOT",
+                str(SOURCE_ROOT.parent / "local-study-read-mcp"),
+            )
+        ).resolve()
+        if not (sibling_mcp / "scripts/build_release.py").is_file():
+            raise AssertionError("portable shared MCP source is required")
+        mcp_base = Path(cls._portable_temp.name) / "mcp-releases"
+        built = subprocess.run(
+            [
+                sys.executable,
+                str(sibling_mcp / "scripts/build_release.py"),
+                "--release-base",
+                str(mcp_base),
+            ],
+            cwd=sibling_mcp,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if built.returncode != 0:
+            raise AssertionError(
+                "portable shared MCP build failed: " + built.stderr
+            )
+        mcp_result = json.loads(built.stdout)
+        mcp_root = Path(mcp_result["release_dir"])
+        subject_roots = {
+            subject: Path(cls._portable_temp.name) / subject
+            for subject in ("math", "cs408", "english")
+        }
+        external_relatives = {
+            "math": Path("数学一回滚复习系统/scripts/quick_intake.py"),
+            "cs408": Path("scripts/intake_fact_capture_408.py"),
+            "english": Path("english_pipeline/events.py"),
+        }
+        descriptor_relatives = {
+            "math": Path("数学一回滚复习系统/schema/producer-binding-v1.json"),
+            "cs408": Path("schema/producer-binding-v1.json"),
+            "english": Path("schema/english_pipeline/producer-binding-v1.json"),
+        }
+        for subject, subject_root in subject_roots.items():
+            source = subject_root / external_relatives[subject]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(
+                f"# synthetic portable {subject} Producer\n",
+                encoding="utf-8",
+            )
+            authoritative = (
+                subject_root / "skills" / f"{subject}-foreground" / "SKILL.md"
+            )
+            installed = (
+                subject_root / "installed" / f"{subject}-foreground" / "SKILL.md"
+            )
+            for skill in (authoritative, installed):
+                skill.parent.mkdir(parents=True, exist_ok=True)
+                skill.write_text(
+                    f"---\nname: {subject}-foreground\n---\nsynthetic\n",
+                    encoding="utf-8",
+                )
+            contract = subject_root / "contracts" / "capture.json"
+            contract.parent.mkdir(parents=True, exist_ok=True)
+            contract.write_text('{"synthetic":true}\n', encoding="utf-8")
+            source = source.resolve()
+            authoritative = authoritative.resolve()
+            installed = installed.resolve()
+            contract = contract.resolve()
+            file_sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+            source_rows = [{"path": str(source), "sha256": file_sha(source)}]
+            core_descriptor = {
+                "schema_version": "producer_binding_descriptor_v1",
+                "subject": subject,
+                "attestation_required_after": "2026-01-01T00:00:00+00:00",
+                "foreground_skill": {
+                    "authoritative_path": str(authoritative),
+                    "authoritative_sha256": file_sha(authoritative),
+                    "installed_path": str(installed),
+                    "installed_sha256": file_sha(installed),
+                },
+                "producer": {
+                    "source_files": source_rows,
+                    "source_closure_sha256": hashlib.sha256(
+                        (
+                            json.dumps(
+                                source_rows,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                },
+                "capture_contract": {
+                    "files": [
+                        {"path": str(contract), "sha256": file_sha(contract)}
+                    ]
+                },
+                "attestation_relative_root": "attestations",
+                "formal_write_count": 0,
+            }
+            descriptor = {
+                **core_descriptor,
+                "descriptor_content_sha256": hashlib.sha256(
+                    (
+                        json.dumps(
+                            core_descriptor,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            descriptor_path = subject_root / descriptor_relatives[subject]
+            descriptor_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor_path.write_text(
+                json.dumps(
+                    descriptor,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        generator = (
+            prepared
+            / "plugin/kaoyan-study-intake/scripts/generate_manifests.py"
+        )
+        generated = subprocess.run(
+            [
+                sys.executable,
+                str(generator),
+                "--math-root",
+                str(subject_roots["math"]),
+                "--cs408-root",
+                str(subject_roots["cs408"]),
+                "--english-root",
+                str(subject_roots["english"]),
+                "--mcp-root",
+                str(mcp_root),
+                "--mcp-python-executable",
+                sys.executable,
+            ],
+            cwd=generator.parents[1],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if generated.returncode != 0:
+            diagnostic = ""
+            registry_path = prepared / "plugin/kaoyan-study-intake/components.json"
+            if registry_path.is_file():
+                registry = json.loads(registry_path.read_text(encoding="utf-8"))
+                binding = registry["foreground_capture_contracts"]["math"]
+                descriptor = json.loads(
+                    Path(binding["descriptor_path"]).read_text(encoding="utf-8")
+                )
+                diagnostic = " " + json.dumps(
+                    {
+                        "attestation_match": descriptor[
+                            "attestation_required_after"
+                        ]
+                        == binding["attestation_required_after"],
+                        "closure_match": descriptor["producer"][
+                            "source_closure_sha256"
+                        ]
+                        == binding["producer_source_closure_sha256"],
+                        "skill_match": descriptor["foreground_skill"][
+                            "installed_sha256"
+                        ]
+                        == binding["foreground_skill_sha256"],
+                        "source_match": registry["external_runtime_sources"][
+                            "math_status_script"
+                        ]
+                        in descriptor["producer"]["source_files"],
+                        "external_source": registry[
+                            "external_runtime_sources"
+                        ]["math_status_script"],
+                        "descriptor_sources": descriptor["producer"][
+                            "source_files"
+                        ],
+                    },
+                    sort_keys=True,
+                )
+            raise AssertionError(
+                "portable plugin generation failed: "
+                + generated.stderr
+                + diagnostic
+            )
+        ROOT = prepared
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        global ROOT
+        ROOT = SOURCE_ROOT
+        cls._portable_temp.cleanup()
+
     def test_english_read_session_explicitly_binds_grounding_validator(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1781,7 +2003,10 @@ class ModelDrivenMcpArchitectureTests(unittest.TestCase):
         import release_manager
 
         generated_paths = {
+            "plugin/kaoyan-study-intake/.mcp.json",
+            "plugin/kaoyan-study-intake/bin/kaoyan-read",
             "plugin/kaoyan-study-intake/component-lock.json",
+            "plugin/kaoyan-study-intake/components.json",
             "validation/source-freeze-sha256-final-20260813.txt",
         }
         self.assertEqual(
@@ -1866,6 +2091,10 @@ class ModelDrivenMcpArchitectureTests(unittest.TestCase):
                         "STUDY_READ_MCP_EXPECTED_PROJECT_ROOT",
                         "STUDY_READ_MCP_EXPECTED_RELEASE_ID",
                         "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256",
+                        "STUDY_READ_MATH_ROOT",
+                        "STUDY_READ_CS408_ROOT",
+                        "STUDY_READ_ENGLISH_ROOT",
+                        "STUDY_INTAKE_RUNTIME_ROOT",
                     ],
                 },
                 "production_launcher_profiles": {

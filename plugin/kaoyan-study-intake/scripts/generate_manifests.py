@@ -13,6 +13,7 @@ from typing import Any, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SCHEMA_ROOT = ROOT.parents[1] / "schemas"
 REGISTRY = ROOT / "components.json"
+REGISTRY_TEMPLATE = ROOT / "components.example.json"
 CODEX_CACHEBUSTER_RE = re.compile(
     r"^[^+]+\+codex\.[a-z0-9]+(?:-[a-z0-9]+)*$"
 )
@@ -279,6 +280,171 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+PORTABLE_MARKER_RE = re.compile(r"\$\{[A-Z0-9_]+\}")
+
+
+def _substitute(value: Any, replacements: Mapping[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _substitute(item, replacements)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_substitute(item, replacements) for item in value]
+    if isinstance(value, str):
+        rendered = value
+        for marker, replacement in replacements.items():
+            rendered = rendered.replace(marker, replacement)
+        return rendered
+    return value
+
+
+def _resolved_directory(path: Path, label: str) -> Path:
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit(f"portable component binding invalid: {label}") from exc
+    if resolved.is_symlink() or not resolved.is_dir():
+        raise SystemExit(f"portable component binding invalid: {label}")
+    return resolved
+
+
+def _resolved_executable(path: Path, label: str) -> Path:
+    candidate = path.expanduser().absolute()
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise SystemExit(f"portable component binding invalid: {label}")
+    return candidate
+
+
+def _descriptor_values(path: Path, subject: str) -> dict[str, str]:
+    try:
+        descriptor = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"portable Producer descriptor invalid: {subject}") from exc
+    skill = descriptor.get("foreground_skill")
+    producer = descriptor.get("producer")
+    values = {
+        "descriptor_sha256": sha256(path),
+        "attestation_required_after": descriptor.get(
+            "attestation_required_after"
+        ),
+        "producer_source_closure_sha256": (
+            producer.get("source_closure_sha256")
+            if isinstance(producer, Mapping)
+            else None
+        ),
+        "foreground_skill_sha256": (
+            skill.get("authoritative_sha256")
+            if isinstance(skill, Mapping)
+            else None
+        ),
+    }
+    if (
+        descriptor.get("schema_version") != "producer_binding_descriptor_v1"
+        or descriptor.get("subject") != subject
+        or descriptor.get("formal_write_count") != 0
+        or any(
+            not isinstance(value, str) or not value
+            for value in values.values()
+        )
+    ):
+        raise SystemExit(f"portable Producer descriptor invalid: {subject}")
+    return values
+
+
+def render_portable_registry(
+    *,
+    math_root: Path,
+    cs408_root: Path,
+    english_root: Path,
+    mcp_root: Path,
+    mcp_python_executable: Path,
+) -> dict[str, Any]:
+    roots = {
+        "math": _resolved_directory(math_root, "math_root"),
+        "cs408": _resolved_directory(cs408_root, "cs408_root"),
+        "english": _resolved_directory(english_root, "english_root"),
+    }
+    sealed_mcp_root = _resolved_directory(mcp_root, "mcp_root")
+    mcp_python = _resolved_executable(
+        mcp_python_executable, "mcp_python_executable"
+    )
+    try:
+        template = json.loads(REGISTRY_TEMPLATE.read_text(encoding="utf-8"))
+        mcp_manifest_path = sealed_mcp_root / "release.json"
+        mcp_manifest = json.loads(mcp_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("portable component template invalid") from exc
+    release_id = mcp_manifest.get("release_id")
+    server_release = mcp_manifest.get("server_release")
+    source_files = mcp_manifest.get("source_files")
+    launcher = sealed_mcp_root / "scripts" / "sealed_launcher.py"
+    if (
+        not isinstance(release_id, str)
+        or sealed_mcp_root.name != release_id
+        or not isinstance(server_release, str)
+        or not isinstance(source_files, Mapping)
+        or source_files.get("scripts/sealed_launcher.py") != sha256(launcher)
+    ):
+        raise SystemExit("portable MCP release binding invalid")
+    replacements = {
+        "${MATH_ROOT}": str(roots["math"]),
+        "${CS408_ROOT}": str(roots["cs408"]),
+        "${ENGLISH_ROOT}": str(roots["english"]),
+        "${MCP_ROOT}": str(sealed_mcp_root),
+        "${MCP_PYTHON_EXECUTABLE}": str(mcp_python),
+        "${MCP_SERVER_RELEASE}": server_release,
+        "${MCP_RELEASE_ID}": release_id,
+        "${MCP_RELEASE_MANIFEST_SHA256}": sha256(mcp_manifest_path),
+        "${MCP_SEALED_LAUNCHER_SHA256}": sha256(launcher),
+    }
+    rendered = _substitute(template, replacements)
+    external = rendered.get("external_runtime_sources")
+    if not isinstance(external, Mapping):
+        raise SystemExit("portable external source registry invalid")
+    for name, row in external.items():
+        if not isinstance(row, dict):
+            raise SystemExit("portable external source registry invalid")
+        path = Path(str(row.get("path") or ""))
+        row["sha256"] = sha256(path)
+        replacements[f"${{{str(name).upper()}_SHA256}}"] = row["sha256"]
+    contracts = rendered.get("foreground_capture_contracts")
+    descriptor_relatives = {
+        "math": Path("数学一回滚复习系统/schema/producer-binding-v1.json"),
+        "cs408": Path("schema/producer-binding-v1.json"),
+        "english": Path("schema/english_pipeline/producer-binding-v1.json"),
+    }
+    if not isinstance(contracts, Mapping):
+        raise SystemExit("portable foreground contract registry invalid")
+    for subject, row in contracts.items():
+        if subject not in roots or not isinstance(row, dict):
+            raise SystemExit("portable foreground contract registry invalid")
+        descriptor_path = roots[subject] / descriptor_relatives[subject]
+        values = _descriptor_values(descriptor_path, subject)
+        upper = subject.upper()
+        row.update(values)
+        replacements.update(
+            {
+                f"${{{upper}_DESCRIPTOR_SHA256}}": values[
+                    "descriptor_sha256"
+                ],
+                f"${{{upper}_ATTESTATION_REQUIRED_AFTER}}": values[
+                    "attestation_required_after"
+                ],
+                f"${{{upper}_PRODUCER_SOURCE_CLOSURE_SHA256}}": values[
+                    "producer_source_closure_sha256"
+                ],
+                f"${{{upper}_FOREGROUND_SKILL_SHA256}}": values[
+                    "foreground_skill_sha256"
+                ],
+            }
+        )
+    rendered = _substitute(rendered, replacements)
+    if PORTABLE_MARKER_RE.search(json.dumps(rendered, ensure_ascii=False)):
+        raise SystemExit("portable component registry has unresolved markers")
+    return rendered
+
+
 def codex_qualified_tool(server_name: str, tool_name: str) -> str:
     return f"mcp__{server_name}__{tool_name}"
 
@@ -527,6 +693,10 @@ def validate_mcp_release_contract(
                 "STUDY_READ_MCP_EXPECTED_PROJECT_ROOT",
                 "STUDY_READ_MCP_EXPECTED_RELEASE_ID",
                 "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256",
+                "STUDY_READ_MATH_ROOT",
+                "STUDY_READ_CS408_ROOT",
+                "STUDY_READ_ENGLISH_ROOT",
+                "STUDY_INTAKE_RUNTIME_ROOT",
             ],
         }
         or production_profiles
@@ -970,6 +1140,11 @@ def parse_args() -> argparse.Namespace:
             "replace the filesystem root for external verification reads"
         ),
     )
+    parser.add_argument("--math-root", type=Path)
+    parser.add_argument("--cs408-root", type=Path)
+    parser.add_argument("--english-root", type=Path)
+    parser.add_argument("--mcp-root", type=Path)
+    parser.add_argument("--mcp-python-executable", type=Path)
     return parser.parse_args()
 
 
@@ -984,7 +1159,29 @@ def main() -> None:
         check=args.check,
         verification_paths=verification_paths,
     )
-    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    portable_values = (
+        args.math_root,
+        args.cs408_root,
+        args.english_root,
+        args.mcp_root,
+        args.mcp_python_executable,
+    )
+    if any(value is not None for value in portable_values):
+        if any(value is None for value in portable_values):
+            raise SystemExit("portable component bindings are incomplete")
+        registry = render_portable_registry(
+            math_root=args.math_root,
+            cs408_root=args.cs408_root,
+            english_root=args.english_root,
+            mcp_root=args.mcp_root,
+            mcp_python_executable=args.mcp_python_executable,
+        )
+        write_json(REGISTRY, registry, check=args.check)
+    else:
+        try:
+            registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SystemExit("portable component bindings are required") from exc
     if registry.get("schema_version") != "kaoyan-study-intake-components.v1":
         raise SystemExit("invalid component registry schema")
     validate_registry_contract(registry, verification_paths=verification_paths)

@@ -23,9 +23,9 @@ DESCRIPTOR_RELATIVE_PATHS = {
     "english": Path("schema/english_pipeline/producer-binding-v1.json"),
 }
 REPO_ROOTS = {
-    "math": Path("/Users/xiazhibin/Documents/kaoyan-math"),
-    "cs408": Path("/Users/xiazhibin/Documents/kaoyan-408"),
-    "english": Path("/Users/xiazhibin/Documents/kaoyan-english"),
+    "math": Path(f"{Path.home()}/Documents/kaoyan-math"),
+    "cs408": Path(f"{Path.home()}/Documents/kaoyan-408"),
+    "english": Path(f"{Path.home()}/Documents/kaoyan-english"),
 }
 MCP_SERVERS = {
     "math": "kaoyan_math_read",

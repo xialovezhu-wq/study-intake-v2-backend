@@ -10,7 +10,7 @@ release.
 
 ## English contract
 
-- Canonical state directory: `/Users/xiazhibin/Documents/kaoyan-english/intake`
+- Canonical state directory: the configured English root plus `intake/`.
 - Event input: `events/YYYY-MM-DD/`
 - Candidate output: `candidates/YYYY-MM-DD/`
 - Microbatch eligibility: five unconsumed captures, 180 seconds of article
@@ -33,8 +33,8 @@ release.
 The bounded nightly backfill command is:
 
 ```sh
-/Users/xiazhibin/.codex/study-intake-preprocessor/current/bin/preprocess_worker.py \
-  --config /Users/xiazhibin/.codex/study-intake-preprocessor/current/config.json \
+${STUDY_INTAKE_RUNTIME_ROOT}/current/bin/preprocess_worker.py \
+  --config ${STUDY_INTAKE_RUNTIME_ROOT}/current/config.json \
   run-once --subject english --date YYYY-MM-DD
 ```
 

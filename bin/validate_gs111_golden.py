@@ -46,7 +46,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--repo",
-        default="/Users/xiazhibin/Documents/kaoyan-math",
+        default=f"{Path.home()}/Documents/kaoyan-math",
     )
     args = parser.parse_args()
     repo = Path(args.repo).expanduser().resolve()

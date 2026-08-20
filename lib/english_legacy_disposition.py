@@ -67,7 +67,7 @@ AUTHORIZED_OPERATIONS = (
     "sol_apply",
 )
 ROLLOUT_PATH = Path(
-    "/Users/xiazhibin/.codex/sessions/2026/07/10/"
+    f"{Path.home()}/.codex/sessions/2026/07/10/"
     "rollout-2026-07-10T19-44-57-019f4bd8-56dc-7a82-b029-155c11740feb.jsonl"
 )
 ROLLOUT_SHA256 = "1784977be267adc486a63f3f6b0d63ed60ef451765cdc353add82fc172be720d"
@@ -94,17 +94,17 @@ WRITE_SET_AUTHORITY_GENERATION = "english-legacy-en-p0-006-write-set-v3"
 ARTICLE_RECORD_ID = "articles/2026-07-10-2011-english-i-text-4.md"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MASTER_BANK_PATH = Path(
-    "/Users/xiazhibin/Documents/kaoyan-english/bank/master_bank.csv"
+    f"{Path.home()}/Documents/kaoyan-english/bank/master_bank.csv"
 )
 PATTERN_PATH = Path(
-    "/Users/xiazhibin/Documents/kaoyan-english/bank/sentence_patterns.md"
+    f"{Path.home()}/Documents/kaoyan-english/bank/sentence_patterns.md"
 )
 ARTICLE_PATH = Path(
-    "/Users/xiazhibin/Documents/kaoyan-english/articles/"
+    f"{Path.home()}/Documents/kaoyan-english/articles/"
     "2026-07-10-2011-english-i-text-4.md"
 )
 MASTERED_ITEMS_PATH = Path(
-    "/Users/xiazhibin/Documents/kaoyan-english/bank/mastered_items.csv"
+    f"{Path.home()}/Documents/kaoyan-english/bank/mastered_items.csv"
 )
 ENGLISH_ROOT = MASTER_BANK_PATH.parents[1]
 RELATION_REBUILD_SCRIPT = (
@@ -1601,7 +1601,7 @@ def _validate_projection_side_effect_inventory(
 
 def build_complete_inventory_v3_draft(
     *,
-    rollout_path: Path = ROLLOUT_PATH,
+    rollout_path: Path | None = None,
     inventory_id: str,
     independent_review_receipt_sha256: str,
     issued_at: str,
@@ -1610,6 +1610,7 @@ def build_complete_inventory_v3_draft(
 ) -> dict[str, Any]:
     """Reconstruct the complete EN-P0-006 target set from immutable evidence."""
 
+    rollout_path = ROLLOUT_PATH if rollout_path is None else rollout_path
     _nonempty(inventory_id, "legacy_inventory_invalid")
     _sha256(
         independent_review_receipt_sha256,
@@ -1943,13 +1944,14 @@ def build_inventory_independent_review_receipt_draft(
     reviewed_at: str,
     mcp_authority_generation: str,
     mcp_authority_fingerprint: str,
-    rollout_path: Path = ROLLOUT_PATH,
+    rollout_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build the exact independent-review statement that may be HMAC sealed."""
 
     _nonempty(review_id, "legacy_inventory_review_invalid")
     _nonempty(reviewer_identity, "legacy_inventory_review_invalid")
     _timestamp(reviewed_at, "legacy_inventory_review_invalid")
+    rollout_path = ROLLOUT_PATH if rollout_path is None else rollout_path
     subject = build_complete_inventory_v3_draft(
         rollout_path=rollout_path,
         inventory_id="EN-P0-006-INDEPENDENT-REVIEW-SUBJECT",

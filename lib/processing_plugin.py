@@ -257,6 +257,10 @@ def _validate_mcp_release_binding(
             "STUDY_READ_MCP_EXPECTED_PROJECT_ROOT",
             "STUDY_READ_MCP_EXPECTED_RELEASE_ID",
             "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256",
+            "STUDY_READ_MATH_ROOT",
+            "STUDY_READ_CS408_ROOT",
+            "STUDY_READ_ENGLISH_ROOT",
+            "STUDY_INTAKE_RUNTIME_ROOT",
         ],
     }
     expected_launcher_profiles = {
@@ -592,14 +596,20 @@ class ProcessingPluginHost:
             *arguments,
         ]
 
-    @staticmethod
-    def _sealed_launcher_environment() -> dict[str, str]:
+    def _sealed_launcher_environment(
+        self, *, subject_root: Path | None = None
+    ) -> dict[str, str]:
+        repository_root = (subject_root or self.runtime_root).resolve()
         return {
             "PATH": "/usr/bin:/bin",
             "PYTHONUTF8": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
             "PYTHONSAFEPATH": "1",
+            "STUDY_READ_MATH_ROOT": str(repository_root),
+            "STUDY_READ_CS408_ROOT": str(repository_root),
+            "STUDY_READ_ENGLISH_ROOT": str(repository_root),
+            "STUDY_INTAKE_RUNTIME_ROOT": str(self.runtime_root),
         }
 
     def _route(
@@ -731,7 +741,9 @@ class ProcessingPluginHost:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd="/",
-                env=self._sealed_launcher_environment(),
+                env=self._sealed_launcher_environment(
+                    subject_root=subject_root
+                ),
                 timeout=self.timeout_seconds,
                 check=False,
             )

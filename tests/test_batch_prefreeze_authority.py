@@ -18,9 +18,23 @@ from concurrent_dispatch import DispatchError, FrozenTask  # noqa: E402
 from preprocess_dispatcher import ProductionDispatchRuntime  # noqa: E402
 from processing_plugin import ProcessingPluginHost  # noqa: E402
 from subject_sol_contract import SubjectSolContractError  # noqa: E402
+from tests.portable_plugin_fixture import build_portable_plugin_fixture
 
 
 class BatchPrefreezeAuthorityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._portable_temp = tempfile.TemporaryDirectory(
+            prefix="batch-prefreeze-portable-"
+        )
+        cls.portable_fixture = build_portable_plugin_fixture(
+            Path(cls._portable_temp.name), ROOT
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._portable_temp.cleanup()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="batch-prefreeze-")
         self.runtime_root = Path(self.temp.name) / "runtime"
@@ -264,24 +278,16 @@ class BatchPrefreezeAuthorityTests(unittest.TestCase):
             "dispatch_reason": "controlled_replay",
         }
         task = FrozenTask(payload)
-        mcp_release_id = (
-            "21d738a1d74586aab72c8a63dc62c680aa10c6ac837c2bd5041e757ba0e63425"
-        )
-        mcp_source_root = Path(
-            "/Users/xiazhibin/Documents/Codex/local-study-read-mcp"
-        )
+        portable = self.portable_fixture
+        plugin_root = portable.plugin_root
+        lock_path = plugin_root / "component-lock.json"
         host = ProcessingPluginHost(
             {
                 "enabled": True,
-                "root": str(ROOT / "plugin/kaoyan-study-intake"),
-                "component_lock_path": str(
-                    ROOT / "plugin/kaoyan-study-intake/component-lock.json"
-                ),
-                "mcp_client_python": str(mcp_source_root / ".venv/bin/python"),
-                "mcp_project_root": str(
-                    Path("/Users/xiazhibin/.codex/local-study-read-mcp/releases")
-                    / mcp_release_id
-                ),
+                "root": str(plugin_root),
+                "component_lock_path": str(lock_path),
+                "mcp_client_python": str(portable.mcp_python),
+                "mcp_project_root": str(portable.mcp_root),
                 "authority_key_path": str(
                     self.runtime_root / "dispatch/state/authority.key"
                 ),
@@ -290,11 +296,10 @@ class BatchPrefreezeAuthorityTests(unittest.TestCase):
             },
             runtime_root=self.runtime_root,
             candidate_release_id=release_id,
+            subject_roots=portable.subject_roots,
         )
         lock = json.loads(
-            (ROOT / "plugin/kaoyan-study-intake/component-lock.json").read_text(
-                encoding="utf-8"
-            )
+            lock_path.read_text(encoding="utf-8")
         )
         server_release = lock["mcp_server_release"]
 

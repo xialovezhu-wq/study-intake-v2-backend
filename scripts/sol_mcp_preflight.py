@@ -26,7 +26,7 @@ def main() -> int:
     parser.add_argument(
         "--runtime-root",
         type=Path,
-        default=Path("/Users/xiazhibin/.codex/study-intake-preprocessor"),
+        default=Path(f"{Path.home()}/.codex/study-intake-preprocessor"),
     )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument(

@@ -7,12 +7,12 @@ Use this when the user reaches the end of an article or explicitly requests the 
 Run:
 
 ```text
-python3 /Users/xiazhibin/Documents/kaoyan-english/scripts/english_learning_pipeline.py complete-article --state-dir /Users/xiazhibin/Documents/kaoyan-english/intake --source-id <source_id> --idempotency-key <stable-completion-key> [--date <YYYY-MM-DD>]
+python3 -m english_pipeline.cli complete-article --state-dir <state-dir> --source-id <source_id> --idempotency-key <stable-completion-key> [--date <YYYY-MM-DD>]
 ```
 
 Use the same idempotency key when retrying the same article-completion request. Do not create a fresh key merely because the command is retried.
 
-The command freezes the effective capture IDs for that article and immediately writes an output-only A/B/C JSON plus Markdown snapshot under `/Users/xiazhibin/Documents/kaoyan-english/intake/views/YYYY-MM-DD/` unless `--output-dir` is explicitly supplied. It appends `article_completed` for the background worker, but it neither runs Luna nor writes formal data.
+The command freezes the effective capture IDs for that article and immediately writes an output-only A/B/C JSON plus Markdown snapshot under `<state-dir>/views/YYYY-MM-DD/` unless `--output-dir` is explicitly supplied. It appends `article_completed` for the background worker, but it neither runs Luna nor writes formal data.
 
 ## Receipt and output gate
 

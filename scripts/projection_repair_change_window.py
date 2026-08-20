@@ -846,8 +846,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--expected-english-builder-sha256")
     value.add_argument("--english-source-id", default="RAW-ARTICLE-20260710-001")
     value.add_argument("--english-date", default="2026-08-06")
-    value.add_argument("--cs408-repo", type=Path, default=Path("/Users/xiazhibin/Documents/kaoyan-408"))
-    value.add_argument("--english-repo", type=Path, default=Path("/Users/xiazhibin/Documents/kaoyan-english"))
+    value.add_argument("--cs408-repo", type=Path, default=Path(f"{Path.home()}/Documents/kaoyan-408"))
+    value.add_argument("--english-repo", type=Path, default=Path(f"{Path.home()}/Documents/kaoyan-english"))
     return value
 
 

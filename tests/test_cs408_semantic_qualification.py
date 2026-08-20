@@ -16,37 +16,221 @@ if str(LIB) not in sys.path:
 import cs408_semantic_qualification as qualification  # noqa: E402
 
 
-FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "e8a_cs408_required_correction"
-CAPTURE_ID = "OBS-91DC4259E9E0BC1996B01884"
+CAPTURE_ID = "OBS-SYNTHETIC-CS408-001"
 
 
-def load(name: str) -> dict:
-    return json.loads((FIXTURE_ROOT / name).read_text(encoding="utf-8"))
+def _ref(seed: str) -> str:
+    return "mcp-item:cs408:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
-def physical_sha256(name: str) -> str:
-    return hashlib.sha256((FIXTURE_ROOT / name).read_bytes()).hexdigest()
+def _transcript(stage_name: str, seed: str) -> dict:
+    artifact_id = "capture-facts"
+    rows = [
+        (
+            "get_task_context",
+            {},
+            {
+                "capture_id": CAPTURE_ID,
+                "artifacts": [{"artifact_id": artifact_id}],
+                "collection": "task_context",
+                "data_role": "task_context",
+                "evidence_ref": _ref(f"{seed}:context"),
+            },
+        ),
+        (
+            "read_task_artifact",
+            {"artifact_id": artifact_id},
+            {
+                "capture_id": CAPTURE_ID,
+                "content_complete": True,
+                "collection": "task_artifact",
+                "data_role": "capture_evidence",
+                "evidence_ref": _ref(f"{seed}:artifact"),
+            },
+        ),
+        (
+            "get_records",
+            {"collection": "knowledge_nodes", "ids": ["KN-SYNTHETIC"]},
+            {
+                "collection": "knowledge_nodes",
+                "data_role": "formal_knowledge",
+                "evidence_ref": _ref(f"{seed}:knowledge"),
+            },
+        ),
+        (
+            "get_records",
+            {"collection": "formal_nodes", "ids": ["NODE-SYNTHETIC"]},
+            {
+                "collection": "formal_nodes",
+                "data_role": "formal_wrong_item",
+                "evidence_ref": _ref(f"{seed}:identity"),
+            },
+        ),
+        (
+            "query_relations",
+            {"stable_id": "NODE-SYNTHETIC"},
+            {
+                "collection": "relations",
+                "data_role": "relation_edge",
+                "evidence_ref": _ref(f"{seed}:relation"),
+            },
+        ),
+    ]
+    calls = []
+    for sequence, (tool, arguments, item) in enumerate(rows, start=1):
+        result = {
+            "ok": True,
+            "subject": "cs408",
+            "items": [item],
+            "formal_write_count": 0,
+        }
+        calls.append(
+            {
+                "sequence": sequence,
+                "server": "kaoyan_cs408_read",
+                "tool": tool,
+                "arguments": arguments,
+                "arguments_sha256": qualification.content_sha256(arguments),
+                "result": result,
+                "result_sha256": qualification.content_sha256(result),
+            }
+        )
+    return {
+        "schema_version": "model-driven-mcp-stage-transcript-v1",
+        "subject": "cs408",
+        "stage_name": stage_name,
+        "read_session_id": "rs-synthetic-cs408-001",
+        "read_session_manifest_sha256": "1" * 64,
+        "generation": "synthetic-generation-1",
+        "authority_fingerprint": "2" * 64,
+        "calls": calls,
+        "coverage": {
+            "call_count": len(calls),
+            "all_returned_pages_consumed": True,
+            "unresolved_next_cursors": [],
+            "duplicate_argument_count": 0,
+        },
+        "formal_write_count": 0,
+    }
+
+
+def _stage_outputs() -> tuple[dict, dict]:
+    analysis_refs = {
+        name: _ref(f"analysis:{name}")
+        for name in ("context", "artifact", "knowledge", "identity", "relation")
+    }
+    critical_refs = {
+        name: _ref(f"critical:{name}")
+        for name in ("context", "artifact", "knowledge", "identity", "relation")
+    }
+    analysis = {
+        "schema_version": "study-intake-model-stage-output-v1",
+        "stage_name": "cs408_analysis",
+        "requested_model": "gpt-5.6-luna",
+        "requested_reasoning_effort": "max",
+        "payload": {
+            "schema_version": "study-intake-luna-analysis-v2",
+            "atomic_signals": [
+                {
+                    "signal_id": "sig-synthetic-core",
+                    "evidence_refs": [analysis_refs["context"]],
+                },
+                {
+                    "signal_id": "sig-identity-conflict",
+                    "canonical_term": "当前题目身份绑定冲突",
+                    "evidence_refs": [analysis_refs["identity"]],
+                },
+            ],
+            "formalization_candidates": {
+                "items": [
+                    {
+                        "candidate_id": "candidate-synthetic",
+                        "evidence_refs": [analysis_refs["knowledge"]],
+                    }
+                ]
+            },
+            "knowledge_network_context": {
+                "relations": [
+                    {
+                        "relation_id": "relation-synthetic",
+                        "evidence_refs": [analysis_refs["relation"]],
+                    }
+                ]
+            },
+            "reasoning_diagnosis": {
+                "status": "synthetic_grounded",
+                "evidence_refs": [analysis_refs["artifact"]],
+            },
+            "evidence_assessment": {
+                "status": "complete",
+                "evidence_refs": [analysis_refs["context"]],
+            },
+        },
+        "formal_write_count": 0,
+    }
+    critical = {
+        "schema_version": "study-intake-model-stage-output-v1",
+        "stage_name": "cs408_critical_review",
+        "requested_model": "gpt-5.6-luna",
+        "requested_reasoning_effort": "max",
+        "payload": {
+            "schema_version": "study-intake-luna-critical-review-v2",
+            "verdict": "reject",
+            "answer_safety_findings": [
+                {
+                    "finding_id": "CR-SAFETY-SYNTHETIC",
+                    "evidence_refs": [critical_refs["context"]],
+                    "analysis_refs": ["analysis.atomic_signals[0]"],
+                }
+            ],
+            "identity_findings": [
+                {
+                    "finding_id": "CR-IDENTITY-SYNTHETIC",
+                    "canonical_term": "当前题目身份绑定冲突",
+                    "evidence_refs": [critical_refs["identity"]],
+                    "analysis_refs": ["analysis.atomic_signals[1]"],
+                }
+            ],
+            "knowledge_review": {
+                "evidence_refs": [critical_refs["knowledge"]],
+                "analysis_refs": ["analysis.formalization_candidates"],
+            },
+            "relation_review": {
+                "evidence_refs": [critical_refs["relation"]],
+                "analysis_refs": ["analysis.knowledge_network_context"],
+            },
+            "artifact_review": {
+                "evidence_refs": [critical_refs["artifact"]],
+                "analysis_refs": ["analysis.reasoning_diagnosis"],
+            },
+        },
+        "formal_write_count": 0,
+    }
+    return analysis, critical
 
 
 def inputs() -> dict:
+    analysis_output, critical_output = _stage_outputs()
+    analysis_transcript = _transcript("cs408_analysis", "analysis")
+    critical_transcript = _transcript(
+        "cs408_critical_review", "critical"
+    )
     return {
         "capture_id": CAPTURE_ID,
-        "analysis_stage_output": load("analysis-stage-output.json"),
-        "critical_review_stage_output": load(
-            "critical-review-stage-output.json"
-        ),
-        "analysis_transcript": load("analysis-transcript.json"),
-        "critical_review_transcript": load(
-            "critical-review-transcript.json"
-        ),
+        "analysis_stage_output": analysis_output,
+        "critical_review_stage_output": critical_output,
+        "analysis_transcript": analysis_transcript,
+        "critical_review_transcript": critical_transcript,
         "source_physical_sha256s": {
-            "analysis_output": physical_sha256("analysis-stage-output.json"),
-            "critical_review_output": physical_sha256(
-                "critical-review-stage-output.json"
+            "analysis_output": qualification.sha256_value(analysis_output),
+            "critical_review_output": qualification.sha256_value(
+                critical_output
             ),
-            "analysis_transcript": physical_sha256("analysis-transcript.json"),
-            "critical_review_transcript": physical_sha256(
-                "critical-review-transcript.json"
+            "analysis_transcript": qualification.sha256_value(
+                analysis_transcript
+            ),
+            "critical_review_transcript": qualification.sha256_value(
+                critical_transcript
             ),
         },
         "fresh_context_proof": {
@@ -166,11 +350,11 @@ class Cs408SemanticQualificationTests(unittest.TestCase):
         self.assertEqual(receipt["format_warnings"], [])
         self.assertEqual(
             receipt["analysis_output_sha256"],
-            "af94f2db52214d8083200e5d257c83db5d38adcc6f64f7ffb4578b8671410f3a",
+            inputs()["source_physical_sha256s"]["analysis_output"],
         )
         self.assertEqual(
             receipt["critical_review_output_sha256"],
-            "0a9e532a9fbb94b6f7baf9fc1818001322e0b97806a3e7ff1823b75c3cc44d60",
+            inputs()["source_physical_sha256s"]["critical_review_output"],
         )
         self.assertTrue(all(receipt["semantic_coverage"].values()))
         self.assertEqual(receipt["formal_write_count"], 0)

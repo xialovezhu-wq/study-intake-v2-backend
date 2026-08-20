@@ -13,6 +13,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from preprocessor_core import (  # noqa: E402
     PreprocessorError,
@@ -25,86 +26,35 @@ from preprocessor_core import (  # noqa: E402
     validate_english_critical_review,
     validate_english_mcp_grounding,
 )
-
-
-A04_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "subject-verification/e8a54b12-english/real-smoke/"
-    "ENGLISH-LUNA-REAL-DIAGNOSTIC-A04-20260810"
-)
-REPORTS = A04_ROOT / "runtime/private/reports"
-
-ANALYSIS_OUTPUT_SHA256 = (
-    "862f20e14185003c0e767edb5c0a9f985f3b798cff72fc8872408dea7c9d1847"
-)
-CRITICAL_OUTPUT_SHA256 = (
-    "dff37225d323d864bd57bd1212c69d1cc400d6d75d43dfe1554f542a0efc99ad"
-)
-ANALYSIS_RAW_SHA256 = (
-    "5df9a9b23a6657168e74fedeb105a71c986d572ad83f1f30460940c0dcaaa24e"
-)
-CRITICAL_RAW_SHA256 = (
-    "ea60a76d2c245193af8a78394575540b1d89b3a61cb692743893ac031a1ff310"
-)
-ANALYSIS_TRANSCRIPT_SHA256 = (
-    "45e5e2cf375525ccfe26417fc33c63c2dce5c1fab534cc0eaca68caaeea02bbb"
-)
-CRITICAL_TRANSCRIPT_SHA256 = (
-    "d1e098895afd3ae53fa08739ecec176a0f37059e6a6a6b9042cc3b06165eacbb"
-)
-CHECKPOINT_SHA256 = (
-    "74b075495d4a3f7f68e7e7799beb5578a947483e7b4eeac38bc090326bfc245e"
-)
-TERMINAL_FAILURE_SHA256 = (
-    "ea84c9ef1b395ad5c389f00a8f9cbd267c30d5caed77c2dde471a5438ed5ecd0"
+from synthetic_a03_a04_fixture import (  # noqa: E402
+    SyntheticA04Fixture,
+    build_synthetic_a04_fixture,
 )
 
-ANALYSIS_OUTPUT_PATH = (
-    REPORTS / "model-stage-outputs/objects" / f"{ANALYSIS_OUTPUT_SHA256}.json"
-)
-CRITICAL_OUTPUT_PATH = (
-    REPORTS / "model-stage-outputs/objects" / f"{CRITICAL_OUTPUT_SHA256}.json"
-)
-ANALYSIS_RAW_PATH = (
-    REPORTS
-    / "model-mcp-transport/sha256"
-    / ANALYSIS_RAW_SHA256[:2]
-    / f"{ANALYSIS_RAW_SHA256}.json"
-)
-CRITICAL_RAW_PATH = (
-    REPORTS
-    / "model-mcp-transport/sha256"
-    / CRITICAL_RAW_SHA256[:2]
-    / f"{CRITICAL_RAW_SHA256}.json"
-)
-ANALYSIS_TRANSCRIPT_PATH = (
-    REPORTS
-    / "mcp-stage-transcripts/sha256"
-    / ANALYSIS_TRANSCRIPT_SHA256[:2]
-    / f"{ANALYSIS_TRANSCRIPT_SHA256}.json"
-)
-CRITICAL_TRANSCRIPT_PATH = (
-    REPORTS
-    / "mcp-stage-transcripts/sha256"
-    / CRITICAL_TRANSCRIPT_SHA256[:2]
-    / f"{CRITICAL_TRANSCRIPT_SHA256}.json"
-)
-CHECKPOINT_PATH = (
-    REPORTS / "analysis-checkpoints/objects" / f"{CHECKPOINT_SHA256}.json"
-)
-TERMINAL_FAILURE_PATH = A04_ROOT / "receipts/terminal-failure.json"
+
+def _load_synthetic_json(path: Path, expected_sha256: str) -> dict[str, Any]:
+    payload = path.read_bytes()
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256 or path.stem != expected_sha256:
+        raise AssertionError(
+            f"synthetic fixture SHA drift: {path}: {actual_sha256}"
+        )
+    value = json.loads(payload)
+    if not isinstance(value, dict):
+        raise AssertionError(f"synthetic fixture must be an object: {path}")
+    return value
 
 
-def _load_sealed_json(path: Path, expected_sha256: str) -> dict[str, Any]:
+def _load_terminal_failure(path: Path, expected_sha256: str) -> dict[str, Any]:
     payload = path.read_bytes()
     actual_sha256 = hashlib.sha256(payload).hexdigest()
     if actual_sha256 != expected_sha256:
         raise AssertionError(
-            f"sealed A04 fixture SHA drift: {path}: {actual_sha256}"
+            f"synthetic terminal failure SHA drift: {path}: {actual_sha256}"
         )
     value = json.loads(payload)
     if not isinstance(value, dict):
-        raise AssertionError(f"sealed A04 fixture must be an object: {path}")
+        raise AssertionError(f"synthetic terminal failure must be an object: {path}")
     return value
 
 
@@ -144,69 +94,89 @@ def _first_unresolved_path(payload: dict[str, Any]) -> tuple[str, str]:
                 f"$.payload.correction_resolutions[{index}].resolution",
                 str(resolution.get("finding_id") or ""),
             )
-    raise AssertionError("A04 critical review no longer has an unresolved row")
+    raise AssertionError("synthetic A04 critical review has no unresolved row")
 
 
 class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        sealed_paths = (
-            ANALYSIS_OUTPUT_PATH,
-            CRITICAL_OUTPUT_PATH,
-            ANALYSIS_RAW_PATH,
-            CRITICAL_RAW_PATH,
-            ANALYSIS_TRANSCRIPT_PATH,
-            CRITICAL_TRANSCRIPT_PATH,
-            CHECKPOINT_PATH,
-            TERMINAL_FAILURE_PATH,
-        )
-        for path in sealed_paths:
-            if not path.is_file() or path.is_symlink():
-                raise AssertionError(f"sealed A04 fixture missing: {path}")
+        cls.fixture: SyntheticA04Fixture = build_synthetic_a04_fixture()
+        cls.addClassCleanup(cls.fixture.cleanup)
 
     def setUp(self) -> None:
-        self.analysis_output = _load_sealed_json(
-            ANALYSIS_OUTPUT_PATH, ANALYSIS_OUTPUT_SHA256
+        self.fixture = type(self).fixture
+        self.scenario = self.fixture.scenario
+        self.analysis_output = _load_synthetic_json(
+            self.fixture.analysis_output_path,
+            self.scenario["analysis_output_sha256"],
         )
-        self.critical_output = _load_sealed_json(
-            CRITICAL_OUTPUT_PATH, CRITICAL_OUTPUT_SHA256
+        self.critical_output = _load_synthetic_json(
+            self.fixture.critical_output_path,
+            self.scenario["critical_output_sha256"],
         )
-        self.analysis_raw = _load_sealed_json(
-            ANALYSIS_RAW_PATH, ANALYSIS_RAW_SHA256
+        self.analysis_raw = _load_synthetic_json(
+            self.fixture.analysis_raw_path,
+            self.scenario["analysis_raw_sha256"],
         )
-        self.critical_raw = _load_sealed_json(
-            CRITICAL_RAW_PATH, CRITICAL_RAW_SHA256
+        self.critical_raw = _load_synthetic_json(
+            self.fixture.critical_raw_path,
+            self.scenario["critical_raw_sha256"],
         )
-        self.analysis_transcript = _load_sealed_json(
-            ANALYSIS_TRANSCRIPT_PATH, ANALYSIS_TRANSCRIPT_SHA256
+        self.analysis_transcript = _load_synthetic_json(
+            self.fixture.analysis_transcript_path,
+            self.scenario["analysis_transcript_sha256"],
         )
-        self.critical_transcript = _load_sealed_json(
-            CRITICAL_TRANSCRIPT_PATH, CRITICAL_TRANSCRIPT_SHA256
+        self.critical_transcript = _load_synthetic_json(
+            self.fixture.critical_transcript_path,
+            self.scenario["critical_transcript_sha256"],
         )
-        self.checkpoint = _load_sealed_json(
-            CHECKPOINT_PATH, CHECKPOINT_SHA256
+        self.checkpoint = _load_synthetic_json(
+            self.fixture.checkpoint_path,
+            self.scenario["checkpoint_sha256"],
         )
 
-    def test_exact_a04_raw_failure_is_non_evidence_and_recovered_transport_closes(
+    def test_synthetic_a04_failed_attempt_is_non_evidence_and_recovery_closes(
         self,
     ) -> None:
-        self.assertEqual(self.analysis_raw["mcp_item_count"], 6)
-        self.assertEqual(len(self.analysis_transcript["calls"]), 5)
-        self.assertEqual(self.critical_raw["mcp_item_count"], 34)
-        self.assertEqual(len(self.critical_transcript["calls"]), 33)
+        self.assertEqual(
+            self.scenario["fixture_scope"], "synthetic_contract_only"
+        )
+        self.assertEqual(
+            self.analysis_raw["mcp_item_count"],
+            self.scenario["analysis_raw_item_count"],
+        )
+        self.assertEqual(
+            len(self.analysis_transcript["calls"]),
+            self.scenario["analysis_tool_call_count"],
+        )
+        self.assertEqual(
+            self.critical_raw["mcp_item_count"],
+            self.scenario["critical_raw_item_count"],
+        )
+        self.assertEqual(
+            len(self.critical_transcript["calls"]),
+            self.scenario["critical_tool_call_count"],
+        )
 
         failed_rows = [
             row
             for row in self.critical_raw["mcp_items"]
             if row["item"]["result"]["structured_content"]["ok"] is False
         ]
-        self.assertEqual(len(failed_rows), 1)
+        self.assertEqual(
+            len(failed_rows), self.scenario["failed_attempt_count"]
+        )
         failed = failed_rows[0]
-        self.assertEqual(failed["sequence"], 4)
+        self.assertEqual(
+            failed["sequence"], self.scenario["failed_attempt_sequence"]
+        )
         self.assertEqual(failed["item"]["tool"], "search_records")
         self.assertEqual(
             failed["item"]["arguments"],
-            {"page_size": 48, "query": "permanent"},
+            {
+                "page_size": 48,
+                "query": self.scenario["permanent_query"],
+            },
         )
         failed_result = failed["item"]["result"]["structured_content"]
         self.assertEqual(failed_result["error"]["code"], "OUTPUT_LIMIT")
@@ -215,53 +185,76 @@ class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
         canonical_json = json.dumps(
             self.critical_transcript, ensure_ascii=False, sort_keys=True
         )
-        self.assertNotIn(failed_result["request_id"], canonical_json)
-        self.assertTrue(
-            all(
-                call["result"]["ok"] is True
-                for call in self.critical_transcript["calls"]
-            )
+        self.assertNotIn(
+            self.scenario["failed_request_id"], canonical_json
         )
-        first_recovered = self.critical_transcript["calls"][3]
-        self.assertEqual(first_recovered["sequence"], 4)
+        self.assertTrue(
+            all(call["result"]["ok"] is True
+                for call in self.critical_transcript["calls"])
+        )
+        first_recovered = self.critical_transcript["calls"][
+            self.scenario["recovery_sequence"] - 1
+        ]
+        self.assertEqual(
+            first_recovered["sequence"], self.scenario["recovery_sequence"]
+        )
         self.assertEqual(first_recovered["tool"], "search_records")
         self.assertEqual(
             first_recovered["arguments"],
-            {"page_size": 1, "query": "permanent"},
+            {
+                "page_size": 1,
+                "query": self.scenario["permanent_query"],
+            },
         )
         permanent_calls = [
             call
             for call in self.critical_transcript["calls"]
             if call["tool"] == "search_records"
-            and call["arguments"].get("query") == "permanent"
+            and call["arguments"].get("query")
+            == self.scenario["permanent_query"]
         ]
-        self.assertEqual(len(permanent_calls), 16)
+        self.assertEqual(
+            len(permanent_calls), self.scenario["permanent_recovery_call_count"]
+        )
         self.assertIs(permanent_calls[-1]["result"]["complete"], True)
         self.assertIsNone(permanent_calls[-1]["result"]["next_cursor"])
         self.assertEqual(
             self.critical_transcript["coverage"],
             {
                 "all_returned_pages_consumed": True,
-                "call_count": 33,
+                "call_count": self.scenario["critical_tool_call_count"],
                 "duplicate_argument_count": 0,
                 "host_semantic_prefetch": False,
                 "unresolved_next_cursors": [],
             },
         )
+        for transcript in (
+            self.analysis_transcript,
+            self.critical_transcript,
+        ):
+            self.assertEqual(
+                transcript["formal_write_count"],
+                self.scenario["formal_write_count"],
+            )
 
-    def test_exact_a04_critical_review_replays_first_unresolved_signature_and_path(
+    def test_synthetic_a04_critical_review_fails_closed_on_required_correction(
         self,
     ) -> None:
-        terminal = _load_sealed_json(
-            TERMINAL_FAILURE_PATH, TERMINAL_FAILURE_SHA256
+        terminal = _load_terminal_failure(
+            self.fixture.terminal_failure_path,
+            self.scenario["terminal_failure_sha256"],
         )
         self.assertEqual(
             terminal["failure_signature"],
             "english_required_correction_unresolved",
         )
-        self.assertEqual(terminal["failure_stage"], "real_two_stage_dispatch")
+        self.assertEqual(
+            terminal["failure_stage"], "synthetic_two_stage_dispatch"
+        )
         self.assertIsNone(terminal["first_failure_path"])
-        self.assertEqual(terminal["formal_write_count"], 0)
+        self.assertEqual(
+            terminal["formal_write_count"], self.scenario["formal_write_count"]
+        )
         self.assertEqual(terminal["sol_status"], "disabled")
 
         review = copy.deepcopy(self.critical_output["payload"])
@@ -274,34 +267,51 @@ class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
         self.assertEqual(
             _first_unresolved_path(review),
             (
-                "$.payload.correction_resolutions[6].resolution",
-                "CR-000",
+                "$.payload.correction_resolutions["
+                f"{self.scenario['unresolved_resolution_index']}].resolution",
+                self.scenario["blocking_finding_id"],
             ),
         )
-        self.assertEqual(review["findings"][0]["correction_id"], "CR-000")
-        self.assertEqual(review["findings"][0]["severity"], "blocking")
+        self.assertEqual(
+            review["findings"][self.scenario["blocking_finding_index"]][
+                "correction_id"
+            ],
+            self.scenario["blocking_finding_id"],
+        )
+        self.assertEqual(
+            review["findings"][self.scenario["blocking_finding_index"]][
+                "severity"
+            ],
+            "blocking",
+        )
         self.assertEqual(review["verdict"], "reject")
 
         effective = materialize_english_correction_deltas(
             review, semantic_draft
         )
-        self.assertEqual(len(effective["correction_resolutions"]), 7)
         self.assertEqual(
-            effective["correction_resolutions"][6],
-            review["correction_resolutions"][6],
+            len(effective["correction_resolutions"]),
+            self.scenario["resolution_count"],
+        )
+        self.assertEqual(
+            effective["correction_resolutions"][
+                self.scenario["unresolved_resolution_index"]
+            ],
+            review["correction_resolutions"][
+                self.scenario["unresolved_resolution_index"]
+            ],
         )
         with self.assertRaises(PreprocessorError) as raised:
             validate_english_critical_review(effective, semantic_draft)
         self.assertEqual(
-            raised.exception.code,
-            "english_required_correction_unresolved",
+            raised.exception.code, "english_required_correction_unresolved"
         )
         self.assertIsNotNone(raised.exception.__cause__)
         self.assertEqual(
             str(raised.exception.__cause__), "required_correction_unresolved"
         )
 
-    def test_corrected_recovered_fixture_closes_corrections_and_stage_grounding(
+    def test_synthetic_a04_corrected_recovery_closes_corrections_and_grounding(
         self,
     ) -> None:
         semantic_draft = english_review_semantic_draft(
@@ -309,15 +319,16 @@ class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
         )
         corrected = copy.deepcopy(self.critical_output["payload"])
         corrected["verdict"] = "revised"
+        blocking_id = self.scenario["blocking_finding_id"]
         corrected["findings"] = [
             row
             for row in corrected["findings"]
-            if row["correction_id"] != "CR-000"
+            if row["correction_id"] != blocking_id
         ]
         corrected["correction_resolutions"] = [
             row
             for row in corrected["correction_resolutions"]
-            if row["finding_id"] != "CR-000"
+            if row["finding_id"] != blocking_id
         ]
 
         effective = materialize_english_correction_deltas(
@@ -325,8 +336,13 @@ class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
         )
         validate_english_critical_review(effective, semantic_draft)
         validate_english_applied_corrections(effective)
-        self.assertEqual(len(effective["findings"]), 6)
-        self.assertEqual(len(effective["correction_resolutions"]), 6)
+        self.assertEqual(
+            len(effective["findings"]), self.scenario["corrected_finding_count"]
+        )
+        self.assertEqual(
+            len(effective["correction_resolutions"]),
+            self.scenario["corrected_resolution_count"],
+        )
         self.assertTrue(
             all(
                 row["resolution"] == "applied"
@@ -337,12 +353,12 @@ class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
         analysis_stage = _stage_result(
             self.analysis_output,
             self.analysis_transcript,
-            transcript_sha256=ANALYSIS_TRANSCRIPT_SHA256,
+            transcript_sha256=self.scenario["analysis_transcript_sha256"],
         )
         critical_stage = _stage_result(
             self.critical_output,
             self.critical_transcript,
-            transcript_sha256=CRITICAL_TRANSCRIPT_SHA256,
+            transcript_sha256=self.scenario["critical_transcript_sha256"],
         )
         analysis_manifest = mcp_grounding_manifest((analysis_stage,))
         critical_manifest = mcp_grounding_manifest((critical_stage,))
@@ -362,34 +378,39 @@ class A04EnglishRequiredCorrectionReplayTests(unittest.TestCase):
         self.assertEqual(
             analysis_stage.semantic_stage_count
             + critical_stage.semantic_stage_count,
-            2,
+            self.scenario["semantic_stage_count"] * 2,
         )
         self.assertEqual(
             analysis_stage.provider_request_count
             + critical_stage.provider_request_count,
-            40,
+            sum(self.scenario["provider_request_count"].values()),
         )
         self.assertEqual(
             analysis_stage.mcp_tool_call_count
             + critical_stage.mcp_tool_call_count,
-            38,
+            self.scenario["analysis_tool_call_count"]
+            + self.scenario["critical_tool_call_count"],
         )
         for transcript in (
             self.analysis_transcript,
             self.critical_transcript,
         ):
-            self.assertIs(
-                transcript["coverage"]["all_returned_pages_consumed"],
-                True,
+            self.assertTrue(
+                transcript["coverage"]["all_returned_pages_consumed"]
             )
             self.assertEqual(
                 transcript["coverage"]["unresolved_next_cursors"], []
             )
-            self.assertEqual(transcript["formal_write_count"], 0)
-        executed_model_call_count = 0
-        executed_formal_write_count = 0
-        self.assertEqual(executed_model_call_count, 0)
-        self.assertEqual(executed_formal_write_count, 0)
+            self.assertEqual(
+                transcript["formal_write_count"],
+                self.scenario["formal_write_count"],
+            )
+        self.assertEqual(
+            self.scenario["executed_model_call_count"], 0
+        )
+        self.assertEqual(
+            self.scenario["executed_formal_write_count"], 0
+        )
 
 
 if __name__ == "__main__":

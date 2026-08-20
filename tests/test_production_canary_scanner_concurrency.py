@@ -1402,7 +1402,10 @@ class CanonicalProductionScannerIntegrationTests(unittest.TestCase):
             methodName="runTest"
         )
         sealed.setUpClass()
-        draft = sealed.corrected_capture_overlay()
+        try:
+            draft = sealed.corrected_capture_overlay()
+        finally:
+            sealed.tearDownClass()
         self.support._remap_evidence_refs(draft, evidence_ref)
         draft["evidence_assessment"]["completeness"] = "complete"
         draft["evidence_assessment"]["gaps"] = []
@@ -1880,6 +1883,32 @@ class CanonicalProductionScannerIntegrationTests(unittest.TestCase):
         )
         self.support._remap_evidence_refs(review, evidence_ref)
         revised = review["revised_analysis"]
+        # The current-core compatibility payload is intentionally identical
+        # to the draft.  Add one bounded, evidence-backed synthetic critic
+        # correction so this canary exercises the corrected outcome rather
+        # than silently qualifying the accepted path.
+        correction_path = "$.executive_summary"
+        finding_id = "SYNTHETIC-CS408-EXECUTIVE-CORRECTION"
+        revised["executive_summary"] = (
+            str(revised["executive_summary"])
+            + " synthetic critic correction bound to the same evidence."
+        )
+        finding = {
+            "finding_id": finding_id,
+            "severity": "error",
+            "text": "synthetic critic correction is required",
+            "analysis_refs": ["analysis.executive_summary"],
+            "evidence_refs": [evidence_ref],
+            "affected_json_paths": [correction_path],
+        }
+        review["missing_analysis"] = [finding]
+        review["correction_resolutions"] = [
+            {
+                "finding_id": finding_id,
+                "resolution": "applied",
+                "affected_json_paths": [correction_path],
+            }
+        ]
         revised["evidence_assessment"]["completeness"] = "complete"
         revised["evidence_assessment"]["gaps"] = []
         revised["unresolved"] = []

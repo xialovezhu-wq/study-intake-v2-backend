@@ -23,7 +23,7 @@ Help the user understand or correct the current sentence, identify the first rea
 - Candidate status is evidence-backed and distinct from formal entry.
 - Answer protection is preserved for question-local language or structure queries.
 - A resolved sentence has an `english_capture_event_v2` and `english_capture_receipt_v2` bound separately to the repository-relative article locator, `source_id`, the recomputed article-level `source_hash`, `sentence_id` and the exact sentence's `sentence_hash`; an unresolved diagnostic turn has no fabricated receipt. Never substitute one hash for the other.
-- Every daytime receipt proves `formal_write_count=0` or the equivalent `formal_writeback=none` invariant.
+- Every daytime receipt proves `formal_write_count=0` or the equivalent `formal_writeback=none` invariant. A newly created post-attestation event also proves `producer_binding_status=attested` with a non-null `producer_binding_attestation_sha256`; `historical_pre_attestation` is accepted only for immutable events before the declared high watermark and is never backfilled. The sidecar binds the foreground Skill, Producer closure and Capture schemas without release, activation, Dispatcher or MCP authority fields.
 - The final response reports only relevant actions, validation and unresolved evidence.
 
 ## Collaboration mode
@@ -98,7 +98,7 @@ The only route to formal English curation is a separate invocation whose trimmed
    - writing-transfer value
 6. Keep ordinary background vocabulary as 不背单词候选 or 不建议入库.
 7. If a new example is requested, follow schema/reference_grounded_examples.md and fail closed on missing context or stale graph.
-8. When the current sentence is resolved, read and follow references/quick-capture-contract.md. Before capture, bind the article by actually reading article page → `pipeline_handoff` JSON → canonical payload and recomputing the source hash. Then call `python3 /Users/xiazhibin/Documents/kaoyan-english/scripts/english_learning_pipeline.py capture` with the stable source binding and user evidence. Add `--quick-flush` only when the user's current message explicitly authorizes `快速入库`; ordinary automatic resolved-sentence capture keeps the normal 5-capture/180-second microbatch policy. Parse the JSON receipt before claiming it was saved.
+8. When the current sentence is resolved, read and follow references/quick-capture-contract.md. Before capture, bind the article by actually reading article page → `pipeline_handoff` JSON → canonical payload and recomputing the source hash. Then call the portable module entrypoint `python3 -m english_pipeline.cli capture --repo-root <canonical-repo-root> --state-dir <state-dir>` with the stable source binding and user evidence. Add `--quick-flush` only when the user's current message explicitly authorizes `快速入库`; ordinary automatic resolved-sentence capture keeps the normal 5-capture/180-second microbatch policy. Parse the JSON receipt before claiming it was saved.
 9. Keep `formal_write_count=0`. Require a final verifiable `projection_status=rendered` or `projection_status=failed`; an internal initial `pending` receipt is valid only before projection closes. A valid `capture_saved_but_projection_failed` receipt proves the immutable capture was saved but its view failed; report that distinction. A missing or invalid durable event receipt leaves the capture unproven. Neither case may be replaced by a direct article, bank, SP or review edit.
 10. If the user says 整篇结束, 统一输出新词 or 输出不背单词清单, stop per-sentence mode and hand off to kaoyan-english-vocab-export.
 

@@ -69,11 +69,11 @@ GS566_PRECLAIM_FAILURE_RECEIPT_SHA256 = (
 GS566_PRECLAIM_FAILURE_ERROR = "subject_luna_batch_already_current"
 
 SMOKE_ROOT = Path(
-    "/Users/xiazhibin/.codex/kaoyan-math-deferred-intake/2026-08-13/"
+    f"{Path.home()}/.codex/kaoyan-math-deferred-intake/2026-08-13/"
     "019fea48-7f82-7352-b652-0479fbc50f71/"
     "快速入库Smoke样例包_2026-08-13"
 )
-MATH_REPO_ROOT = Path("/Users/xiazhibin/Documents/kaoyan-math")
+MATH_REPO_ROOT = Path(f"{Path.home()}/Documents/kaoyan-math")
 LEDGER_PATH = MATH_REPO_ROOT / "数学一回滚复习系统/快速入库事件.jsonl"
 REVIEW_UNIT_PATH = MATH_REPO_ROOT / "数学一回滚复习系统/复习单元.json"
 
@@ -110,7 +110,7 @@ EXACT_SAMPLES: dict[str, dict[str, Any]] = {
         "formal_card_sha256": "001591649f230245ee61547f1de24eb9228ef847f27f62f73b5192babe227fd5",
         "question_path": "错题知识网络/assets/visual_wrong_questions/GS-269/question_01.png",
         "question_sha256": "1530e2de683df15b23865a10f06d8e9af9ebc190c74b31c23358bbff6aab7e5c",
-        "attachment_path": "/Users/xiazhibin/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/GS-269/题目与本轮上下文_01.png",
+        "attachment_path": f"{Path.home()}/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/GS-269/题目与本轮上下文_01.png",
         "attachment_sha256": "99a008b7be6b3e2db356d7ed535a1cd2c0d962c93066d9ba0719eb10e7b14b2d",
         "stage_required": True,
         "stage_bundle_id": "f6f2857044af6d70561a857c",
@@ -140,7 +140,7 @@ EXACT_SAMPLES: dict[str, dict[str, Any]] = {
         "formal_card_sha256": "5b109f0a7bfed1c4125f091fc0933bfcbbb812b8e987df9562c21488479e3e8e",
         "question_path": "错题知识网络/assets/visual_wrong_questions/GS-225/question_01.png",
         "question_sha256": "e6fcbaeebe81fbbe5c986137f587703356985f7a9593b0d7135dae5a151a7d62",
-        "attachment_path": "/Users/xiazhibin/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/GS-225/题目与本轮上下文_01.png",
+        "attachment_path": f"{Path.home()}/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/GS-225/题目与本轮上下文_01.png",
         "attachment_sha256": "5958504cf5c2f877acd5fc1ef0ebabb08480ef2dad0d5e6172d4c7f9ccf91ff9",
         "stage_required": True,
         "stage_bundle_id": "7b99223b4546f834a17aad66",
@@ -155,7 +155,7 @@ EXACT_SAMPLES: dict[str, dict[str, Any]] = {
         "formal_card_sha256": "bf12612704bdcdb80283c73802c3f8eb5d9978bf2d3ba90130963ce51f9b3b11",
         "question_path": "错题知识网络/assets/visual_wrong_questions/LA-050/question_01.png",
         "question_sha256": "00f7a380e56f096f9a7f56bbe2e069fd9f05ad741fddee851231e5f883513595",
-        "attachment_path": "/Users/xiazhibin/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/LA-050/题目与本轮上下文_01.png",
+        "attachment_path": f"{Path.home()}/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/LA-050/题目与本轮上下文_01.png",
         "attachment_sha256": "a1b667f52643f1300be3c21069ff614bed098f7e5f4de6b049aa55906b157bca",
         "stage_required": True,
         "stage_bundle_id": "c57b9c590cac6a568e3a93eb",
@@ -170,7 +170,7 @@ EXACT_SAMPLES: dict[str, dict[str, Any]] = {
         "formal_card_sha256": "0efe2a9d1eb15b0e6aeb85e8b305f7938d3bc9a423ad4000d10fa76c8341c12c",
         "question_path": "错题知识网络/assets/visual_wrong_questions/LA-016/question_01.png",
         "question_sha256": "6b71471e098bce0e04b469871465c221718ce24beadfbb71739ae23bde679cf4",
-        "attachment_path": "/Users/xiazhibin/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/LA-016/题目与本轮上下文_01.png",
+        "attachment_path": f"{Path.home()}/.codex/kaoyan-math-deferred-intake/2026-08-13/019fea48-7f82-7352-b652-0479fbc50f71/LA-016/题目与本轮上下文_01.png",
         "attachment_sha256": "ae61e75c81545b6fbd1770122ebaa98de2d13c79a4b29ae768869af84e4cc683",
         "stage_required": True,
         "stage_bundle_id": "fef21f7762f5ef5ba131b800",

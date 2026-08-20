@@ -5,30 +5,99 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import zero_model_golden_inventory as inventory
+from tests.synthetic_zero_model_golden_fixture import (
+    SyntheticZeroModelGoldenFixture,
+    build_synthetic_zero_model_golden_fixture,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VALIDATION_BINDING = json.loads(
-    (ROOT / "validation" / "golden-replay-modernization-v1.json").read_text(
-        encoding="utf-8"
-    )
-)
-REAL_SPEC = Path(VALIDATION_BINDING["candidate_bound_spec_path"])
-MATH_BUSINESS_MANIFEST = Path(
-    "/Users/xiazhibin/Documents/kaoyan-math-live-capture/2026-08-09/"
-    "luna-real-business-samples.json"
-)
-MATH_NEGATIVE_MANIFEST = Path(
-    "/Users/xiazhibin/Documents/kaoyan-math-deferred-intake/2026-08-09/"
-    "read-only-test-manifest.json"
-)
 
 
 class ZeroModelGoldenInventoryTests(unittest.TestCase):
-    def test_real_inventory_has_eleven_distinct_business_tasks(self) -> None:
-        result = inventory.inspect_spec(REAL_SPEC)
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="zero-model-golden-")
+        self.fixture: SyntheticZeroModelGoldenFixture = (
+            build_synthetic_zero_model_golden_fixture(Path(self.temporary.name))
+        )
+
+        def live_preflight(path: Path) -> dict:
+            if (
+                path.resolve() != self.fixture.business_manifest_path.resolve()
+                or path.is_symlink()
+                or not path.is_file()
+            ):
+                raise inventory.GoldenInventoryError(
+                    "math_live_business_fixture_invalid"
+                )
+            return copy.deepcopy(self.fixture.live_preflight)
+
+        def superseded_preflight(paths: tuple[Path, ...]) -> dict:
+            if tuple(path.resolve() for path in paths) != tuple(
+                path.resolve() for path in self.fixture.superseded_manifest_paths
+            ):
+                raise inventory.GoldenInventoryError(
+                    "math_superseded_manifest_rejection_invalid"
+                )
+            return copy.deepcopy(self.fixture.superseded_preflight)
+
+        def negative_preflight(path: Path) -> dict:
+            if path.resolve() != self.fixture.negative_manifest_path.resolve():
+                raise inventory.GoldenInventoryError(
+                    "math_negative_fixture_invalid"
+                )
+            return copy.deepcopy(self.fixture.negative_preflight)
+
+        self.patchers = [
+            mock.patch.object(
+                inventory,
+                "TRUSTED_MATH_SOURCE_ROOT",
+                self.fixture.trusted_math_root,
+            ),
+            mock.patch.object(
+                inventory, "_live_math_business_preflight", live_preflight
+            ),
+            mock.patch.object(
+                inventory,
+                "_superseded_math_manifest_preflight",
+                superseded_preflight,
+            ),
+            mock.patch.object(
+                inventory, "_negative_math_preflight", negative_preflight
+            ),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+
+    def tearDown(self) -> None:
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temporary.cleanup()
+
+    def inspect_spec(
+        self,
+        path: Path | None = None,
+        *,
+        math_business_manifest_path: Path | None = None,
+    ) -> dict:
+        return inventory.inspect_spec(
+            self.fixture.spec_path if path is None else path,
+            math_business_manifest_path=(
+                self.fixture.business_manifest_path
+                if math_business_manifest_path is None
+                else math_business_manifest_path
+            ),
+            math_superseded_manifest_paths=(
+                self.fixture.superseded_manifest_paths
+            ),
+            math_negative_manifest_path=self.fixture.negative_manifest_path,
+        )
+
+    def test_synthetic_inventory_has_eleven_distinct_business_tasks(self) -> None:
+        result = self.inspect_spec()
         self.assertEqual(result["status"], "static_fixtures_ready_model_not_run")
         self.assertEqual(result["replay_spec_capture_count"], 10)
         self.assertEqual(result["raw_capture_count"], 13)
@@ -62,8 +131,8 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
         self.assertEqual(excluded[0]["included_in_daily_task_count"], 0)
         self.assertFalse(excluded[0]["counts_toward_thirty_task_gate"])
 
-    def test_live_math_business_tasks_are_bound_but_not_executed(self) -> None:
-        result = inventory.inspect_spec(REAL_SPEC)
+    def test_synthetic_math_business_tasks_are_bound_but_not_executed(self) -> None:
+        result = self.inspect_spec()
         live = result["live_math_business_preflight"]
         self.assertEqual(live["status"], "passed_real_luna_business_preflight")
         self.assertEqual(live["task_count"], 3)
@@ -138,7 +207,7 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
         )
 
     def test_superseded_math_entrypoints_are_rejected(self) -> None:
-        result = inventory.inspect_spec(REAL_SPEC)
+        result = self.inspect_spec()
         superseded = result["superseded_math_entrypoint_preflight"]
         self.assertEqual(superseded["status"], "passed_expected_reject")
         self.assertEqual(superseded["manifest_count"], 2)
@@ -153,7 +222,7 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
         )
 
     def test_old_incomplete_math_fixtures_remain_negative_preflight(self) -> None:
-        result = inventory.inspect_spec(REAL_SPEC)
+        result = self.inspect_spec()
         negative = result["read_only_math_negative_preflight"]
         self.assertEqual(negative["status"], "passed_expected_fail_closed")
         self.assertEqual(negative["sample_count"], 2)
@@ -173,14 +242,10 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
                 inventory.GoldenInventoryError,
                 "math_live_business_fixture_invalid",
             ):
-                inventory.inspect_spec(
-                    REAL_SPEC,
-                    math_business_manifest_path=missing,
-                    math_negative_manifest_path=MATH_NEGATIVE_MANIFEST,
-                )
+                self.inspect_spec(math_business_manifest_path=missing)
 
-    def test_real_frozen_spec_binds_all_requested_golden_roles(self) -> None:
-        result = inventory.inspect_spec(REAL_SPEC)
+    def test_synthetic_frozen_spec_binds_all_requested_golden_roles(self) -> None:
+        result = self.inspect_spec()
         self.assertEqual(
             set(result["golden_roles"]["math"]),
             {"GS-111", "GS-240", "complete-new-intake"},
@@ -205,7 +270,7 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
         )
 
     def test_solution_evidence_or_rule_has_two_positive_routes(self) -> None:
-        result = inventory.inspect_spec(REAL_SPEC)
+        result = self.inspect_spec()
         contract = result["solution_evidence_preflight"]
         self.assertEqual(
             contract["accepted_policy"], "solution_text_or_solution_image"
@@ -236,7 +301,7 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
         self.assertFalse(negative["solution_evidence"]["solution_image_present"])
 
     def test_role_omission_fails_without_model_execution(self) -> None:
-        value = json.loads(REAL_SPEC.read_text(encoding="utf-8"))
+        value = json.loads(self.fixture.spec_path.read_text(encoding="utf-8"))
         value = copy.deepcopy(value)
         value["entries"] = [
             row for row in value["entries"] if row["sample_role"] != "GS-240"
@@ -247,10 +312,10 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 inventory.GoldenInventoryError, "golden_role_set_mismatch"
             ):
-                inventory.inspect_spec(path)
+                self.inspect_spec(path)
 
     def test_english_events_must_form_one_frozen_microbatch(self) -> None:
-        value = json.loads(REAL_SPEC.read_text(encoding="utf-8"))
+        value = json.loads(self.fixture.spec_path.read_text(encoding="utf-8"))
         value = copy.deepcopy(value)
         english_rows = [
             row for row in value["entries"] if row["subject"] == "english"
@@ -263,7 +328,7 @@ class ZeroModelGoldenInventoryTests(unittest.TestCase):
                 inventory.GoldenInventoryError,
                 "english_microbatch_binding_invalid",
             ):
-                inventory.inspect_spec(path)
+                self.inspect_spec(path)
 
 
 if __name__ == "__main__":

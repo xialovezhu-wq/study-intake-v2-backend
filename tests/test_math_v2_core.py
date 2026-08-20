@@ -21,10 +21,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "bin"))
 
 import math_shadow_replay as replay  # noqa: E402
-from historical_test_input import (  # noqa: E402
-    HistoricalTestInput,
-    render_shadow_test_config,
-)
+import math_shadow_backaudit as backaudit  # noqa: E402
 from concurrent_dispatch import ConcurrentDispatcher, LeaseStore  # noqa: E402
 from core_dispatch_bridge import (  # noqa: E402
     CoreCandidateSubprocessRunner,
@@ -65,6 +62,7 @@ from preprocessor_core import (  # noqa: E402
     validate_math_text_integrity,
     validate_math_three_replay_p95,
 )
+from tests.test_math_shadow_backaudit import Fixture as SyntheticMathShadowFixture  # noqa: E402
 
 
 def legacy_analysis(ref: str) -> dict:
@@ -3640,14 +3638,90 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
     def test_config_validates_soft_warning_and_stall_ranges(self) -> None:
         path = self.base / "config-progress-aware-stall.json"
-        atomic_write_json(path, self.config)
+        fixture_config = copy.deepcopy(self.config)
+        fixture_config.update(
+            {
+                "execution_mode": "fixture",
+                "live_execution_gate": {
+                    "enabled": True,
+                    "default_locked": True,
+                    "authorization_required": True,
+                    "authorization_state_path": str(
+                        self.runtime
+                        / "dispatch/manual-live-authorization-v1/state.json"
+                    ),
+                },
+                "fixture_execution": {
+                    "allowed_executable_roots": [
+                        str(self.base),
+                        str(ROOT / "tests/fixtures"),
+                    ]
+                },
+                "branch_scheduler": {
+                    "logical_branch_limit": None,
+                    "physical_concurrency_mode": "dynamic",
+                    "configured_maximum_active_branches": 8,
+                    "overflow_policy": "queue_in_waves",
+                    "drop_policy": "never",
+                    "fairness_policy": "round_robin_tasks",
+                    "stall_timeout_seconds": 120,
+                },
+                "models": {
+                    "orchestrator": {
+                        "model": "gpt-5.6-terra",
+                        "reasoning_effort": "ultra",
+                        "agents_enabled": True,
+                        "fresh_context": True,
+                        "sandbox_mode": "workspace-write",
+                        "agent_config_path": str(
+                            ROOT
+                            / "plugin/kaoyan-study-intake/agents/terra-orchestrator.toml"
+                        ),
+                        "tool_policy_path": str(
+                            ROOT
+                            / "plugin/kaoyan-study-intake/agents/terra-orchestrator-tool-policy.json"
+                        ),
+                    },
+                    "reader": {
+                        "model": "gpt-5.6-luna",
+                        "reasoning_effort": "max",
+                        "agents_enabled": False,
+                        "fresh_context": True,
+                        "sandbox_mode": "read-only",
+                        "agent_config_path": str(
+                            ROOT / "plugin/kaoyan-study-intake/agents/luna-reader.toml"
+                        ),
+                        "tool_policy_path": str(
+                            ROOT
+                            / "plugin/kaoyan-study-intake/agents/luna-reader-tool-policy.json"
+                        ),
+                    },
+                    "critical_reviewer": {
+                        "model": "gpt-5.6-terra",
+                        "reasoning_effort": "ultra",
+                        "agents_enabled": False,
+                        "fresh_context": True,
+                        "sandbox_mode": "read-only",
+                        "agent_config_path": str(
+                            ROOT
+                            / "plugin/kaoyan-study-intake/agents/terra-critical-reviewer.toml"
+                        ),
+                        "tool_policy_path": str(
+                            ROOT
+                            / "plugin/kaoyan-study-intake/agents/terra-critical-reviewer-tool-policy.json"
+                        ),
+                    },
+                },
+            }
+        )
+        atomic_write_json(path, fixture_config)
         self.assertEqual(
             load_config(path)["math_deep_v2"]["soft_runtime_warning_seconds"],
             1800,
         )
         for value in (True, "1800", 59):
             with self.subTest(value=value):
-                bad = copy.deepcopy(self.config)
+                bad = copy.deepcopy(fixture_config)
                 bad["math_deep_v2"]["soft_runtime_warning_seconds"] = value
                 atomic_write_json(path, bad)
                 with self.assertRaisesRegex(
@@ -3662,7 +3736,7 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             ("stall_probe_required_consecutive_failures", 3),
         ):
             with self.subTest(key=key, value=value):
-                bad = copy.deepcopy(self.config)
+                bad = copy.deepcopy(fixture_config)
                 bad["math_deep_v2"][key] = value
                 atomic_write_json(path, bad)
                 with self.assertRaisesRegex(
@@ -3671,7 +3745,7 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
                 ):
                     load_config(path)
 
-        legacy_alias = copy.deepcopy(self.config)
+        legacy_alias = copy.deepcopy(fixture_config)
         legacy_alias["math_deep_v2"].pop("soft_runtime_warning_seconds")
         legacy_alias["math_deep_v2"]["stage_timeout_seconds"] = 3600
         atomic_write_json(path, legacy_alias)
@@ -3723,19 +3797,30 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             )
 
     def test_historical_publish_uses_only_manifest_candidate(self) -> None:
-        test_input = HistoricalTestInput.from_env()
-        protected_before = test_input.snapshot()
-        manifest = test_input.load_historical_manifest()
-        config = render_shadow_test_config(ROOT, test_input)
-        config = copy.deepcopy(config)
+        historical_fixture = SyntheticMathShadowFixture(self.base / "historical")
+        manifest = backaudit.build_manifest(
+            historical_fixture.runtime,
+            historical_fixture.repo,
+            historical_fixture.study_date,
+            expected_count=len(historical_fixture.capture_ids),
+        )
+        protected_before = replay._protected_runtime_hashes(
+            historical_fixture.runtime
+        )
+        formal_before = replay._formal_hashes(
+            manifest, historical_fixture.repo
+        )
+        config = copy.deepcopy(self.config)
         config["runtime_root"] = str(self.runtime / "historical")
+        config["adapters"]["math"]["repo_root"] = str(
+            historical_fixture.repo
+        )
         config["worker"]["log_path"] = str(self.runtime / "historical/logs/worker.log")
         config["worker"]["lock_path"] = str(self.runtime / "historical/state/worker.lock")
         candidate = replay.build_replay_candidate(
             manifest=manifest,
             item=manifest["items"][0],
             config=config,
-            read_guard=test_input,
         )
         runner = FakeMathRunner()
         worker = Worker(config, model_runner=runner)
@@ -3754,14 +3839,21 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         )
         with self.assertRaisesRegex(
             PreprocessorError,
-            "math_critical_review_dynamic_schema_mismatch",
+            "math_v2_stage_receipts_invalid",
         ):
             worker.publish_math_shadow_candidate(candidate)
         self.assertFalse(worker.store.latest_path("math", candidate.capture_id).exists())
         self.assertFalse(
             any((Path(config["runtime_root"]) / "packages/math/shadow/historical").rglob("*.json"))
         )
-        self.assertEqual(protected_before, test_input.snapshot())
+        self.assertEqual(
+            protected_before,
+            replay._protected_runtime_hashes(historical_fixture.runtime),
+        )
+        self.assertEqual(
+            formal_before,
+            replay._formal_hashes(manifest, historical_fixture.repo),
+        )
 
 
 if __name__ == "__main__":

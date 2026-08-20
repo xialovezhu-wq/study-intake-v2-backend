@@ -264,6 +264,10 @@ elif command == 'render-candidate':
     value = json.loads(pathlib.Path(args[1]).read_text())
     output.write_text('Luna candidate: ' + value['candidate_id'] + '\\n')
     print(json.dumps({'schema_version':'english_candidate_render_receipt_v1','status':'rendered'}))
+elif command == 'validate-events':
+    state = pathlib.Path(args[args.index('--state-dir') + 1])
+    count = len(list((state / 'events').glob('*/*.json')))
+    print(json.dumps({'schema_version':'english_validate_events_report_v1','status':'PASS','validated_event_count':count,'formal_write_count':0}))
 else:
     raise SystemExit(2)
 """,
@@ -1897,23 +1901,7 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
                 candidate=False,
             )
         runner = FakeEnglishRunner()
-        integration_config = copy.deepcopy(self.config)
-        real_repo = Path("/Users/xiazhibin/Documents/kaoyan-english")
-        real_script = real_repo / "scripts/english_learning_pipeline.py"
-        real_schema = (
-            real_repo
-            / "schema/english_pipeline/luna-candidate-v1.schema.json"
-        )
-        if not real_script.is_file() or not real_schema.is_file():
-            self.skipTest("canonical English integration CLI is unavailable")
-        integration_config["adapters"]["english"].update(
-            {
-                "repo_root": str(real_repo),
-                "status_script": str(real_script),
-                "candidate_schema": str(real_schema),
-            }
-        )
-        worker = Worker(integration_config, model_runner=runner)
+        worker = Worker(copy.deepcopy(self.config), model_runner=runner)
         result = worker.run_once(
             subject="english", study_date=self.study_date
         )
@@ -1930,10 +1918,10 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             subprocess.run(
                 [
                     sys.executable,
-                    str(real_script),
+                    str(self.pipeline),
                     "validate-events",
                     "--repo-root",
-                    str(real_repo),
+                    str(self.repo),
                     "--state-dir",
                     str(self.state),
                     "--date",

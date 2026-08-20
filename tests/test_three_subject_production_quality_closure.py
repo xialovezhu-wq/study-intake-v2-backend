@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import shutil
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -29,13 +29,35 @@ from processing_plugin import (  # noqa: E402
 from subject_sol_contract import (  # noqa: E402
     SubjectSolRuntimeStore,
 )
-from tests import test_math_formalization_contract as math_formalization_support  # noqa: E402
 from tests import test_math_v2_core as math_v2_support  # noqa: E402
 from tests import test_english_adapter as english_support  # noqa: E402
 from tests import test_preprocessor as cs408_support  # noqa: E402
 from tests import test_processing_plugin as processing_plugin_support  # noqa: E402
-from tests import test_processing_plugin_sealed_e2e as sealed_mcp_support  # noqa: E402
-from tests import test_three_subject_sealed_chain_replay as sealed_support  # noqa: E402
+
+
+def _ensure_runtime_release(runtime: Path, release_id: str) -> None:
+    release_root = runtime / "releases" / release_id
+    release_root.mkdir(parents=True, exist_ok=True)
+    (runtime / "packages" / "objects").mkdir(parents=True, exist_ok=True)
+    (release_root / "release.json").write_bytes(
+        (
+            json.dumps(
+                {
+                    "schema_version": "study-intake-preprocessor-release-v2",
+                    "release_id": release_id,
+                    "component_inventory": {},
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    current = runtime / "current"
+    if current.exists() or current.is_symlink():
+        current.unlink()
+    current.symlink_to(release_root, target_is_directory=True)
 
 
 class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
@@ -49,6 +71,38 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
     """
 
     maxDiff = None
+
+    @classmethod
+    def _configure_portable_mcp_python(cls) -> Path:
+        """Bind all manually-created support instances to one stable venv.
+
+        The portable plugin generator must retain the venv entrypoint spelling
+        (it may be a symlink); resolving it to the base interpreter makes the
+        generated component registry invalid.  The canary/topology tests
+        instantiate this class as a helper, so this binding is deliberately
+        lazy as well as available from ``setUpClass``.
+        """
+
+        raw = os.environ.get("STUDY_READ_MCP_TEST_PYTHON")
+        if not raw:
+            raise AssertionError(
+                "STUDY_READ_MCP_TEST_PYTHON must point to the portable MCP venv"
+            )
+        candidate = Path(raw).expanduser().absolute()
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise AssertionError(
+                "STUDY_READ_MCP_TEST_PYTHON is not an executable venv entrypoint: "
+                f"{candidate}"
+            )
+        processing_plugin_support.ProcessingPluginHostTests.portable_mcp_python = (
+            candidate
+        )
+        cls.portable_mcp_python = candidate
+        return candidate
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._configure_portable_mcp_python()
 
     @staticmethod
     def _remap_evidence_refs(value: object, evidence_ref: str) -> None:
@@ -141,6 +195,10 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
         ProcessingPluginHost,
         dict,
     ]:
+        portable_mcp_python = self._configure_portable_mcp_python()
+        processing_plugin_support.ProcessingPluginHostTests.portable_mcp_python = (
+            portable_mcp_python
+        )
         fixture = processing_plugin_support.ProcessingPluginHostTests(
             methodName="runTest"
         )
@@ -151,77 +209,14 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
         if not key_path.exists():
             key_path.write_bytes(b"q" * 32)
             key_path.chmod(0o600)
-        # The source component lock is deliberately immutable.  Build an
-        # ephemeral private overlay so this integration test can bind the
-        # staged 3.1.1 English Skill without changing the shared lock.
-        plugin_overlay = runtime / "private-plugin-overlay/kaoyan-study-intake"
-        shutil.copytree(
-            ROOT / "plugin/kaoyan-study-intake",
-            plugin_overlay,
-        )
-        overlay_lock_path = plugin_overlay / "component-lock.json"
-        overlay_lock = json.loads(overlay_lock_path.read_text(encoding="utf-8"))
-        overlay_components_path = plugin_overlay / "components.json"
-        overlay_components = json.loads(
-            overlay_components_path.read_text(encoding="utf-8")
-        )
-        overlay_lock["registry_sha256"] = hashlib.sha256(
-            overlay_components_path.read_bytes()
-        ).hexdigest()
-        overlay_lock["external_runtime_sources"] = overlay_components[
-            "external_runtime_sources"
-        ]
-        # Runtime work can legitimately change any of the three background
-        # Skills before the immutable successor lock is regenerated.  This
-        # private test-only overlay must bind the bytes it actually exercises,
-        # without mutating or weakening the shared component lock.
-        for skill_id in (
-            "background-math-processing",
-            "background-cs408-processing",
-            "background-english-processing",
-        ):
-            skill_path = plugin_overlay / "skills" / skill_id / "SKILL.md"
-            prior = overlay_lock["skills"][skill_id]
-            overlay_lock["skills"][skill_id] = {
-                "sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
-                "version": prior["version"],
-            }
-        overlay_lock_path.chmod(0o600)
-        overlay_lock_path.write_text(
-            json.dumps(
-                overlay_lock,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        overlay_lock_path.chmod(0o400)
+        _ensure_runtime_release(runtime, core.LOADED_CORE_SHA256)
         host_config = copy.deepcopy(fixture.config)
         host_config["authority_key_path"] = str(key_path)
-        host_config["root"] = str(plugin_overlay)
-        host_config["component_lock_path"] = str(overlay_lock_path)
-        sys.path.insert(0, str(sealed_mcp_support.MCP_SOURCE / "src"))
-        try:
-            mcp_helpers = sealed_mcp_support._load_module(
-                "quality_closure_mcp_helpers",
-                sealed_mcp_support.MCP_SOURCE / "tests/helpers.py",
-            )
-            repositories = mcp_helpers.make_fixture(
-                runtime / "private-mcp-source-fixtures"
-            )
-        finally:
-            sys.path.remove(str(sealed_mcp_support.MCP_SOURCE / "src"))
         host = ProcessingPluginHost(
             host_config,
             runtime_root=runtime,
             candidate_release_id=core.LOADED_CORE_SHA256,
-            subject_roots={
-                "math": repositories.math_root,
-                "cs408": repositories.cs408_root,
-                "english": repositories.english_root,
-            },
+            subject_roots=fixture.host.subject_roots,
             require_authority_snapshot=True,
         )
         host_config["_canonical_subject_repo_roots"] = {
@@ -1125,18 +1120,14 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
         evidence_ref = publication["mcp_stage_transcripts"]["analysis"][
             "grounding_refs"
         ][0]
-        sealed = math_formalization_support.MathFormalizationContractTests(
-            methodName="runTest"
-        )
-        sealed.setUpClass()
-        draft = sealed.corrected_capture_overlay()
-        self._remap_evidence_refs(draft, evidence_ref)
+        draft = math_v2_support.math_analysis(evidence_ref)
         draft["evidence_assessment"]["completeness"] = "complete"
         draft["evidence_assessment"]["gaps"] = []
         draft["unresolved"] = []
         draft["sol_verification_plan"][
             "recommended_disposition"
         ] = "new_candidate"
+        self._remap_evidence_refs(draft, evidence_ref)
         # The sealed failure output had no reconstruction.  Reuse its own
         # capture-backed mechanism claim instead of inventing a new fact.
         draft["correct_reasoning_reconstruction"] = [
@@ -1272,9 +1263,7 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
         evidence_ref = publication["mcp_stage_transcripts"]["analysis"][
             "grounding_refs"
         ][0]
-        draft = sealed_support._payload(
-            sealed_support.SEALED["cs408"]["analysis_output"]
-        )
+        draft = cs408_support.v2_analysis(evidence_ref, complete=True)
         self._remap_evidence_refs(draft, evidence_ref)
         # The sealed run intentionally stopped as insufficient evidence.  The
         # production-quality fixture overlays only its terminal gate fields;
@@ -1298,12 +1287,40 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
             runtime_candidate.allowed_evidence_refs,
             require_network_context=True,
         )
-        review = sealed_support._payload(
-            sealed_support.SEALED["cs408"]["critical_output"]
+        revised_analysis = copy.deepcopy(draft)
+        revised_analysis["executive_summary"] = (
+            revised_analysis["executive_summary"]
+            + "；synthetic critic correction bound to the same evidence."
         )
-        review = sealed_support.ThreeSubjectSealedChainReplayTests._fix_cs408_review(
-            review
-        )
+        finding_id = "SYNTHETIC-CS408-EXECUTIVE-CORRECTION"
+        review = {
+            "schema_version": "study-intake-luna-critical-review-v2",
+            "verdict": "pass",
+            "summary": "synthetic portable MCP critical review",
+            "revised_analysis": revised_analysis,
+            "unsupported_claims": [
+                {
+                    "finding_id": finding_id,
+                    "severity": "error",
+                    "text": "executive summary requires a bounded correction",
+                    "analysis_refs": ["analysis.executive_summary"],
+                    "evidence_refs": [evidence_ref],
+                    "affected_json_paths": ["$.executive_summary"],
+                }
+            ],
+            "evidence_misreads": [],
+            "answer_safety_findings": [],
+            "missing_analysis": [],
+            "required_corrections": [],
+            "sol_priority_checks": [],
+            "correction_resolutions": [
+                {
+                    "finding_id": finding_id,
+                    "resolution": "applied",
+                    "affected_json_paths": ["$.executive_summary"],
+                }
+            ],
+        }
         self._remap_evidence_refs(review, evidence_ref)
         revised = review["revised_analysis"]
         if gate_variant != "incomplete_evidence":
@@ -1477,16 +1494,15 @@ class ThreeSubjectProductionQualityClosureTests(unittest.TestCase):
         # sentence fields through the production English finalizer fixture.
         seeded = english_support.FakeEnglishRunner(one_item=True).run(candidate)
         draft = copy.deepcopy(seeded.analysis)
-        sealed_case = sealed_support.ThreeSubjectSealedChainReplayTests(
-            methodName="runTest"
+        portable_grounding = copy.deepcopy(
+            draft["items"][0]["grounding"]
         )
-        sealed_grounding = sealed_case._english_analysis_fixture(
-            analysis_refs
-        )["items"][0]["grounding"]
-        sealed_grounding["user_evidence_ref"] = draft["items"][0][
+        portable_grounding["status"] = "passed"
+        portable_grounding["user_evidence_ref"] = draft["items"][0][
             "source_event_id"
         ]
-        draft["items"][0]["grounding"] = sealed_grounding
+        portable_grounding["mcp_evidence_refs"] = list(analysis_refs)
+        draft["items"][0]["grounding"] = portable_grounding
         draft["candidate_id"] = core.english_candidate_content_id(
             str(candidate.input_binding["candidate_document_id"]), draft
         )

@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.portable_plugin_fixture import build_portable_plugin_fixture
+
 
 ROOT = Path(__file__).resolve().parents[1]
 for directory in (ROOT / "lib", ROOT / "bin"):
@@ -19,15 +21,28 @@ from concurrent_dispatch import DispatchError
 from preprocessor_core import CodexRunner, PreprocessorError, load_config
 
 
-def substitute(value: object, release_root: Path, runtime_root: Path) -> object:
+def substitute(
+    value: object,
+    release_root: Path,
+    runtime_root: Path,
+    replacements: dict[str, str] | None = None,
+) -> object:
+    markers = {
+        "${RELEASE_ROOT}": str(release_root),
+        "${RUNTIME_DATA_ROOT}": str(runtime_root),
+        **(replacements or {}),
+    }
     if isinstance(value, dict):
-        return {key: substitute(item, release_root, runtime_root) for key, item in value.items()}
+        return {
+            key: substitute(item, release_root, runtime_root, markers)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [substitute(item, release_root, runtime_root) for item in value]
+        return [substitute(item, release_root, runtime_root, markers) for item in value]
     if isinstance(value, str):
-        return value.replace("${RELEASE_ROOT}", str(release_root)).replace(
-            "${RUNTIME_DATA_ROOT}", str(runtime_root)
-        )
+        for marker, replacement in markers.items():
+            value = value.replace(marker, replacement)
+        return value
     return value
 
 
@@ -35,8 +50,32 @@ class OfflineExecutionGateV1Tests(unittest.TestCase):
     def test_release_config_is_explicitly_offline_and_role_separated(self) -> None:
         template = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as temporary:
+            portable = build_portable_plugin_fixture(Path(temporary), ROOT)
             runtime = Path(temporary) / "runtime"
-            value = substitute(template, ROOT, runtime)
+            value = substitute(
+                template,
+                ROOT,
+                runtime,
+                {
+                    "${CODEX_EXECUTABLE}": sys.executable,
+                    "${PYTHON_EXECUTABLE}": sys.executable,
+                    "${MCP_PYTHON_EXECUTABLE}": str(portable.mcp_python),
+                    "${MCP_ROOT}": str(portable.mcp_root),
+                    "${MATH_ROOT}": str(portable.subject_roots["math"]),
+                    "${CS408_ROOT}": str(portable.subject_roots["cs408"]),
+                    "${ENGLISH_ROOT}": str(portable.subject_roots["english"]),
+                },
+            )
+            value["processing_plugin"].update(
+                {
+                    "root": str(portable.plugin_root),
+                    "component_lock_path": str(
+                        portable.plugin_root / "component-lock.json"
+                    ),
+                    "mcp_client_python": str(portable.mcp_python),
+                    "mcp_project_root": str(portable.mcp_root),
+                }
+            )
             config_path = Path(temporary) / "config.json"
             config_path.write_text(json.dumps(value), encoding="utf-8")
             config = load_config(config_path)

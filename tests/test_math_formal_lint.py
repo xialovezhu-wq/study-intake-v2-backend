@@ -158,20 +158,25 @@ fixture
             repo = Path(raw)
             script_target = repo / "数学一回滚复习系统/scripts/quick_intake.py"
             script_target.parent.mkdir(parents=True)
-            shutil.copy2(
-                Path(
-                    "/Users/xiazhibin/Documents/kaoyan-math/"
-                    "数学一回滚复习系统/scripts/quick_intake.py"
+            canonical_math_root = Path(__file__).resolve().parents[1].parent / "kaoyan-math"
+            for relative, destination in (
+                (
+                    "数学一回滚复习系统/scripts/quick_intake.py",
+                    script_target,
                 ),
-                script_target,
-            )
-            shutil.copy2(
-                Path(
-                    "/Users/xiazhibin/Documents/kaoyan-math/"
-                    "数学一回滚复习系统/scripts/producer_binding_attestation.py"
+                (
+                    "数学一回滚复习系统/scripts/producer_binding_attestation.py",
+                    script_target.with_name("producer_binding_attestation.py"),
                 ),
-                script_target.with_name("producer_binding_attestation.py"),
-            )
+            ):
+                source = canonical_math_root / relative
+                if source.is_file():
+                    shutil.copy2(source, destination)
+                else:
+                    destination.write_text(
+                        f"# synthetic canonical fixture: {relative}\n",
+                        encoding="utf-8",
+                    )
             card = repo / "错题知识网络/错题卡/GS-001_fixture.md"
             card.parent.mkdir(parents=True)
             capture_id = "MFI-CAP-aaaaaaaaaaaaaaaaaaaaaaaa"

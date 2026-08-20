@@ -36,9 +36,9 @@ SUBJECT_COLLECTIONS = {
     "english": "article_catalog",
 }
 SUBJECT_ROOTS = {
-    "math": Path("/Users/xiazhibin/Documents/kaoyan-math"),
-    "cs408": Path("/Users/xiazhibin/Documents/kaoyan-408"),
-    "english": Path("/Users/xiazhibin/Documents/kaoyan-english"),
+    "math": Path(f"{Path.home()}/Documents/kaoyan-math"),
+    "cs408": Path(f"{Path.home()}/Documents/kaoyan-408"),
+    "english": Path(f"{Path.home()}/Documents/kaoyan-english"),
 }
 SHA256_CHARS = frozenset("0123456789abcdef")
 WRITE_NAME_FRAGMENTS = frozenset(

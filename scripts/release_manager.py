@@ -39,14 +39,21 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 SCHEMA_VERSION = "study-intake-preprocessor-release-v2"
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RELEASE_BASE = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor"
-)
+PORTABLE_USER_HOME = str(Path.home())
 DEFAULT_RUNTIME_DATA_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor"
+    os.environ.get(
+        "STUDY_INTAKE_RUNTIME_ROOT",
+        str(Path.home() / ".codex" / "study-intake-preprocessor"),
+    )
+)
+DEFAULT_RELEASE_BASE = Path(
+    os.environ.get("STUDY_INTAKE_RELEASE_BASE", str(DEFAULT_RUNTIME_DATA_ROOT))
 )
 DEFAULT_ACTIVE_LINK = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/current"
+    os.environ.get(
+        "STUDY_INTAKE_ACTIVE_LINK",
+        str(DEFAULT_RUNTIME_DATA_ROOT / "current"),
+    )
 )
 DEFAULT_LAUNCHAGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 DEFAULT_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
@@ -78,7 +85,10 @@ ALLOWED_SOURCE_DIRS = (
 ALLOWED_ROOT_FILES = ("config.example.json", "README.md", ".gitignore")
 STAGING_GENERATED_SOURCE_PATHS = frozenset(
     {
+        "plugin/kaoyan-study-intake/.mcp.json",
+        "plugin/kaoyan-study-intake/bin/kaoyan-read",
         "plugin/kaoyan-study-intake/component-lock.json",
+        "plugin/kaoyan-study-intake/components.json",
         "validation/source-freeze-sha256-final-20260813.txt",
     }
 )
@@ -293,7 +303,7 @@ SUPERSEDED_TRANSACTION_RECOVERY_DESCRIPTORS = {
         "historical_expected_current_release_id": (
             "ab5e0d010323bf622e0910632e02cadacd44f4fac635f1264b0cb302363a79e4"
         ),
-        "historical_active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+        "historical_active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
         "historical_incomplete_postcommit_receipt_sha256": None,
         "successor_operation": "activate",
         "successor_prepare_receipt_sha256": (
@@ -332,7 +342,7 @@ SUPERSEDED_TRANSACTION_RECOVERY_DESCRIPTORS = {
             "3a374ac4b19a05e06befebdb4254811d4f1375ba83fc4b80c73ab5fe2e88284f"
         ),
         "successor_proof_current_path": (
-            "/Users/xiazhibin/.codex/study-intake-preprocessor/releases/"
+            f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/releases/"
             "1f6808896d7fe30faf7b726e94672c1b2060ceec116b66c3dba1c457156112e4"
         ),
         "resolution_head_release_id": (
@@ -353,7 +363,7 @@ SUPERSEDED_TRANSACTION_RECOVERY_DESCRIPTORS = {
         "historical_expected_current_release_id": (
             "5e3bd7206c4425e61d20c6ab42ce5825f785327f324ba60e5883db0628d4d72c"
         ),
-        "historical_active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+        "historical_active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
         "historical_incomplete_postcommit_receipt_sha256": (
             "f208d65a55c0188fa03f735b9eace9c3f2ab5a63789ccd2b63164ac885222d81"
         ),
@@ -397,7 +407,7 @@ SUPERSEDED_TRANSACTION_RECOVERY_DESCRIPTORS = {
             "0079e33ab6dcb64bdc64624fb6a88bcbff009c5880682f5688cc9d674d33377e"
         ),
         "successor_proof_current_path": (
-            "/Users/xiazhibin/.codex/study-intake-preprocessor/releases/"
+            f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/releases/"
             "5e3bd7206c4425e61d20c6ab42ce5825f785327f324ba60e5883db0628d4d72c"
         ),
         "continuation_transactions": (
@@ -461,10 +471,10 @@ EXACT_20260816_9AB6_FENCED_CLOSURE = {
     "source_release_id": (
         "63ff1ea16723b65f70e6187a5d816a0e7142224eff29444a269a6735e6f23157"
     ),
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
     "drain_receipt_path": (
-        "/Users/xiazhibin/Documents/Codex/2026-08-10/"
+        f"{PORTABLE_USER_HOME}/Documents/Codex/2026-08-10/"
         "lunamax-mcp-lunamax-lunamax-provider-codex/outputs/"
         "study-successor-production-20260816-delayed-intake-replacement/"
         "deploy/drain-9ab6f106.json"
@@ -490,7 +500,7 @@ EXACT_20260816_9AB6_FENCED_CLOSURE = {
         "ffa26ebb585e146a62f370158ae148bf9cdc038f01be055067c146304c5c4fa7"
     ),
     "old_math_activation_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "production-canary/receipts/math/"
         "33bf398162f507966b549c528dae0c2f264562ae54f18851fb63d3ae06ae2258/"
         "sha256/e8/e89a8580afb71a7d5105a7978181221518b3cf9e3c28e18a21f951d9523368ba.json"
@@ -549,7 +559,7 @@ EXACT_20260816_5A39_FENCED_CLOSURE = {
         "5a39684c2917214136cad2ec47d0226f3d2bcb1567b671f143eaaf497def41d3"
     ),
     "drain_receipt_path": (
-        "/Users/xiazhibin/Documents/Codex/2026-08-10/"
+        f"{PORTABLE_USER_HOME}/Documents/Codex/2026-08-10/"
         "lunamax-mcp-lunamax-lunamax-provider-codex/outputs/"
         "study-successor-production-20260816-watermark-fix-replacement/"
         "deploy/drain-5a39684c2917214136cad2ec47d0226f3d2bcb1567b671f143eaaf497def41d3.json"
@@ -567,7 +577,7 @@ EXACT_20260816_5A39_FENCED_CLOSURE = {
         "66e73f29d9e4b5c9889f6876f63b4b619f24e1673bfaba716f71c0ef30dcb634"
     ),
     "plugin_cache_backup_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/deployments/"
         "external-profile-backups/"
         "57ebfdedde2fa87b2db3dc55065501b8321db3432ed7c937e98c2bf6cfe2ad89/"
         "plugin-cache"
@@ -919,14 +929,14 @@ EXACT_20260813_0ADF_EARLY_ROLLBACK_CLOSURE = {
         "693450d5e1ccd0814b1a4b0998ed59ec280ad9e6efb7279c5639ef5b6ec6cc65"
     ),
     "error_code": "previous_canary_deactivation_invalid:math",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
     "english_preclaim_receipt_sha256": (
         "33548b0f2d6a8a2c73fc24b1dc5b2828241aa6baa1ccc29cf758864eed07525a"
     ),
     "canary_restore_proofs": {
         "math": {
             "path": (
-                "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+                f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
                 "state/production-canary/math.json"
             ),
             "state_sha256": (
@@ -938,7 +948,7 @@ EXACT_20260813_0ADF_EARLY_ROLLBACK_CLOSURE = {
         },
         "cs408": {
             "path": (
-                "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+                f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
                 "state/production-canary/cs408.json"
             ),
             "state_sha256": (
@@ -950,7 +960,7 @@ EXACT_20260813_0ADF_EARLY_ROLLBACK_CLOSURE = {
         },
         "english": {
             "path": (
-                "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+                f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
                 "state/production-canary/english.json"
             ),
             "state_sha256": (
@@ -963,7 +973,7 @@ EXACT_20260813_0ADF_EARLY_ROLLBACK_CLOSURE = {
     },
     "dashboard_restore_proof": {
         "path": (
-            "/Users/xiazhibin/.codex/study-intake-preprocessor/state/"
+            f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/state/"
             "dashboard_projection.json"
         ),
         "state_sha256": (
@@ -998,7 +1008,7 @@ EXACT_20260813_0B05_ROLLED_BACK_RECEIPT_CLOSURE = {
         "c7db502e9d4435b939b2565015a4cb6ebb69584ee27789d2011711e4840dc18c"
     ),
     "english_recovery_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/subject-background-rollovers/sha256/c7/"
         "c7db502e9d4435b939b2565015a4cb6ebb69584ee27789d2011711e4840dc18c.json"
     ),
@@ -1009,7 +1019,7 @@ EXACT_20260813_0B05_ROLLED_BACK_RECEIPT_CLOSURE = {
         "1e76d4f243c11c32f0ad7ba423498cdfe7021915eb07eb9c74983816918bfe0f"
     ),
     "english_rollback_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/subject-background-rollbacks/sha256/1e/"
         "1e76d4f243c11c32f0ad7ba423498cdfe7021915eb07eb9c74983816918bfe0f.json"
     ),
@@ -1024,7 +1034,7 @@ EXACT_20260813_0B05_ROLLED_BACK_RECEIPT_CLOSURE = {
         "1c7340e1d5a49c3c3d4df2fe000c2db9254ff2aa90a4a12a4cd636f3e6ffca19"
     ),
     "cs408_retirement_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/cs408-terminal-batch-retirements/sha256/1c/"
         "1c7340e1d5a49c3c3d4df2fe000c2db9254ff2aa90a4a12a4cd636f3e6ffca19.json"
     ),
@@ -1041,7 +1051,7 @@ EXACT_20260813_0B05_ROLLED_BACK_RECEIPT_CLOSURE = {
         "0f6220838f6202cd14dfe4f2c6f4c006c54fa02393947d76b2e591ebb5a10967"
     ),
     "cs408_rollback_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/cs408-terminal-batch-retirement-rollbacks/sha256/0f/"
         "0f6220838f6202cd14dfe4f2c6f4c006c54fa02393947d76b2e591ebb5a10967.json"
     ),
@@ -1071,7 +1081,7 @@ EXACT_20260813_50F_ROLLED_BACK_RECEIPT_CLOSURE = {
         "989f01b738a416e572fe5104a3f3de59d3baca854377cb59531d346f95a5e746"
     ),
     "english_recovery_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/subject-background-rollovers/sha256/98/"
         "989f01b738a416e572fe5104a3f3de59d3baca854377cb59531d346f95a5e746.json"
     ),
@@ -1082,7 +1092,7 @@ EXACT_20260813_50F_ROLLED_BACK_RECEIPT_CLOSURE = {
         "eb9958cd3dc53e69a4301c2aa3516f4623c4e4d16c24ef3e4a4610351bf720ee"
     ),
     "english_rollback_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/subject-background-rollbacks/sha256/eb/"
         "eb9958cd3dc53e69a4301c2aa3516f4623c4e4d16c24ef3e4a4610351bf720ee.json"
     ),
@@ -1097,7 +1107,7 @@ EXACT_20260813_50F_ROLLED_BACK_RECEIPT_CLOSURE = {
         "8812f9d6a42386e0a16f8d10d93a4dae922ecb8a57a7580c7562c56a97e23194"
     ),
     "cs408_retirement_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/cs408-terminal-batch-retirements/sha256/88/"
         "8812f9d6a42386e0a16f8d10d93a4dae922ecb8a57a7580c7562c56a97e23194.json"
     ),
@@ -1114,7 +1124,7 @@ EXACT_20260813_50F_ROLLED_BACK_RECEIPT_CLOSURE = {
         "2f4aa04e6db87fcfbe91db810d0075556060924c9db9f9981c43c45998474c78"
     ),
     "cs408_rollback_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/cs408-terminal-batch-retirement-rollbacks/sha256/2f/"
         "2f4aa04e6db87fcfbe91db810d0075556060924c9db9f9981c43c45998474c78.json"
     ),
@@ -1139,14 +1149,14 @@ EXACT_20260814_6043_FORWARD_RECOVERY = {
     "previous_release_id": (
         "b8cc051cd01b7172b48c92f7cea128cb3fcfadf4552da08fef5c9936e122bd00"
     ),
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
     "claim_gate_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/state/worker.lock"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/state/worker.lock"
     ),
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
-    "launchagent_dir": "/Users/xiazhibin/Library/LaunchAgents",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
+    "launchagent_dir": f"{PORTABLE_USER_HOME}/Library/LaunchAgents",
     "canary_manifest_path": (
-        "/Users/xiazhibin/Documents/Codex/2026-08-10/"
+        f"{PORTABLE_USER_HOME}/Documents/Codex/2026-08-10/"
         "lunamax-mcp-lunamax-lunamax-provider-codex/outputs/"
         "study-successor-final-20260814-english-review-math-exact-v13-"
         "readiness-final/canary-manifests/"
@@ -1189,7 +1199,7 @@ EXACT_20260814_6043_FORWARD_RECOVERY = {
         "8850cfe9a76faf455e601dfac194cc291732ddbfbd845e7ce388c2c0870c25a9"
     ),
     "drain_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/deployments/"
         "drain-5a0d8fb34e0b26b0a47d1adaaad5937498f64e240aa5b3c62656132f4590fedd.json"
     ),
     "drain_receipt_sha256": (
@@ -1205,7 +1215,7 @@ EXACT_20260814_6043_FORWARD_RECOVERY = {
         "ffc3e30309eec819fc16692f069434953ea457a5ee9025ae1786e96227e86a8b"
     ),
     "english_source_queue_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/state/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/state/"
         "production-canary-queue/english/"
         "f3ca26457aa902bfead0b965d89f1d54fc03c4318108bb7d3c78cbae3e71dc89/"
         "c5e08ab3cc64a560d6ef11e1b7bd334bd1e04bf42c026a4c58a52ec332b3b7eb.json"
@@ -1214,17 +1224,17 @@ EXACT_20260814_6043_FORWARD_RECOVERY = {
         "94c1d4dfe43c8a172ab377188e94bc034761b4f8701594c5c7bed01c57f57785"
     ),
     "english_target_queue_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/state/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/state/"
         "production-canary-queue/english/"
         "8c2b125d0fe15ee28690a887a12828b0b1a836b94451cd574eea0c9b12ce0cfe/"
         "c5e08ab3cc64a560d6ef11e1b7bd334bd1e04bf42c026a4c58a52ec332b3b7eb.json"
     ),
     "english_repair_pointer_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/state/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/state/"
         "english-preserved-review-repairs/authorized-33548.json"
     ),
     "english_repair_intent_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/state/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/state/"
         "english-preserved-review-repairs/authorized-33548-intent.json"
     ),
     "batch_rollback_receipt_sha256": (
@@ -1234,12 +1244,12 @@ EXACT_20260814_6043_FORWARD_RECOVERY = {
         "0dfb20adfe43766dd62f441fc4908fb962e5a1a257b2f84132e3974788b9755d"
     ),
     "batch_archive_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "english-preserved-review-batch-retirement-archives/sha256/0d/"
         "0dfb20adfe43766dd62f441fc4908fb962e5a1a257b2f84132e3974788b9755d.json"
     ),
     "batch_rollback_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/control-"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/control-"
         "receipts/english-preserved-review-batch-retirement-rollbacks/sha256/"
         "1a/1a070011d2a19782f00c7ddde95ee6fe185f4c67bcc96a9194d2763147f08326.json"
     ),
@@ -1247,25 +1257,25 @@ EXACT_20260814_6043_FORWARD_RECOVERY = {
         "41d7a6bf13bcd8f339b3cf108f41d54549c4f1e345a1b36bf84d6852d3da9138"
     ),
     "english_activation_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "production-canary/receipts/english/"
         "8c2b125d0fe15ee28690a887a12828b0b1a836b94451cd574eea0c9b12ce0cfe/"
         "sha256/41/"
         "41d7a6bf13bcd8f339b3cf108f41d54549c4f1e345a1b36bf84d6852d3da9138.json"
     ),
     "plugin_cache_path": (
-        "/Users/xiazhibin/.codex/plugins/cache/personal/kaoyan-study-intake/"
+        f"{PORTABLE_USER_HOME}/.codex/plugins/cache/personal/kaoyan-study-intake/"
         "0.4.0-canary.13+codex.20260814-english-review-math-exact"
     ),
     "plugin_cache_tree_sha256": (
         "bfa4c3031b09c4c850e710735a8b6f7cc925a6f1a59d55d4eeb3097da71d3c55"
     ),
-    "ordinary_config_path": "/Users/xiazhibin/.codex/config.toml",
+    "ordinary_config_path": f"{PORTABLE_USER_HOME}/.codex/config.toml",
     "ordinary_mcp_profile_sha256": (
         "0dab2460f328b63103a29e9e183807c52e903259f699afd3606ebdd6fdb4b5f5"
     ),
     "external_sha256s": {
-        "/Users/xiazhibin/.codex/local-study-read-mcp/morning-preparation-current.json": (
+        f"{PORTABLE_USER_HOME}/.codex/local-study-read-mcp/morning-preparation-current.json": (
             "63d9ba84363203c4c7c8c63ead5a728e87e7f5ca684a5a32a3e728e3f37bef57"
         ),
     },
@@ -1297,8 +1307,8 @@ EXACT_20260814_6043_FENCED_PRESERVED_CLOSURE = {
     "target_release_id": (
         "5a0d8fb34e0b26b0a47d1adaaad5937498f64e240aa5b3c62656132f4590fedd"
     ),
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
     "live_sha256s": {
         "dispatch/state/production-canary/math.json": (
             "038abd40bb6509c9280cc46d1f08fe99cc09739aaffcb93dd3d56b39ef96402b"
@@ -1358,8 +1368,8 @@ EXACT_20260814_9223_CBC6_FENCED_CLOSURE = {
     "canary_manifest_sha256": (
         "509a5d4c45561be756f218e47a4eeec4921de22a2e4693fd5260543a1fa8663f"
     ),
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
     "gate_preimage_sha256s": {
         "math": (
             "84cf19a08372defad7afd5aa81ca56f2f7ee4c839f07b6b5cc99c160fb301859"
@@ -1433,8 +1443,8 @@ EXACT_20260815_07F5_530F_FENCED_CLOSURE = {
         "2f9c8f491b29e03e45c4a774f50566aa8f367bcab544503050c79e2cc35c4843.json": "057bb381d9f969e644b880f04ae574541a28136ec1b4d139aa122fd610c3e2eb",
         "fa7d768d3cb61bbde5d1609dd235c1a9dd0f60e0e58d9a4e3e5c81154de5dd22.json": "5eef349b520c79075c6964f74f80a36208a2f04b6a1500c636b05de29afb6a11",
     },
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
 }
 
 
@@ -1481,8 +1491,8 @@ EXACT_20260815_F14E_5BF7_FENCED_CLOSURE = {
         "9710aa75b54974e11d43f5e32953db36a3953a17765633f18a96f1b3975e8365.json": "9a47de1fb9377492e33a4d1d822c77ffd1ff9a8eba8697eae33afdad0a759661",
         "baca4a1dab2a381e87bb9af3785f024c8469d960259e4479c9c6409741def547.json": "4f52439788dba8f8762359ec7d045b8901f9a9f8ffaae7fdda57a2b918c6a8ff",
     },
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
 }
 
 
@@ -1529,8 +1539,8 @@ EXACT_20260815_420D_869B_FENCED_CLOSURE = {
         "8021fcf144a665a0134be1117414096f5055980562fc0a8944cd238c5217c463.json": "baf9d8a80c401176b5eb344a463d4186255a2fd4e95573dc3b7eb6c16f67d626",
         "b58064678cf8fb9de3ef893c06c8dbf769e347754b31e546c3b04b862d0af24c.json": "64f17a04ebcc7889e43fdaa96ec92e3a847c19a914d0ef3c915332c307770281",
     },
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
 }
 
 
@@ -1577,8 +1587,8 @@ EXACT_20260815_0A2B_46B8_FENCED_CLOSURE = {
         "af27c5d8e4ad5a19525e31d16c056021bdad7466f00d7d48197b810a4981d456.json": "3afcec0a96671ee7ca0348013a0c17c9c45b21d6f7fb4f2e9217a61b62205ccd",
         "f9ae3c317a16c45ca0a87e0f1e5d7f08b352234c53c573489ba58d63179325dd.json": "c3b88be3dfb5002f3c61620644a4348a9a82eddef6be543bb6022eb2bbe852e5",
     },
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
 }
 
 
@@ -1609,8 +1619,8 @@ EXACT_20260815_926C_C08B_FENCED_CLOSURE = {
         "b22541b54070cbae7cb8763b5100440b063cff81ce78177d8ca7a4e2c70a8068.json": "bfe37a7025bcebea0f26747a695f9fa9d45fa6c665f1f2676578dda28b845493",
         "ff7f0cfc3c6c55109dc7509b6cab1443fc6c16eaa8e5eae60ced0cbde27dec4e.json": "e926498587ad79ab7f1e91e16ef80abc5fc661dd75d147e9d67435181657eb8b",
     },
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "active_link": "/Users/xiazhibin/.codex/study-intake-preprocessor/current",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "active_link": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current",
 }
 
 
@@ -1630,16 +1640,16 @@ EXACT_20260813_FENCED_TRANSACTION_RECOVERY = {
     "previous_release_id": (
         "693450d5e1ccd0814b1a4b0998ed59ec280ad9e6efb7279c5639ef5b6ec6cc65"
     ),
-    "release_base": "/Users/xiazhibin/.codex/study-intake-preprocessor",
-    "runtime_root": "/Users/xiazhibin/.codex/study-intake-preprocessor",
+    "release_base": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
+    "runtime_root": f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor",
     "active_link": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/current"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current"
     ),
     "english_recovery_receipt_sha256": (
         "989f01b738a416e572fe5104a3f3de59d3baca854377cb59531d346f95a5e746"
     ),
     "english_recovery_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/subject-background-rollovers/sha256/98/"
         "989f01b738a416e572fe5104a3f3de59d3baca854377cb59531d346f95a5e746.json"
     ),
@@ -1647,17 +1657,17 @@ EXACT_20260813_FENCED_TRANSACTION_RECOVERY = {
         "8812f9d6a42386e0a16f8d10d93a4dae922ecb8a57a7580c7562c56a97e23194"
     ),
     "cs408_retirement_receipt_path": (
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+        f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
         "control-receipts/cs408-terminal-batch-retirements/sha256/88/"
         "8812f9d6a42386e0a16f8d10d93a4dae922ecb8a57a7580c7562c56a97e23194.json"
     ),
     "preimage_root": (
-        "/Users/xiazhibin/Documents/Codex/2026-08-10/"
+        f"{PORTABLE_USER_HOME}/Documents/Codex/2026-08-10/"
         "lunamax-mcp-lunamax-lunamax-provider-codex/outputs/"
         "study-successor-final-20260813-cs408-retirement/pre-apply-preimages"
     ),
     "preimage_manifest_path": (
-        "/Users/xiazhibin/Documents/Codex/2026-08-10/"
+        f"{PORTABLE_USER_HOME}/Documents/Codex/2026-08-10/"
         "lunamax-mcp-lunamax-lunamax-provider-codex/outputs/"
         "study-successor-final-20260813-cs408-retirement/"
         "pre-apply-preimages-sha256.txt"
@@ -2033,7 +2043,13 @@ def release_id_for(
     model_contract: Mapping[str, Any] | None = None,
     test_results: Mapping[str, Any] | None = None,
     staging_generated_files: Mapping[str, str] | None = None,
+    config_bindings_sha256: str | None = None,
 ) -> str:
+    if config_bindings_sha256 is not None and (
+        not isinstance(config_bindings_sha256, str)
+        or SHA256_RE.fullmatch(config_bindings_sha256) is None
+    ):
+        raise ReleaseError("release_config_binding_digest_invalid")
     return sha256_bytes(
         canonical_bytes(
             {
@@ -2059,6 +2075,11 @@ def release_id_for(
                     if staging_generated_files
                     else {}
                 ),
+                **(
+                    {"config_bindings_sha256": config_bindings_sha256}
+                    if config_bindings_sha256 is not None
+                    else {}
+                ),
             }
         )
     )
@@ -2075,6 +2096,124 @@ def substitute(value: Any, replacements: Mapping[str, str]) -> Any:
             result = result.replace(marker, replacement)
         return result
     return value
+
+
+CONFIG_BINDING_MARKERS = {
+    "math_root": "${MATH_ROOT}",
+    "cs408_root": "${CS408_ROOT}",
+    "english_root": "${ENGLISH_ROOT}",
+    "mcp_root": "${MCP_ROOT}",
+    "python_executable": "${PYTHON_EXECUTABLE}",
+    "mcp_python_executable": "${MCP_PYTHON_EXECUTABLE}",
+    "codex_executable": "${CODEX_EXECUTABLE}",
+}
+CONFIG_BINDING_ENV = {
+    "math_root": "STUDY_INTAKE_MATH_ROOT",
+    "cs408_root": "STUDY_INTAKE_CS408_ROOT",
+    "english_root": "STUDY_INTAKE_ENGLISH_ROOT",
+    "mcp_root": "STUDY_INTAKE_MCP_ROOT",
+    "python_executable": "STUDY_INTAKE_PYTHON_EXECUTABLE",
+    "mcp_python_executable": "STUDY_INTAKE_MCP_PYTHON_EXECUTABLE",
+    "codex_executable": "STUDY_INTAKE_CODEX_EXECUTABLE",
+}
+
+
+def _contains_config_marker(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(_contains_config_marker(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_config_marker(item) for item in value)
+    return isinstance(value, str) and any(
+        marker in value for marker in CONFIG_BINDING_MARKERS.values()
+    )
+
+
+def normalize_config_bindings(
+    value: Mapping[str, Any],
+) -> dict[str, str]:
+    if set(value) != set(CONFIG_BINDING_MARKERS):
+        raise ReleaseError("release_config_bindings_incomplete")
+    normalized: dict[str, str] = {}
+    for key, raw in value.items():
+        if not isinstance(raw, (str, os.PathLike)) or not str(raw):
+            raise ReleaseError(f"release_config_binding_invalid:{key}")
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise ReleaseError(f"release_config_binding_invalid:{key}")
+        if key.endswith("_root"):
+            try:
+                normalized_path = candidate.resolve(strict=True)
+            except OSError as exc:
+                raise ReleaseError(
+                    f"release_config_binding_invalid:{key}"
+                ) from exc
+            valid = not candidate.is_symlink() and normalized_path.is_dir()
+        else:
+            normalized_path = candidate.absolute()
+            valid = normalized_path.is_file() and os.access(
+                normalized_path, os.X_OK
+            )
+        if not valid:
+            raise ReleaseError(f"release_config_binding_invalid:{key}")
+        normalized[key] = str(normalized_path)
+    return dict(sorted(normalized.items()))
+
+
+def config_binding_sha256(value: Mapping[str, str]) -> str:
+    return sha256_bytes(canonical_bytes(dict(sorted(value.items()))))
+
+
+def config_binding_replacements(
+    *,
+    release_root: Path,
+    runtime_data_root: str,
+    bindings: Mapping[str, str],
+) -> dict[str, str]:
+    return {
+        "${RELEASE_ROOT}": str(release_root),
+        "${RUNTIME_DATA_ROOT}": runtime_data_root,
+        **{
+            CONFIG_BINDING_MARKERS[key]: bound
+            for key, bound in bindings.items()
+        },
+    }
+
+
+def config_bindings_from_rendered(
+    config: Mapping[str, Any],
+) -> dict[str, str]:
+    adapters = config.get("adapters")
+    processing = config.get("processing_plugin")
+    model = config.get("model")
+    if not isinstance(adapters, Mapping):
+        raise ReleaseError("release_config_bindings_invalid")
+    values = {
+        "math_root": (adapters.get("math") or {}).get("repo_root"),
+        "cs408_root": (adapters.get("cs408") or {}).get("repo_root"),
+        "english_root": (adapters.get("english") or {}).get("repo_root"),
+        "mcp_root": (
+            processing.get("mcp_project_root")
+            if isinstance(processing, Mapping)
+            else None
+        ),
+        "python_executable": (adapters.get("math") or {}).get("python_path"),
+        "mcp_python_executable": (
+            processing.get("mcp_client_python")
+            if isinstance(processing, Mapping)
+            else None
+        ),
+        "codex_executable": (
+            model.get("codex_path") if isinstance(model, Mapping) else None
+        ),
+    }
+    expected_python = values["python_executable"]
+    if any(
+        not isinstance(adapters.get(subject), Mapping)
+        or adapters[subject].get("python_path") != expected_python
+        for subject in ("math", "cs408", "english")
+    ):
+        raise ReleaseError("release_config_bindings_invalid")
+    return normalize_config_bindings(values)
 
 
 def _not_run_test_results() -> dict[str, Any]:
@@ -2503,6 +2642,7 @@ def _prepare_staging_generated_files(
     hashes: Mapping[str, str],
     modes: Mapping[str, int],
     verification_root: Path,
+    config_bindings: Mapping[str, str],
 ) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, str]]:
     holder = tempfile.TemporaryDirectory(prefix="study-intake-generated-")
     prepared = Path(holder.name)
@@ -2527,6 +2667,16 @@ def _prepare_staging_generated_files(
             str(generator),
             "--verification-root",
             str(verification_root),
+            "--math-root",
+            config_bindings["math_root"],
+            "--cs408-root",
+            config_bindings["cs408_root"],
+            "--english-root",
+            config_bindings["english_root"],
+            "--mcp-root",
+            config_bindings["mcp_root"],
+            "--mcp-python-executable",
+            config_bindings["mcp_python_executable"],
         ],
         cwd=generator.parents[1],
         stdin=subprocess.DEVNULL,
@@ -2541,15 +2691,17 @@ def _prepare_staging_generated_files(
         path = prepared / relative
         if not path.is_file() or sha256_file(path) != expected:
             raise ReleaseError(f"release_generator_unexpected_source_change:{relative}")
-    lock_relative = "plugin/kaoyan-study-intake/component-lock.json"
-    lock_path = prepared / lock_relative
-    if lock_path.is_symlink() or not lock_path.is_file():
-        raise ReleaseError("release_component_lock_generation_failed")
     freeze_relative = "validation/source-freeze-sha256-final-20260813.txt"
     freeze_path = prepared / freeze_relative
     freeze_path.parent.mkdir(parents=True, exist_ok=True)
     freeze_rows = dict(hashes)
-    freeze_rows[lock_relative] = sha256_file(lock_path)
+    for relative in sorted(STAGING_GENERATED_SOURCE_PATHS - {freeze_relative}):
+        generated_path = prepared / relative
+        if generated_path.is_symlink() or not generated_path.is_file():
+            raise ReleaseError(
+                f"release_component_generation_failed:{relative}"
+            )
+        freeze_rows[relative] = sha256_file(generated_path)
     freeze_path.write_text(
         "".join(
             f"{digest}  ./{relative}\n"
@@ -2558,8 +2710,8 @@ def _prepare_staging_generated_files(
         encoding="utf-8",
     )
     generated = {
-        lock_relative: sha256_file(lock_path),
-        freeze_relative: sha256_file(freeze_path),
+        relative: sha256_file(prepared / relative)
+        for relative in sorted(STAGING_GENERATED_SOURCE_PATHS)
     }
     for relative in generated:
         (prepared / relative).chmod(SEALED_GENERATED_MODE)
@@ -3150,6 +3302,10 @@ def _verify_target_sealed_mcp_binding(
                 "STUDY_READ_MCP_EXPECTED_PROJECT_ROOT",
                 "STUDY_READ_MCP_EXPECTED_RELEASE_ID",
                 "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256",
+                "STUDY_READ_MATH_ROOT",
+                "STUDY_READ_CS408_ROOT",
+                "STUDY_READ_ENGLISH_ROOT",
+                "STUDY_INTAKE_RUNTIME_ROOT",
             ],
         }
         if (
@@ -3358,6 +3514,7 @@ def build_release(
     historical_test_input_manifest: Path | None = None,
     model_contract: Mapping[str, Any] | None = None,
     component_inventory_profile: str = "full",
+    config_bindings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = source_root.resolve()
     release_base = _safe_base(release_base, label="release_base")
@@ -3379,6 +3536,24 @@ def build_release(
         raise ReleaseError("formal_surface_gate_arguments_incomplete")
     if not skip_tests and historical_test_input_manifest is None:
         raise ReleaseError("historical_test_input_manifest_required")
+    try:
+        config_template = json.loads(
+            (source_root / "config.example.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError("release_config_template_invalid") from exc
+    normalized_config_bindings: dict[str, str] = {}
+    if _contains_config_marker(config_template):
+        if not isinstance(config_bindings, Mapping):
+            raise ReleaseError("release_config_bindings_required")
+        normalized_config_bindings = normalize_config_bindings(config_bindings)
+    elif config_bindings is not None:
+        normalized_config_bindings = normalize_config_bindings(config_bindings)
+    binding_digest = (
+        config_binding_sha256(normalized_config_bindings)
+        if normalized_config_bindings
+        else None
+    )
     plugin_generator_root = (
         source_root / "plugin" / "kaoyan-study-intake"
     )
@@ -3424,6 +3599,7 @@ def build_release(
                 hashes=hashes,
                 modes=modes,
                 verification_root=fixture.verification_root,
+                config_bindings=normalized_config_bindings,
             )
         )
     runtime_data_root_value = str(runtime_data_root)
@@ -3437,6 +3613,7 @@ def build_release(
         effective_model_contract,
         test_results,
         staging_generated,
+        binding_digest,
     )
     releases = release_base / "releases"
     releases.mkdir(parents=True, exist_ok=True)
@@ -3478,11 +3655,14 @@ def build_release(
         template = json.loads(template_path.read_text(encoding="utf-8"))
         rendered = substitute(
             template,
-            {
-                "${RELEASE_ROOT}": str(destination),
-                "${RUNTIME_DATA_ROOT}": runtime_data_root_value,
-            },
+            config_binding_replacements(
+                release_root=destination,
+                runtime_data_root=runtime_data_root_value,
+                bindings=normalized_config_bindings,
+            ),
         )
+        if _contains_config_marker(rendered):
+            raise ReleaseError("release_config_bindings_unresolved")
         atomic_json(staging / "config.json", rendered, mode=SEALED_GENERATED_MODE)
         _clear_extended_metadata(staging / "config.json")
         generated = {
@@ -3542,6 +3722,11 @@ def build_release(
                 "gid": os.getgid(),
                 "mode": SEALED_MANIFEST_MODE,
                 "type": "file",
+                **(
+                    {"config_bindings_sha256": binding_digest}
+                    if binding_digest is not None
+                    else {}
+                ),
             },
             "service_topology": service_topology,
             "component_inventory": component_inventory,
@@ -3687,6 +3872,7 @@ def _expected_directories(files: Iterable[str]) -> set[str]:
 def _expected_config_bytes(
     root: Path,
     runtime_data_root: str,
+    expected_binding_sha256: str | None = None,
 ) -> tuple[bytes, Mapping[str, Any]]:
     try:
         template = json.loads(
@@ -3694,13 +3880,34 @@ def _expected_config_bytes(
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ReleaseError("release_config_template_invalid") from exc
+    bindings: dict[str, str] = {}
+    if _contains_config_marker(template):
+        try:
+            observed = json.loads(
+                (root / "config.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ReleaseError("release_config_bindings_invalid") from exc
+        if not isinstance(observed, Mapping):
+            raise ReleaseError("release_config_bindings_invalid")
+        bindings = config_bindings_from_rendered(observed)
+        if (
+            not isinstance(expected_binding_sha256, str)
+            or config_binding_sha256(bindings) != expected_binding_sha256
+        ):
+            raise ReleaseError("release_config_binding_digest_mismatch")
+    elif expected_binding_sha256 is not None:
+        raise ReleaseError("release_config_binding_digest_unexpected")
     rendered = substitute(
         template,
-        {
-            "${RELEASE_ROOT}": str(root),
-            "${RUNTIME_DATA_ROOT}": runtime_data_root,
-        },
+        config_binding_replacements(
+            release_root=root,
+            runtime_data_root=runtime_data_root,
+            bindings=bindings,
+        ),
     )
+    if _contains_config_marker(rendered):
+        raise ReleaseError("release_config_bindings_unresolved")
     if not isinstance(rendered, Mapping):
         raise ReleaseError("release_config_template_invalid")
     return canonical_bytes(rendered), rendered
@@ -3841,6 +4048,7 @@ def _verify_release_with_model_contract(
             for relative in STAGING_GENERATED_SOURCE_PATHS
             if relative in generated
         },
+        manifest_metadata.get("config_bindings_sha256"),
     )
     if (
         manifest.get("release_id") != expected_release_id
@@ -3902,6 +4110,7 @@ def _verify_release_with_model_contract(
     expected_config_bytes, config = _expected_config_bytes(
         root,
         runtime_data_root_value,
+        manifest_metadata.get("config_bindings_sha256"),
     )
     if (root / "config.json").read_bytes() != expected_config_bytes:
         raise ReleaseError("release_config_derivation_mismatch")
@@ -4280,22 +4489,22 @@ def _prepare_legacy_snapshot(
             test_text = test_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise ReleaseError("legacy_parity_test_unreadable") from exc
-        old_reference = '''LIVE_CONFIG = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/config.json"
-)'''
+        old_reference = re.compile(
+            r'LIVE_CONFIG = Path\(\n\s*"[^"\n]+/config\.json"\n\)'
+        )
         if LEGACY_PARITY_CONFIG_ENV not in test_text:
-            if old_reference not in test_text or "import json\n" not in test_text:
+            if old_reference.search(test_text) is None or "import json\n" not in test_text:
                 raise ReleaseError("legacy_parity_test_shape_invalid")
             test_text = test_text.replace("import json\n", "import json\nimport os\n", 1)
-            test_text = test_text.replace(
-                old_reference,
+            test_text = old_reference.sub(
                 '''LIVE_CONFIG = Path(
     os.environ.get(
         "STUDY_PREPROCESSOR_LEGACY_PARITY_CONFIG",
-        "/Users/xiazhibin/.codex/study-intake-preprocessor/config.json",
+        Path.home() / ".codex" / "study-intake-preprocessor" / "config.json",
     )
 )''',
-                1,
+                test_text,
+                count=1,
             )
             source_mode = stat.S_IMODE(
                 (source_root / "tests" / "test_release_manager.py").lstat().st_mode
@@ -14774,7 +14983,7 @@ def _exact_20260813_superseded_rolled_back_receipt_closes_prepare(
                 postcommit.get("previous_release_id")
                 != descriptor["previous_release_id"]
                 or postcommit.get("active_link")
-                != "/Users/xiazhibin/.codex/study-intake-preprocessor/current"
+                != f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/current"
             )
         )
     ):
@@ -14835,7 +15044,7 @@ def _exact_20260813_superseded_rolled_back_receipt_closes_prepare(
                 "c28d440eb4fb0b5f981f7121800b9a1001e4f130a9c4b2741d32ce94f2539305"
             ),
             "task_object_path": (
-                "/Users/xiazhibin/.codex/study-intake-preprocessor/dispatch/"
+                f"{PORTABLE_USER_HOME}/.codex/study-intake-preprocessor/dispatch/"
                 "production-canary/tasks/english/sha256/9d/"
                 "9d8f64ca6e9d783db92bcafa445f5105d18a9ae8c9f95d5810a9496af5761183.json"
             ),
@@ -24069,6 +24278,16 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--formal-config", type=Path)
     build.add_argument("--formal-baseline", type=Path)
     build.add_argument("--historical-test-input-manifest", type=Path)
+    for key, environment_name in CONFIG_BINDING_ENV.items():
+        option = "--" + key.replace("_", "-")
+        configured = os.environ.get(environment_name)
+        build.add_argument(
+            option,
+            dest=key,
+            type=Path,
+            default=Path(configured) if configured else None,
+            help=f"portable config binding; defaults to {environment_name}",
+        )
 
     legacy = sub.add_parser("build-legacy-rollback")
     legacy.add_argument("--current-link", type=Path, default=DEFAULT_ACTIVE_LINK)
@@ -24294,6 +24513,10 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "build":
+            config_bindings = {
+                key: getattr(args, key)
+                for key in CONFIG_BINDING_MARKERS
+            }
             result = build_release(
                 source_root=args.source_root,
                 release_base=args.release_base,
@@ -24303,6 +24526,7 @@ def main() -> int:
                 formal_config=args.formal_config,
                 formal_baseline=args.formal_baseline,
                 historical_test_input_manifest=args.historical_test_input_manifest,
+                config_bindings=config_bindings,
             )
         elif args.command == "build-legacy-rollback":
             result = build_legacy_rollback(

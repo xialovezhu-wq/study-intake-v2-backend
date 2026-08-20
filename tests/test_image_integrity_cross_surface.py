@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -19,8 +20,11 @@ import preprocessor_core as core  # noqa: E402
 
 
 REPO_INTEGRITY_PATH = Path(
-    "/Users/xiazhibin/Documents/kaoyan-408/scripts/image_integrity_408.py"
-)
+    os.environ.get(
+        "STUDY_INTAKE_CS408_IMAGE_INTEGRITY_PATH",
+        str(ROOT.parent / "kaoyan-408/scripts/image_integrity_408.py"),
+    )
+).resolve()
 
 
 def encoded_image(image_format: str) -> bytes:

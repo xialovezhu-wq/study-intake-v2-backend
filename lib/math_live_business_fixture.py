@@ -31,8 +31,8 @@ MODEL_REQUEST = {
     "reasoning_effort": "max",
     "runtime_attestation": "requested_unverified",
 }
-DEFAULT_TRUSTED_SOURCE_ROOT = Path("/Users/xiazhibin/Documents/kaoyan-math")
-DEFAULT_TRUSTED_ROLLOUT_ROOT = Path("/Users/xiazhibin/.codex/sessions")
+DEFAULT_TRUSTED_SOURCE_ROOT = Path(f"{Path.home()}/Documents/kaoyan-math")
+DEFAULT_TRUSTED_ROLLOUT_ROOT = Path(f"{Path.home()}/.codex/sessions")
 REAL_AUTHORITY_CAPTURE_IDS = {
     "LUNA-MATH-20260809-001",
     "LUNA-MATH-20260809-002",

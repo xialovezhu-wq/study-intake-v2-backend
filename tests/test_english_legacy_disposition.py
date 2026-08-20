@@ -39,111 +39,90 @@ from lib.english_legacy_disposition import (
 from scripts import pre_model_p0_gate as gate
 from scripts import english_legacy_disposition as disposition_cli
 from lib import english_legacy_disposition as disposition_runtime
+from tests.synthetic_english_legacy_fixture import (
+    SyntheticEnglishLegacyFixture,
+    build_synthetic_english_legacy_fixture,
+)
+from tests.synthetic_p0_fixture import (
+    SyntheticP0Fixture,
+    build_synthetic_p0_fixture,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AUDIT_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-interface-audit-20260809"
-)
-ARTIFACT_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-model-lane-staging-20260809/artifacts/pre-model-gate"
-)
-REQUIREMENTS = ARTIFACT_ROOT / "en-p0-006-legacy-disposition-requirements.json"
-REVIEW_TEMPLATE = ARTIFACT_ROOT / "en-p0-006-disposition-review-template-v2.json"
-MATRIX = ARTIFACT_ROOT / "p0-matrix.json"
-GOLDEN = ARTIFACT_ROOT / "zero-model-golden-inventory.json"
+AUDIT_ROOT: Path
+MATRIX: Path
+GOLDEN: Path
+_P0_FIXTURE: SyntheticP0Fixture | None = None
 TEST_MCP_AUTHORITY_GENERATION = "english-test-generation"
 TEST_MCP_AUTHORITY_FINGERPRINT = "b" * 64
+
+
+def setUpModule() -> None:
+    global AUDIT_ROOT, MATRIX, GOLDEN, _P0_FIXTURE
+    _P0_FIXTURE = build_synthetic_p0_fixture()
+    AUDIT_ROOT = _P0_FIXTURE.audit_root
+    MATRIX = _P0_FIXTURE.matrix_path
+    GOLDEN = _P0_FIXTURE.golden_path
+
+
+def tearDownModule() -> None:
+    global _P0_FIXTURE
+    if _P0_FIXTURE is not None:
+        _P0_FIXTURE.cleanup()
+        _P0_FIXTURE = None
+
+
+def _install_synthetic_runtime(
+    fixture: SyntheticEnglishLegacyFixture,
+) -> list[mock._patch]:
+    values = {
+        "ROLLOUT_PATH": fixture.rollout_path,
+        "ROLLOUT_SHA256": fixture.rollout_sha256,
+        "ROLLOUT_WINDOW_SHA256": fixture.rollout_window_sha256,
+        "ROLLOUT_WINDOW_EVENT_SHA256S": (
+            fixture.rollout_window_event_sha256s
+        ),
+        "ORIGINATING_THREAD_ID": "synthetic-english-legacy-thread",
+        "ARTICLE_RECORD_ID": fixture.article_record_id,
+        "MASTER_BANK_PATH": fixture.master_bank_path,
+        "PATTERN_PATH": fixture.pattern_path,
+        "ARTICLE_PATH": fixture.article_path,
+        "MASTERED_ITEMS_PATH": fixture.mastered_items_path,
+        "ENGLISH_ROOT": fixture.root,
+        "RELATION_REBUILD_SCRIPT": fixture.relation_rebuild_script,
+        "PROJECTION_SIDE_EFFECT_PATHS": (
+            fixture.projection_side_effect_paths
+        ),
+        "ALLOWED_AUTHORITY_PATHS": fixture.allowed_authority_paths,
+        "HISTORICAL_AUTHORITY_ROLES": {},
+    }
+    patches: list[mock._patch] = []
+    cli_runtime = sys.modules[disposition_cli.build_review_template.__module__]
+    runtimes = [disposition_runtime]
+    if cli_runtime is not disposition_runtime:
+        runtimes.append(cli_runtime)
+    for runtime in runtimes:
+        for name, value in values.items():
+            patcher = mock.patch.object(runtime, name, value)
+            patcher.start()
+            patches.append(patcher)
+    disposition_runtime._historical_test_input_from_environment.cache_clear()
+    return patches
 
 
 class EnglishLegacyDispositionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="en-p0-006-")
         self.temp = Path(self.temporary.name)
-        self.runtime_patches: list[mock._patch] = []
+        self.source_fixture = build_synthetic_english_legacy_fixture(self.temp)
+        self.runtime_patches = _install_synthetic_runtime(self.source_fixture)
         self.key = self.temp / "authority.key"
         self.key.write_bytes(b"k" * 32)
         os.chmod(self.key, 0o600)
         self.store = EnglishLegacyDispositionStore(self.temp / "receipts", self.key)
-        requirements = json.loads(REQUIREMENTS.read_text(encoding="utf-8"))
-
-        self.persisted_review = json.loads(
-            REVIEW_TEMPLATE.read_text(encoding="utf-8")
-        )
-        fixture_root = self.temp / "english-authority"
-        fixture_root.mkdir()
-        fixture_paths = {
-            "master_bank_row": fixture_root / "master_bank.csv",
-            "sentence_pattern_card": fixture_root / "sentence_patterns.md",
-            "article_learning_page": fixture_root / "article.md",
-            "mastered_items_boundary": fixture_root / "mastered_items.csv",
-        }
-        master_ids = sorted(
-            row["record_id"]
-            for row in self.persisted_review["targets"]
-            if row["target_kind"] == "master_bank_row"
-        )
-        pattern_ids = sorted(
-            row["record_id"]
-            for row in self.persisted_review["targets"]
-            if row["target_kind"] == "sentence_pattern_card"
-        )
-        fixture_paths["master_bank_row"].write_text(
-            "id,last_seen\n"
-            + "".join(f"{record_id},2026-08-06\n" for record_id in master_ids),
-            encoding="utf-8",
-        )
-        fixture_paths["sentence_pattern_card"].write_text(
-            "".join(
-                f"## {record_id}｜isolated test fixture\nfixture\n\n"
-                for record_id in pattern_ids
-            ),
-            encoding="utf-8",
-        )
-        fixture_paths["article_learning_page"].write_text(
-            "isolated article fixture\n",
-            encoding="utf-8",
-        )
-        fixture_paths["mastered_items_boundary"].write_text(
-            "id\n",
-            encoding="utf-8",
-        )
-
-        allowed_authority_paths = {
-            str(path.resolve()): kind
-            for kind, path in fixture_paths.items()
-        }
-        runtime_values = {
-            "MASTER_BANK_PATH": fixture_paths["master_bank_row"],
-            "PATTERN_PATH": fixture_paths["sentence_pattern_card"],
-            "ARTICLE_PATH": fixture_paths["article_learning_page"],
-            "MASTERED_ITEMS_PATH": fixture_paths["mastered_items_boundary"],
-            "ALLOWED_AUTHORITY_PATHS": allowed_authority_paths,
-            "HISTORICAL_AUTHORITY_ROLES": {},
-        }
-        cli_runtime = sys.modules[
-            disposition_cli.build_review_template.__module__
-        ]
-        for runtime in (disposition_runtime, cli_runtime):
-            for name, value in runtime_values.items():
-                patcher = mock.patch.object(runtime, name, value)
-                patcher.start()
-                self.runtime_patches.append(patcher)
-
-        for group in requirements["target_groups"]:
-            authority_path = fixture_paths[group["target_kind"]]
-            group["authority_path"] = str(authority_path.resolve())
-            group["current_file_sha256"] = hashlib.sha256(
-                authority_path.read_bytes()
-            ).hexdigest()
-        mastered = requirements["mastered_items_state"]
-        mastered_path = fixture_paths["mastered_items_boundary"]
-        mastered["authority_path"] = str(mastered_path.resolve())
-        mastered["current_sha256"] = hashlib.sha256(
-            mastered_path.read_bytes()
-        ).hexdigest()
+        requirements = copy.deepcopy(self.source_fixture.requirements)
+        self.persisted_review = build_review_template(requirements)
         self.requirements = self.temp / "requirements.json"
         self.requirements.write_text(
             json.dumps(requirements, ensure_ascii=False, sort_keys=True) + "\n",
@@ -285,7 +264,7 @@ class EnglishLegacyDispositionTests(unittest.TestCase):
         ):
             self.store.seal_inventory(self.review)
 
-    def test_schema_copies_are_exact_and_validate_real_objects(self) -> None:
+    def test_schema_copies_are_exact_and_validate_synthetic_objects(self) -> None:
         inventory_sha, inventory = self.issue_inventory()
         target_id = inventory["targets"][0]["target_id"]
         receipt_sha, receipt = self.issue_receipt(inventory_sha, target_id)
@@ -486,7 +465,7 @@ class EnglishLegacyDispositionTests(unittest.TestCase):
         ):
             value = build_review_template(requirements)
         self.assertEqual(value, self.review)
-        fixture_root = (self.temp / "english-authority").resolve()
+        fixture_root = self.source_fixture.root.resolve()
         self.assertTrue(
             all(
                 Path(row["authority_path"]).resolve().is_relative_to(fixture_root)
@@ -585,6 +564,8 @@ class EnglishLegacyBatchDispositionV3Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="en-p0-006-v3-")
         self.temp = Path(self.temporary.name)
+        self.source_fixture = build_synthetic_english_legacy_fixture(self.temp)
+        self.runtime_patches = _install_synthetic_runtime(self.source_fixture)
         self.key = self.temp / "authority.key"
         self.key.write_bytes(b"v" * 32)
         os.chmod(self.key, 0o600)
@@ -593,6 +574,8 @@ class EnglishLegacyBatchDispositionV3Tests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        for patcher in reversed(self.runtime_patches):
+            patcher.stop()
         self.temporary.cleanup()
 
     def test_materialization_reads_live_english_mcp_authority_from_candidate(self) -> None:
@@ -694,6 +677,7 @@ class EnglishLegacyBatchDispositionV3Tests(unittest.TestCase):
             reviewed_at="2026-08-09T09:30:00Z",
             mcp_authority_generation=TEST_MCP_AUTHORITY_GENERATION,
             mcp_authority_fingerprint=TEST_MCP_AUTHORITY_FINGERPRINT,
+            rollout_path=self.source_fixture.rollout_path,
         )
         review_sha256, _path, _receipt = (
             self.store.seal_inventory_independent_review_receipt(review_core)
@@ -704,6 +688,7 @@ class EnglishLegacyBatchDispositionV3Tests(unittest.TestCase):
             issued_at="2026-08-09T10:00:00Z",
             mcp_authority_generation=TEST_MCP_AUTHORITY_GENERATION,
             mcp_authority_fingerprint=TEST_MCP_AUTHORITY_FINGERPRINT,
+            rollout_path=self.source_fixture.rollout_path,
         )
 
     @staticmethod
@@ -885,6 +870,7 @@ class EnglishLegacyBatchDispositionV3Tests(unittest.TestCase):
             issued_at="2026-08-09T10:00:00Z",
             mcp_authority_generation=TEST_MCP_AUTHORITY_GENERATION,
             mcp_authority_fingerprint=TEST_MCP_AUTHORITY_FINGERPRINT,
+            rollout_path=self.source_fixture.rollout_path,
         )
         with self.assertRaisesRegex(
             EnglishLegacyDispositionError, "legacy_content_address_invalid"

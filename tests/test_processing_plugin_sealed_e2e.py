@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,11 +10,14 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MCP_SOURCE = Path("/Users/xiazhibin/Documents/Codex/local-study-read-mcp")
-MCP_PYTHON = MCP_SOURCE / ".venv/bin/python"
+MCP_SOURCE = (ROOT.parent / "local-study-read-mcp").resolve()
+MCP_PYTHON = Path(sys.executable).absolute()
 sys.path.insert(0, str(ROOT / "lib"))
 
 from processing_plugin import ProcessingPluginHost  # noqa: E402
+from tests.portable_plugin_fixture import (  # noqa: E402
+    build_portable_plugin_fixture,
+)
 
 
 LUNA_CLIENT = r"""
@@ -58,6 +59,10 @@ async def main():
             "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256": os.environ[
                 "FIXTURE_RELEASE_MANIFEST_SHA256"
             ],
+            "STUDY_READ_MATH_ROOT": os.environ["FIXTURE_MATH_ROOT"],
+            "STUDY_READ_CS408_ROOT": os.environ["FIXTURE_CS408_ROOT"],
+            "STUDY_READ_ENGLISH_ROOT": os.environ["FIXTURE_ENGLISH_ROOT"],
+            "STUDY_INTAKE_RUNTIME_ROOT": os.environ["FIXTURE_PREPROCESSOR"],
         },
     )
     async with stdio_client(params, errlog=sys.stderr) as streams:
@@ -74,15 +79,6 @@ asyncio.run(main())
 """
 
 
-def _load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise AssertionError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _canonical_bytes(value: object) -> bytes:
     return (
         json.dumps(
@@ -93,6 +89,73 @@ def _canonical_bytes(value: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _prepare_mcp_python(base: Path, mcp_source: Path) -> Path:
+    venv_root = base / "mcp-venv"
+    commands = [
+        [sys.executable, "-m", "venv", str(venv_root)],
+        [
+            str(venv_root / "bin/python"),
+            "-m",
+            "pip",
+            "install",
+            "setuptools==80.9.0",
+        ],
+        [
+            str(venv_root / "bin/python"),
+            "-m",
+            "pip",
+            "install",
+            "--require-hashes",
+            "-r",
+            str(mcp_source / "requirements.lock"),
+        ],
+        [
+            str(venv_root / "bin/python"),
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--no-build-isolation",
+            "-e",
+            str(mcp_source),
+        ],
+    ]
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=mcp_source,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(
+                "portable MCP dependency setup failed: " + completed.stderr
+            )
+    return (venv_root / "bin/python").absolute()
+
+
+def _ensure_runtime_release(runtime: Path, release_id: str) -> None:
+    release_root = runtime / "releases" / release_id
+    release_root.mkdir(parents=True, exist_ok=True)
+    (runtime / "packages" / "objects").mkdir(parents=True, exist_ok=True)
+    (release_root / "release.json").write_bytes(
+        _canonical_bytes(
+            {
+                "schema_version": "study-intake-preprocessor-release-v2",
+                "release_id": release_id,
+                "component_inventory": {},
+            }
+        )
+    )
+    current = runtime / "current"
+    if current.exists() or current.is_symlink():
+        current.unlink()
+    current.symlink_to(release_root, target_is_directory=True)
 
 
 def _schema_validation(
@@ -132,99 +195,61 @@ def _reject_schema(schema_path: Path, value: object, base: Path) -> None:
         raise AssertionError("invalid schema instance was accepted")
 
 
-@unittest.skipUnless(
-    MCP_PYTHON.is_file() and (MCP_SOURCE / "scripts/build_release.py").is_file(),
-    "the local MCP source and pinned virtualenv are required",
-)
 class ProcessingPluginSealedEndToEndTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.dependency_temp = tempfile.TemporaryDirectory(
+            prefix="processing-plugin-sealed-deps-"
+        )
+        cls.mcp_python = _prepare_mcp_python(
+            Path(cls.dependency_temp.name), MCP_SOURCE
+        )
+        global MCP_PYTHON
+        MCP_PYTHON = cls.mcp_python
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.dependency_temp.cleanup()
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
             prefix="processing-plugin-sealed-e2e-"
         )
         self.base = Path(self.temporary.name)
-        sys.path.insert(0, str(MCP_SOURCE / "src"))
-        try:
-            helpers = _load_module(
-                "sealed_e2e_mcp_helpers", MCP_SOURCE / "tests/helpers.py"
-            )
-            self.repositories = helpers.make_fixture(self.base / "repositories")
-        finally:
-            sys.path.remove(str(MCP_SOURCE / "src"))
-        builder = _load_module(
-            "sealed_e2e_mcp_builder", MCP_SOURCE / "scripts/build_release.py"
+        portable = build_portable_plugin_fixture(
+            self.base / "portable",
+            ROOT,
+            mcp_python=MCP_PYTHON,
         )
-        self.release_result = builder.build(self.base / "mcp-releases")
-        self.mcp_release = Path(self.release_result["release_dir"]).resolve()
-
-        self.plugin_root = self.base / "kaoyan-study-intake"
-        shutil.copytree(ROOT / "plugin/kaoyan-study-intake", self.plugin_root)
-        components_path = self.plugin_root / "components.json"
-        components = json.loads(components_path.read_text(encoding="utf-8"))
+        self.plugin_root = portable.plugin_root
         self.lock_path = self.plugin_root / "component-lock.json"
-        self.lock_path.chmod(0o600)
-        lock = json.loads(self.lock_path.read_text(encoding="utf-8"))
-        release_manifest_sha256 = hashlib.sha256(
-            (self.mcp_release / "release.json").read_bytes()
-        ).hexdigest()
-        sealed_launcher = self.mcp_release / "scripts/sealed_launcher.py"
-        sealed_launcher_sha256 = hashlib.sha256(
-            sealed_launcher.read_bytes()
-        ).hexdigest()
-        components["mcp"].update(
-            {
-                "server_release": self.release_result["server_release"],
-                "release_root": str(self.mcp_release),
-                "release_id": self.release_result["release_id"],
-                "release_manifest": str(self.mcp_release / "release.json"),
-                "release_manifest_sha256": release_manifest_sha256,
-                "python_executable": str(MCP_PYTHON),
-                "python_flags": ["-I", "-S"],
-                "sealed_launcher_path": str(sealed_launcher),
-                "sealed_launcher_sha256": sealed_launcher_sha256,
-            }
+        self.mcp_release = portable.mcp_root
+        self.mcp_python = portable.mcp_python
+        self.subject_roots = portable.subject_roots
+        mcp_manifest = json.loads(
+            (self.mcp_release / "release.json").read_text(encoding="utf-8")
         )
-        components_path.write_bytes(_canonical_bytes(components))
-        generator = _load_module(
-            "sealed_e2e_plugin_generator",
-            ROOT / "plugin/kaoyan-study-intake/scripts/generate_manifests.py",
-        )
-        launcher_path = self.plugin_root / "bin/kaoyan-read"
-        launcher_path.write_bytes(
-            generator.render_kaoyan_read(components["mcp"])
-        )
-        lock["registry_sha256"] = hashlib.sha256(
-            components_path.read_bytes()
-        ).hexdigest()
-        lock["launcher_sha256"] = hashlib.sha256(
-            launcher_path.read_bytes()
-        ).hexdigest()
-        lock["mcp_release_root"] = str(self.mcp_release)
-        lock["mcp_release_id"] = self.release_result["release_id"]
-        lock["mcp_server_release"] = self.release_result["server_release"]
-        lock["mcp_release_manifest_sha256"] = release_manifest_sha256
-        lock["mcp_sealed_runtime"] = {
-            "python_executable": str(MCP_PYTHON),
-            "python_flags": ["-I", "-S"],
-            "sealed_launcher_path": str(sealed_launcher),
-            "sealed_launcher_sha256": sealed_launcher_sha256,
-            "release_root": str(self.mcp_release),
-            "release_id": self.release_result["release_id"],
-            "release_manifest_sha256": release_manifest_sha256,
+        self.release_result = {
+            "release_dir": str(self.mcp_release),
+            "release_id": portable.release_id,
+            "server_release": mcp_manifest["server_release"],
+            "release_manifest_sha256": hashlib.sha256(
+                (self.mcp_release / "release.json").read_bytes()
+            ).hexdigest(),
         }
-        self.lock_path.write_bytes(_canonical_bytes(lock))
-        self.lock_path.chmod(0o400)
 
         self.runtime = self.base / "runtime"
         key_path = self.runtime / "dispatch/state/authority.key"
         key_path.parent.mkdir(parents=True)
         key_path.write_bytes(b"s" * 32)
         key_path.chmod(0o600)
+        _ensure_runtime_release(self.runtime, "a" * 64)
         self.host = ProcessingPluginHost(
             {
                 "enabled": True,
                 "root": str(self.plugin_root),
                 "component_lock_path": str(self.lock_path),
-                "mcp_client_python": str(MCP_PYTHON),
+                "mcp_client_python": str(self.mcp_python),
                 "mcp_project_root": str(self.mcp_release),
                 "authority_key_path": str(key_path),
                 "profile": "background",
@@ -232,11 +257,7 @@ class ProcessingPluginSealedEndToEndTests(unittest.TestCase):
             },
             runtime_root=self.runtime,
             candidate_release_id="a" * 64,
-            subject_roots={
-                "math": self.repositories.math_root,
-                "cs408": self.repositories.cs408_root,
-                "english": self.repositories.english_root,
-            },
+            subject_roots=self.subject_roots,
             require_authority_snapshot=True,
         )
 
@@ -345,6 +366,9 @@ class ProcessingPluginSealedEndToEndTests(unittest.TestCase):
                 "FIXTURE_RELEASE_MANIFEST_SHA256": (
                     self.release_result["release_manifest_sha256"]
                 ),
+                "FIXTURE_MATH_ROOT": str(self.subject_roots["math"]),
+                "FIXTURE_CS408_ROOT": str(self.subject_roots["cs408"]),
+                "FIXTURE_ENGLISH_ROOT": str(self.subject_roots["english"]),
             },
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -400,7 +424,7 @@ class ProcessingPluginSealedEndToEndTests(unittest.TestCase):
             )
 
         live_events = (
-            self.repositories.cs408_root
+            self.subject_roots["cs408"]
             / "wiki/study_vaults/408-full/state/review-loop/events.jsonl"
         )
         with live_events.open("a", encoding="utf-8") as handle:

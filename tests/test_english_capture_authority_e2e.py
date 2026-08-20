@@ -4,7 +4,6 @@ import copy
 import hashlib
 import json
 import os
-import shutil
 import tempfile
 import unittest
 from dataclasses import replace
@@ -32,6 +31,7 @@ from preprocessor_core import (  # noqa: E402
     sha256_value,
 )
 from processing_plugin import ProcessingPluginError, ProcessingPluginHost  # noqa: E402
+from tests.portable_plugin_fixture import build_portable_plugin_fixture
 
 
 def _value_sha256(value: object) -> str:
@@ -93,49 +93,20 @@ class EnglishCaptureAuthorityE2ETests(unittest.TestCase):
         self.authority_key.parent.mkdir(parents=True)
         self.authority_key.write_bytes(b"e" * 32)
         self.authority_key.chmod(0o600)
-        plugin_overlay = (
-            Path(self.temporary.name) / "plugin-overlay/kaoyan-study-intake"
+        portable = build_portable_plugin_fixture(
+            Path(self.temporary.name), ROOT
         )
-        shutil.copytree(
-            ROOT / "plugin/kaoyan-study-intake", plugin_overlay
-        )
+        plugin_overlay = portable.plugin_root
         lock_path = plugin_overlay / "component-lock.json"
         component_lock = json.loads(lock_path.read_text(encoding="utf-8"))
-        english_skill = (
-            plugin_overlay
-            / "skills/background-english-processing/SKILL.md"
-        )
-        component_lock["skills"]["background-english-processing"] = {
-            "sha256": hashlib.sha256(english_skill.read_bytes()).hexdigest(),
-            "version": "3.1.1",
-        }
-        lock_path.chmod(0o600)
-        lock_path.write_text(
-            json.dumps(
-                component_lock,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        lock_path.chmod(0o400)
         self.release_id = "a" * 64
-        self.mcp_release_id = str(component_lock["mcp_release_id"])
         self.mcp_server_release = str(component_lock["mcp_server_release"])
-        mcp_source_root = Path(
-            "/Users/xiazhibin/Documents/Codex/local-study-read-mcp"
-        )
         host_config = {
             "enabled": True,
             "root": str(plugin_overlay),
             "component_lock_path": str(lock_path),
-            "mcp_client_python": str(mcp_source_root / ".venv/bin/python"),
-            "mcp_project_root": str(
-                Path("/Users/xiazhibin/.codex/local-study-read-mcp/releases")
-                / self.mcp_release_id
-            ),
+            "mcp_client_python": str(portable.mcp_python),
+            "mcp_project_root": str(portable.mcp_root),
             "authority_key_path": str(self.authority_key),
             "profile": "background",
             "timeout_seconds": 5,
@@ -144,6 +115,7 @@ class EnglishCaptureAuthorityE2ETests(unittest.TestCase):
             host_config,
             runtime_root=self.runtime,
             candidate_release_id=self.release_id,
+            subject_roots=portable.subject_roots,
         )
         self.dashboard_config = {
             "runtime_root": str(self.runtime),

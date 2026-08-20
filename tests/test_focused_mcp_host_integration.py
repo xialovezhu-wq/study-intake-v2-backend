@@ -15,8 +15,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MCP_ROOT = Path("/Users/xiazhibin/Documents/Codex/local-study-read-mcp")
-MCP_PYTHON = MCP_ROOT / ".venv" / "bin" / "python"
+MCP_ROOT = Path(
+    os.environ.get(
+        "STUDY_READ_MCP_SOURCE_ROOT",
+        str(ROOT.parent / "local-study-read-mcp"),
+    )
+).resolve()
+MCP_PYTHON = Path(
+    os.environ.get("STUDY_READ_MCP_TEST_PYTHON", sys.executable)
+).expanduser().absolute()
 sys.path.insert(0, str(ROOT / "lib"))
 
 from preprocessor_core import (  # noqa: E402
@@ -236,13 +243,13 @@ def _mutate_result_envelopes(result: dict, mutate) -> None:
             )
 
 
-@unittest.skipUnless(
-    MCP_PYTHON.is_file() and (MCP_ROOT / "pyproject.toml").is_file(),
-    "the local focused MCP source and its pinned virtualenv are required",
-)
 class FocusedMcpHostIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        if not MCP_PYTHON.is_file() or not (MCP_ROOT / "pyproject.toml").is_file():
+            raise AssertionError(
+                "portable shared MCP source and Python runtime are required"
+            )
         cls._temporary = tempfile.TemporaryDirectory()
         base = Path(cls._temporary.name)
         environment = dict(os.environ)
@@ -255,6 +262,7 @@ class FocusedMcpHostIntegrationTests(unittest.TestCase):
             "PYTHONUTF8": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
         })
+        cls.environment = environment
         completed = subprocess.run(
             [str(MCP_PYTHON), "-c", CLIENT_SOURCE, str(base / "fixtures")],
             cwd=MCP_ROOT,
@@ -288,7 +296,7 @@ class FocusedMcpHostIntegrationTests(unittest.TestCase):
             },
         )
 
-    def test_three_real_stdio_servers_expose_only_six_focused_tools(self) -> None:
+    def test_three_stdio_servers_expose_only_six_focused_tools(self) -> None:
         expected = [
             "get_task_context",
             "read_task_artifact",
@@ -304,12 +312,23 @@ class FocusedMcpHostIntegrationTests(unittest.TestCase):
                     f"kaoyan_{subject}_read",
                 )
                 self.assertEqual(self.bundle[subject]["tool_names"], expected)
-                launcher = MCP_ROOT / ".venv" / "bin" / f"study-read-mcp-{subject}"
-                self.assertTrue(launcher.is_file())
-                self.assertTrue(os.access(launcher, os.X_OK))
+                launcher = {
+                    "math": "math_main",
+                    "cs408": "cs408_main",
+                    "english": "english_main",
+                }[subject]
                 help_result = subprocess.run(
-                    [str(launcher), "--help"],
+                    [
+                        str(MCP_PYTHON),
+                        "-c",
+                        (
+                            "from study_read_mcp.launchers import "
+                            f"{launcher}; {launcher}()"
+                        ),
+                        "--help",
+                    ],
                     cwd=MCP_ROOT,
+                    env=self.environment,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=10,
@@ -400,7 +419,7 @@ class FocusedMcpHostIntegrationTests(unittest.TestCase):
                         expected["candidate_release_id"],
                     )
 
-    def test_real_focused_envelopes_match_the_common_and_tool_specific_contracts(self) -> None:
+    def test_focused_envelopes_match_common_and_tool_specific_contracts(self) -> None:
         for subject in ("math", "cs408", "english"):
             for event in self.bundle[subject]["events"]:
                 tool = event["item"]["tool"]

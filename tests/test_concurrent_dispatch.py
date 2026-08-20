@@ -72,6 +72,7 @@ from fixtures.process_lifecycle import (  # noqa: E402
     register_process,
     stop_process,
 )
+from tests.portable_plugin_fixture import build_portable_plugin_fixture
 
 
 def frozen_task(index: int, *, subject: str = "math") -> FrozenTask:
@@ -357,6 +358,19 @@ class BehaviorRunner:
 
 
 class ConcurrentDispatchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._portable_temp = tempfile.TemporaryDirectory(
+            prefix="concurrent-dispatch-portable-"
+        )
+        cls.portable_fixture = build_portable_plugin_fixture(
+            Path(cls._portable_temp.name), ROOT
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._portable_temp.cleanup()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.runtime = Path(self.temp.name) / "runtime"
@@ -477,25 +491,19 @@ class ConcurrentDispatchTests(unittest.TestCase):
         key_path.chmod(0o600)
         component_lock = json.loads(
             (
-                ROOT / "plugin/kaoyan-study-intake/component-lock.json"
+                self.portable_fixture.plugin_root / "component-lock.json"
             ).read_text(encoding="utf-8")
         )
         mcp_release_id = component_lock["mcp_release_id"]
         server_release = component_lock["mcp_server_release"]
         processing_config = {
             "enabled": True,
-            "root": str(ROOT / "plugin/kaoyan-study-intake"),
+            "root": str(self.portable_fixture.plugin_root),
             "component_lock_path": str(
-                ROOT / "plugin/kaoyan-study-intake/component-lock.json"
+                self.portable_fixture.plugin_root / "component-lock.json"
             ),
-            "mcp_client_python": str(
-                Path("/Users/xiazhibin/Documents/Codex/local-study-read-mcp")
-                / ".venv/bin/python"
-            ),
-            "mcp_project_root": str(
-                Path("/Users/xiazhibin/.codex/local-study-read-mcp/releases")
-                / mcp_release_id
-            ),
+            "mcp_client_python": str(self.portable_fixture.mcp_python),
+            "mcp_project_root": str(self.portable_fixture.mcp_root),
             "authority_key_path": str(key_path),
             "profile": "background",
             "timeout_seconds": 5,

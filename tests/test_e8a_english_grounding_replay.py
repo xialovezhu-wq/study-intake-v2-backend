@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import sys
+import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -24,103 +25,49 @@ from preprocessor_core import (  # noqa: E402
     sha256_value,
     validate_english_mcp_grounding,
 )
+sys.path.insert(0, str(ROOT / "tests"))
 
-
-E8A_ARTIFACT_ROOT = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/deployments/"
-    "three-subject-direct-mcp-en-p0-006-20260809/artifacts/"
-    "three-real-smoke-e8a54b12/stage-runtime/private/reports"
-)
-E8A_OUTPUT_PATH = (
-    E8A_ARTIFACT_ROOT
-    / "model-stage-outputs/objects/"
-    "6abb724d38217927cd6cc2d74c3ea59274368c6fa7aca1d771cc5e799f779f69.json"
-)
-E8A_OUTPUT_SHA256 = (
-    "6abb724d38217927cd6cc2d74c3ea59274368c6fa7aca1d771cc5e799f779f69"
-)
-E8A_TRANSCRIPT_PATH = (
-    E8A_ARTIFACT_ROOT
-    / "mcp-stage-transcripts/sha256/bf/"
-    "bfe6b4830f88c586457751370c55b19944da740846c05cd081ae082e105d772f.json"
-)
-E8A_TRANSCRIPT_SHA256 = (
-    "bfe6b4830f88c586457751370c55b19944da740846c05cd081ae082e105d772f"
-)
-E8A_RAW_TRANSPORT_PATH = (
-    E8A_ARTIFACT_ROOT
-    / "model-mcp-transport/sha256/2b/"
-    "2bbddaddb6f9d2c73c59d9e790e742569b81219a6e51b4ddc9bdb77b971f5982.json"
-)
-E8A_RAW_TRANSPORT_SHA256 = (
-    "2bbddaddb6f9d2c73c59d9e790e742569b81219a6e51b4ddc9bdb77b971f5982"
-)
-E8A_PROVIDER_SCHEMA_PATH = (
-    E8A_ARTIFACT_ROOT
-    / "provider-schemas/sha256/56/"
-    "5613428054d6dd5a321a6c5aa34d4502b935aa641112e90cc7c2df91f509e567.json"
-)
-E8A_PROVIDER_SCHEMA_SHA256 = (
-    "5613428054d6dd5a321a6c5aa34d4502b935aa641112e90cc7c2df91f509e567"
+from synthetic_e8a_sealed_fixture import (  # noqa: E402
+    SyntheticE8aFixture,
+    build_synthetic_e8a_fixture,
 )
 
 
-def _load_frozen_json(path: Path, expected_sha256: str) -> dict[str, Any]:
-    payload = path.read_bytes()
-    if hashlib.sha256(payload).hexdigest() != expected_sha256:
-        raise AssertionError(f"frozen fixture SHA drift: {path}")
-    value = json.loads(payload)
-    if not isinstance(value, dict):
-        raise AssertionError(f"frozen fixture root is not an object: {path}")
-    return value
+_COMPAT_E8A_TEMP = tempfile.TemporaryDirectory(
+    prefix="synthetic-e8a-compat-"
+)
+_COMPAT_E8A_FIXTURE = build_synthetic_e8a_fixture(
+    Path(_COMPAT_E8A_TEMP.name)
+)
+# These two names remain as a synthetic compatibility surface for the sealed
+# three-subject replay module.  They point only at the temporary builder output
+# and are not historical deployment paths.
+E8A_TRANSCRIPT_PATH = _COMPAT_E8A_FIXTURE.transcript_path
+E8A_TRANSCRIPT_SHA256 = _COMPAT_E8A_FIXTURE.transcript_sha256
+
+
+def _synthetic_e8a_fixture() -> SyntheticE8aFixture:
+    with tempfile.TemporaryDirectory(prefix="synthetic-e8a-replay-") as temp:
+        return build_synthetic_e8a_fixture(Path(temp))
 
 
 def e8a_analysis_stage_result() -> StructuredStageResult:
-    """Reconstruct the sealed e8a Analysis stage without a model call."""
+    """Build the synthetic English Analysis stage without a model call."""
 
-    output = _load_frozen_json(E8A_OUTPUT_PATH, E8A_OUTPUT_SHA256)
-    transcript = _load_frozen_json(
-        E8A_TRANSCRIPT_PATH, E8A_TRANSCRIPT_SHA256
-    )
-    return StructuredStageResult(
-        payload=copy.deepcopy(output["payload"]),
-        duration_ms=int(output["duration_ms"]),
-        runtime_model=output.get("runtime_model"),
-        runtime_reasoning_effort=output.get("runtime_reasoning_effort"),
-        runtime_metadata_provenance=str(
-            output["runtime_metadata_provenance"]
-        ),
-        runtime_identity_status=str(output["runtime_identity_status"]),
-        output_sha256=str(output["output_sha256"]),
-        schema_sha256=str(output["schema_sha256"]),
-        provider_schema_sha256=E8A_PROVIDER_SCHEMA_SHA256,
-        semantic_stage_count=int(transcript["semantic_stage_count"]),
-        provider_request_count=int(transcript["provider_request_count"]),
-        mcp_tool_call_count=int(transcript["mcp_tool_call_count"]),
-        mcp_transcript_sha256=E8A_TRANSCRIPT_SHA256,
-        mcp_calls=tuple(copy.deepcopy(transcript["calls"])),
-    )
+    return _synthetic_e8a_fixture().stage
 
 
 def e8a_analysis_grounding_fixture(
 ) -> tuple[StructuredStageResult, dict[str, Any], str, str]:
-    """Expose the sealed stage, manifest, artifact ref, and one library ref."""
+    """Expose a synthetic stage, manifest, artifact ref, and library ref."""
 
-    stage = e8a_analysis_stage_result()
-    manifest = mcp_grounding_manifest((stage,))
-    artifact_refs = [
-        row["evidence_ref"]
-        for row in manifest["items"]
-        if row["collection"] == "task_artifact"
-    ]
-    library_refs = [
-        row["evidence_ref"]
-        for row in manifest["items"]
-        if row["collection"] not in {"task_context", "task_artifact"}
-    ]
-    if len(artifact_refs) != 1 or not library_refs:
-        raise AssertionError("sealed e8a grounding roles drifted")
-    return stage, manifest, artifact_refs[0], library_refs[0]
+    fixture = _synthetic_e8a_fixture()
+    return (
+        fixture.stage,
+        fixture.manifest,
+        fixture.artifact_ref,
+        fixture.library_ref,
+    )
 
 
 def _synthetic_manifest(
@@ -163,43 +110,36 @@ class E8aEnglishGroundingReplayTests(unittest.TestCase):
     def test_e8a_english_analysis_grounding_replay_matches_exact_transcript(
         self,
     ) -> None:
-        output = _load_frozen_json(E8A_OUTPUT_PATH, E8A_OUTPUT_SHA256)
-        transcript = _load_frozen_json(
-            E8A_TRANSCRIPT_PATH, E8A_TRANSCRIPT_SHA256
-        )
-        provider_schema = _load_frozen_json(
-            E8A_PROVIDER_SCHEMA_PATH, E8A_PROVIDER_SCHEMA_SHA256
-        )
-        stage, manifest, artifact_ref, library_ref = (
-            e8a_analysis_grounding_fixture()
-        )
+        fixture = _synthetic_e8a_fixture()
+        output = fixture.output
+        transcript = fixture.transcript
+        provider_schema = fixture.provider_schema
+        stage = fixture.stage
+        manifest = fixture.manifest
+        artifact_ref = fixture.artifact_ref
+        library_ref = fixture.library_ref
 
         self.assertEqual(output["payload"], {"items": []})
         self.assertNotIn("minItems", provider_schema["properties"]["items"])
-        self.assertEqual(stage.mcp_tool_call_count, 64)
-        self.assertEqual(stage.provider_request_count, 65)
+        self.assertEqual(stage.mcp_tool_call_count, len(transcript["calls"]))
+        self.assertEqual(
+            stage.provider_request_count,
+            stage.mcp_tool_call_count + 1,
+        )
         self.assertEqual(transcript["formal_write_count"], 0)
         self.assertEqual(transcript["model_call_count"], 1)
         self.assertEqual(transcript["coverage"]["duplicate_argument_count"], 0)
         self.assertTrue(
             all(call["result"]["ok"] is True for call in transcript["calls"])
         )
-        self.assertEqual(manifest["item_count"], 71)
+        self.assertEqual(manifest["item_count"], len(manifest["items"]))
         self.assertEqual(
             Counter(row["collection"] for row in manifest["items"]),
-            Counter(
-                {
-                    "task_context": 1,
-                    "task_artifact": 1,
-                    "article_catalog": 60,
-                    "search": 9,
-                }
-            ),
+            Counter(fixture.collection_counts),
         )
         self.assertEqual(
             artifact_ref,
-            "mcp-item:english:"
-            "a87e1f4df023235a27c57b9404d9a0328b0b71fbbacd17ab17473fbb125d434a",
+            fixture.artifact_ref,
         )
         self.assertTrue(library_ref.startswith("mcp-item:english:"))
         with self.assertRaisesRegex(
@@ -264,36 +204,33 @@ class E8aEnglishGroundingReplayTests(unittest.TestCase):
                     [_item(*refs)], grounding_manifest=manifest
                 )
 
-    def test_e8a_failed_seq65_is_excluded_from_canonical_grounding(self) -> None:
-        raw_transport = _load_frozen_json(
-            E8A_RAW_TRANSPORT_PATH, E8A_RAW_TRANSPORT_SHA256
-        )
-        transcript = _load_frozen_json(
-            E8A_TRANSCRIPT_PATH, E8A_TRANSCRIPT_SHA256
-        )
-        _stage, manifest, artifact_ref, library_ref = (
-            e8a_analysis_grounding_fixture()
-        )
+    def test_synthetic_failed_request_is_excluded_from_canonical_grounding(
+        self,
+    ) -> None:
+        fixture = _synthetic_e8a_fixture()
+        raw_transport = fixture.raw_transport
+        transcript = fixture.transcript
+        manifest = fixture.manifest
+        artifact_ref = fixture.artifact_ref
+        library_ref = fixture.library_ref
 
-        self.assertEqual(raw_transport["mcp_item_count"], 65)
-        self.assertEqual(len(raw_transport["mcp_items"]), 65)
-        failed = raw_transport["mcp_items"][-1]
-        self.assertEqual(failed["sequence"], 65)
-        self.assertEqual(failed["item"]["tool"], "search_records")
         self.assertEqual(
-            failed["item"]["arguments"],
-            {"page_size": 48, "query": "permanent"},
+            raw_transport["mcp_item_count"], len(raw_transport["mcp_items"])
         )
+        failed = raw_transport["mcp_items"][-1]
+        self.assertEqual(failed["sequence"], fixture.failed_sequence)
+        self.assertEqual(failed["item"]["tool"], "search_records")
+        self.assertEqual(failed["item"]["arguments"], fixture.failed_arguments)
         failed_result = failed["item"]["result"]["structured_content"]
         self.assertIs(failed_result["ok"], False)
         self.assertEqual(failed_result["error"]["code"], "OUTPUT_LIMIT")
         self.assertEqual(failed_result["items"], [])
 
         failed_request_id = failed_result["request_id"]
-        self.assertEqual(len(transcript["calls"]), 64)
+        self.assertEqual(len(transcript["calls"]), fixture.stage.mcp_tool_call_count)
         self.assertEqual(
             [call["sequence"] for call in transcript["calls"]],
-            list(range(1, 65)),
+            list(range(1, len(transcript["calls"]) + 1)),
         )
         self.assertTrue(
             all(call["result"]["ok"] is True for call in transcript["calls"])

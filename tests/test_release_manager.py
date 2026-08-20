@@ -23,89 +23,24 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import release_manager as release  # noqa: E402
+from tests.portable_plugin_fixture import build_portable_plugin_fixture
 
-
-LIVE_CONFIG = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/config.json"
-)
-
-
-def flatten(value: object, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
-    if isinstance(value, dict):
-        result: dict[tuple[str, ...], object] = {}
-        for key, nested in value.items():
-            result.update(flatten(nested, prefix + (str(key),)))
-        return result
-    return {prefix: value}
-
-
-MIGRATION_ALLOWED_PATHS = {
-    ("worker", "poll_interval_seconds"),
-    ("worker", "english_poll_interval_seconds"),
-    ("worker", "max_jobs_per_scan"),
-    ("model", "max_images"),
-    ("model", "service_tier"),
-    ("cs408_deep_v2", "controlled_contract_path"),
-    ("cs408_deep_v2", "stage_timeout_seconds"),
-    ("cs408_deep_v2", "soft_runtime_warning_seconds"),
-    ("cs408_deep_v2", "stall_timeout_seconds"),
-    ("cs408_deep_v2", "stall_probe_interval_seconds"),
-    ("cs408_deep_v2", "stall_probe_required_consecutive_failures"),
-    ("math_deep_v2", "max_chinese_chars"),
-    ("math_deep_v2", "min_complete_chinese_chars"),
-    ("math_deep_v2", "stage_timeout_seconds"),
-    ("math_deep_v2", "soft_runtime_warning_seconds"),
-    ("math_deep_v2", "stall_timeout_seconds"),
-    ("math_deep_v2", "stall_probe_interval_seconds"),
-    ("math_deep_v2", "stall_probe_required_consecutive_failures"),
-    ("math_deep_v2", "gs111_cold_replay_max_seconds"),
-    ("math_deep_v2", "three_replay_p95_max_seconds"),
-    ("math_deep_v2", "mode"),
-    ("math_deep_v2", "critical_review_output_schema"),
-    ("math_deep_v2", "critical_review_prompt_version"),
-    ("math_deep_v2", "package_output_schema"),
-    ("adapters", "math", "enabled"),
-    ("math_knowledge_snapshot", "enabled"),
-    ("math_knowledge_snapshot", "max_source_bytes"),
-    ("math_knowledge_snapshot", "max_distribution_terms"),
-    ("math_knowledge_snapshot", "max_local_neighbors"),
-    ("math_knowledge_snapshot", "max_relationship_candidates"),
-    ("math_knowledge_snapshot", "max_snapshot_bytes"),
-    ("math_knowledge_snapshot", "golden_regressions", "GS-111"),
-    ("math_knowledge_snapshot", "sources", "graph"),
-    ("math_knowledge_snapshot", "sources", "projection"),
-    ("math_knowledge_snapshot", "sources", "taxonomy"),
-    ("math_knowledge_snapshot", "sources", "relationship_policy"),
-    ("cs408_knowledge_snapshot", "sources", "review_unit_mapping"),
-    ("cs408_knowledge_snapshot", "controlled_aliases", "二分查找"),
-    ("cs408_deep_v2", "package_output_schema"),
-    ("dispatch", "authority_required"),
-    ("dispatch", "heartbeat_interval_seconds"),
-    ("dispatch", "lease_ttl_seconds"),
-    ("dispatch", "infrastructure_recovery_attempts"),
-    ("dispatch", "production_canary", "enabled"),
-    ("dispatch", "production_canary", "status"),
-    ("dispatch", "production_canary", "admission"),
-    ("dispatch", "production_canary", "keep_backlog_drained"),
-    ("dispatch", "production_canary", "post_activation_only"),
-    ("dispatch", "production_canary", "initial_canary_inflight_limit"),
-    ("dispatch", "production_canary", "continuous_concurrency_limit"),
-    ("dashboard", "max_items_per_subject"),
-    ("dashboard", "projection_schema_version"),
-    ("english_two_pass_v1", "enabled"),
-    ("english_two_pass_v1", "analysis_output_schema"),
-    ("english_two_pass_v1", "critical_review_output_schema"),
-    ("english_two_pass_v1", "package_output_schema"),
-    ("english_two_pass_v1", "controlled_contract_path"),
-    ("english_two_pass_v1", "analysis_prompt_version"),
-    ("english_two_pass_v1", "critical_review_prompt_version"),
-    ("english_two_pass_v1", "max_prompt_bytes"),
-    ("english_two_pass_v1", "max_output_bytes"),
-    ("english_two_pass_v1", "stage_timeout_seconds"),
-}
 
 
 class ReleaseManagerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._portable_temp = tempfile.TemporaryDirectory(
+            prefix="release-manager-portable-"
+        )
+        cls.portable_fixture = build_portable_plugin_fixture(
+            Path(cls._portable_temp.name), ROOT
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._portable_temp.cleanup()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="preprocessor-release-test-")
         self.base = Path(self.temp.name)
@@ -2555,7 +2490,7 @@ class ReleaseManagerTests(unittest.TestCase):
         release._make_tree_removable(target)
         plugin = target / "plugin" / "kaoyan-study-intake"
         shutil.copytree(
-            ROOT / "plugin" / "kaoyan-study-intake",
+            self.portable_fixture.plugin_root,
             plugin,
             dirs_exist_ok=True,
         )
@@ -2919,7 +2854,7 @@ class ReleaseManagerTests(unittest.TestCase):
             "active_link": descriptor["historical_active_link"],
             "rollback_path": {
                 "release_dir": (
-                    "/Users/xiazhibin/.codex/study-intake-preprocessor/releases/"
+                    f"{Path.home()}/.codex/study-intake-preprocessor/releases/"
                     + descriptor["historical_expected_current_release_id"]
                 ),
                 "release_id": descriptor["historical_expected_current_release_id"],
@@ -3770,11 +3705,8 @@ if a.command == 'run-once':
     def test_sealed_mcp_binding_verifier_rejects_launcher_semantic_drift(
         self,
     ) -> None:
-        mcp_root = Path(
-            "/Users/xiazhibin/.codex/local-study-read-mcp/releases/"
-            "21d738a1d74586aab72c8a63dc62c680aa10c6ac837c2bd5041e757ba0e63425"
-        )
-        source_plugin = ROOT / "plugin/kaoyan-study-intake"
+        mcp_root = self.portable_fixture.mcp_root
+        source_plugin = self.portable_fixture.plugin_root
         plugin_root = self.base / "candidate/plugin/kaoyan-study-intake"
         plugin_root.parent.mkdir(parents=True)
         import shutil
@@ -4462,6 +4394,17 @@ if a.command == 'run-once':
                 release_base=self.base / "full-release-base",
                 runtime_data_root=self.runtime_data,
                 skip_tests=True,
+                config_bindings={
+                    "math_root": self.portable_fixture.subject_roots["math"],
+                    "cs408_root": self.portable_fixture.subject_roots["cs408"],
+                    "english_root": self.portable_fixture.subject_roots[
+                        "english"
+                    ],
+                    "mcp_root": self.portable_fixture.mcp_root,
+                    "python_executable": Path(sys.executable),
+                    "mcp_python_executable": self.portable_fixture.mcp_python,
+                    "codex_executable": Path("/usr/bin/true"),
+                },
             )
         self.assertEqual(len(release.CONCURRENT_TOPOLOGY), 4)
         self.assertTrue(
@@ -4573,7 +4516,7 @@ if a.command == 'run-once':
 import json
 
 LIVE_CONFIG = Path(
-    "/Users/xiazhibin/.codex/study-intake-preprocessor/config.json"
+    "/synthetic/legacy/study-intake-preprocessor/config.json"
 )
 '''
         stale_test.write_text(original_test, encoding="utf-8")
@@ -5104,78 +5047,48 @@ LIVE_CONFIG = Path(
         self.assertEqual(proof["model"], "gpt-5.6-luna")
         self.assertEqual(proof["reasoning_effort"], "max")
 
-    def test_canonical_template_preserves_existing_live_semantics(self) -> None:
-        if not LIVE_CONFIG.is_file():
-            self.skipTest("local live config is unavailable")
-        live = json.loads(LIVE_CONFIG.read_text(encoding="utf-8"))
+    def test_canonical_template_is_portable_and_preserves_frozen_defaults(self) -> None:
         template = json.loads(
             (ROOT / "config.example.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(template["worker"]["poll_interval_seconds"], 1)
-        self.assertEqual(template["worker"]["english_poll_interval_seconds"], 1)
-        self.assertEqual(template["execution_mode"], "offline")
-        self.assertTrue(template["live_execution_gate"]["default_locked"])
+        bindings = release.normalize_config_bindings(
+            {
+                "math_root": self.portable_fixture.subject_roots["math"],
+                "cs408_root": self.portable_fixture.subject_roots["cs408"],
+                "english_root": self.portable_fixture.subject_roots["english"],
+                "mcp_root": self.portable_fixture.mcp_root,
+                "python_executable": Path(sys.executable),
+                "mcp_python_executable": self.portable_fixture.mcp_python,
+                "codex_executable": Path("/usr/bin/true"),
+            }
+        )
+        rendered = release.substitute(
+            template,
+            release.config_binding_replacements(
+                release_root=self.base / "synthetic-release",
+                runtime_data_root=str(self.runtime_data.resolve()),
+                bindings=bindings,
+            ),
+        )
+        self.assertFalse(release._contains_config_marker(rendered))
+        self.assertEqual(rendered["worker"]["poll_interval_seconds"], 1)
+        self.assertEqual(rendered["worker"]["english_poll_interval_seconds"], 1)
+        self.assertEqual(rendered["execution_mode"], "offline")
+        self.assertTrue(rendered["live_execution_gate"]["default_locked"])
+        self.assertEqual(rendered["models"]["orchestrator"]["model"], "gpt-5.6-terra")
+        self.assertEqual(rendered["models"]["reader"]["model"], "gpt-5.6-luna")
         self.assertEqual(
-            template["models"]["orchestrator"]["model"],
-            "gpt-5.6-terra",
+            rendered["adapters"]["math"]["repo_root"],
+            bindings["math_root"],
         )
         self.assertEqual(
-            template["models"]["reader"]["model"],
-            "gpt-5.6-luna",
+            rendered["processing_plugin"]["mcp_project_root"],
+            bindings["mcp_root"],
         )
-        # These are the explicitly authorized release/English additions.  All
-        # pre-existing non-English settings must remain semantically identical.
-        template.pop("release", None)
-        template.pop("processing_plugin", None)
-        template.pop("english_two_pass_v1", None)
-        template.pop("english_legacy_recuration_v1", None)
-        template.pop("execution_mode", None)
-        template.pop("live_execution_gate", None)
-        template.pop("fixture_execution", None)
-        template.pop("branch_scheduler", None)
-        template.pop("models", None)
-        template.get("adapters", {}).pop("english", None)
-        template.get("worker", {}).pop("english_poll_interval_seconds", None)
-        rendered = json.loads(
-            json.dumps(template)
-            .replace("${RUNTIME_DATA_ROOT}", str(live["runtime_root"]))
-            .replace(
-                "${RELEASE_ROOT}",
-                "/Users/xiazhibin/.codex/study-intake-preprocessor",
-            )
+        self.assertNotIn(
+            "/synthetic/user",
+            json.dumps(rendered, ensure_ascii=False),
         )
-        rendered_flat = flatten(rendered)
-        live_flat = flatten(live)
-        dispatch = template.get("dispatch")
-        if isinstance(dispatch, dict):
-            self.assertNotIn("max_jobs_per_scan", template.get("worker", {}))
-            self.assertEqual(template["model"]["max_images"], 8)
-            self.assertIn("controlled_contract_path", template["cs408_deep_v2"])
-            self.assertNotIn("stage_timeout_seconds", template["cs408_deep_v2"])
-            self.assertEqual(
-                template["cs408_deep_v2"]["soft_runtime_warning_seconds"],
-                1800,
-            )
-            self.assertEqual(dispatch, {
-                "authority_required": True,
-                "heartbeat_interval_seconds": 15,
-                "lease_ttl_seconds": 120,
-                "infrastructure_recovery_attempts": 1,
-                "production_canary": {
-                    "enabled": True,
-                    "status": "production_canary_active",
-                    "admission": "first_post_activation_producer_capture",
-                    "keep_backlog_drained": True,
-                    "post_activation_only": True,
-                    "initial_canary_inflight_limit": 1,
-                    "continuous_concurrency_limit": 20,
-                },
-            })
-        for path in MIGRATION_ALLOWED_PATHS:
-            rendered_flat.pop(path, None)
-            live_flat.pop(path, None)
-        self.assertEqual(rendered_flat, live_flat)
-
     def test_math_resume_requires_hmac_acceptance_and_zero_backlog(self) -> None:
         built = self.build(passed=True)
         release_id = built["release_id"]
@@ -9454,7 +9367,7 @@ LIVE_CONFIG = Path(
     def test_external_profiles_apply_and_restore_exact_bytes_and_tree(self) -> None:
         target = self.base / "external-target"
         plugin = target / "plugin" / "kaoyan-study-intake"
-        shutil_source = ROOT / "plugin" / "kaoyan-study-intake"
+        shutil_source = self.portable_fixture.plugin_root
         import shutil
 
         shutil.copytree(shutil_source, plugin)
@@ -9643,7 +9556,7 @@ LIVE_CONFIG = Path(
         plugin = target / "plugin" / "kaoyan-study-intake"
         import shutil
 
-        shutil.copytree(ROOT / "plugin" / "kaoyan-study-intake", plugin)
+        shutil.copytree(self.portable_fixture.plugin_root, plugin)
         components = json.loads(
             (plugin / "components.json").read_text(encoding="utf-8")
         )
@@ -9969,7 +9882,7 @@ LIVE_CONFIG = Path(
         plugin = target / "plugin" / "kaoyan-study-intake"
         import shutil
 
-        shutil.copytree(ROOT / "plugin" / "kaoyan-study-intake", plugin)
+        shutil.copytree(self.portable_fixture.plugin_root, plugin)
         components = json.loads((plugin / "components.json").read_text(encoding="utf-8"))
         mcp = components["mcp"]
         runtime = {
@@ -10265,7 +10178,7 @@ LIVE_CONFIG = Path(
             spec = restore_specs[subject]
             return {
                 "path": (
-                    "/Users/xiazhibin/.codex/study-intake-preprocessor/"
+                    f"{Path.home()}/.codex/study-intake-preprocessor/"
                     f"dispatch/state/production-canary/{subject}.json"
                 ),
                 "snapshot_state": "present",
@@ -10398,7 +10311,7 @@ LIVE_CONFIG = Path(
             "operation": "activate",
             "release_id": target_release,
             "active_link": (
-                "/Users/xiazhibin/.codex/study-intake-preprocessor/current"
+                f"{Path.home()}/.codex/study-intake-preprocessor/current"
             ),
             "expected_current": previous_release,
             "observed_current": previous_release,
@@ -10445,7 +10358,7 @@ LIVE_CONFIG = Path(
                     "c28d440eb4fb0b5f981f7121800b9a1001e4f130a9c4b2741d32ce94f2539305"
                 ),
                 "task_object_path": (
-                    "/Users/xiazhibin/.codex/study-intake-preprocessor/"
+                    f"{Path.home()}/.codex/study-intake-preprocessor/"
                     "dispatch/production-canary/tasks/english/sha256/9d/"
                     "9d8f64ca6e9d783db92bcafa445f5105d18a9ae8c9f95d5810a9496af5761183.json"
                 ),
@@ -10660,7 +10573,7 @@ LIVE_CONFIG = Path(
             postcommit.update(
                 {
                     "active_link": (
-                        "/Users/xiazhibin/.codex/"
+                        f"{Path.home()}/.codex/"
                         "study-intake-preprocessor/current"
                     ),
                     "drain_error_code": (

@@ -22,8 +22,12 @@ from process_identity import (  # noqa: E402
 )
 
 
-@unittest.skipUnless(sys.platform == "darwin", "Darwin libproc contract")
 class KernelProcessIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if sys.platform != "darwin":
+            raise AssertionError("Darwin libproc runtime is required")
+
     def test_current_and_child_process_get_distinct_kernel_tokens(self) -> None:
         current = kernel_process_start_token(os.getpid())
         parse_kernel_process_start_token(current, expected_pid=os.getpid())
