@@ -64,7 +64,9 @@ class ReleaseManagerTests(unittest.TestCase):
                 target.write_bytes((ROOT / relative).read_bytes())
         (self.source / "config.example.json").write_text(
             json.dumps({
-                "execution_mode": "offline",
+                "execution_mode": release.REQUIRED_MODEL_CONTRACT[
+                    "execution_mode"
+                ],
                 "runtime_root": "${RUNTIME_DATA_ROOT}",
                 "release": {"manifest_path": "${RELEASE_ROOT}/release.json"},
                 "live_execution_gate": {
@@ -2487,6 +2489,7 @@ class ReleaseManagerTests(unittest.TestCase):
         legacy_schema.write_text("{}\n", encoding="utf-8")
         template_path = self.source / "config.example.json"
         template = json.loads(template_path.read_text(encoding="utf-8"))
+        template["execution_mode"] = "offline"
         for profile_name in (
             "math_deep_v2",
             "cs408_deep_v2",
@@ -2496,8 +2499,15 @@ class ReleaseManagerTests(unittest.TestCase):
                 "${RELEASE_ROOT}/schemas/preprocess-package-v2.json"
             )
         template_path.write_text(json.dumps(template), encoding="utf-8")
-        with mock.patch.object(
-            release, "_validate_target_release_config", return_value=None
+        with (
+            mock.patch.object(
+                release,
+                "REQUIRED_MODEL_CONTRACT",
+                release.HISTORICAL_OFFLINE_MODEL_CONTRACT,
+            ),
+            mock.patch.object(
+                release, "_validate_target_release_config", return_value=None
+            ),
         ):
             return self.build(passed=passed)
 
@@ -3604,11 +3614,11 @@ if a.command == 'run-once':
         release_id = str(built["release_id"])
 
         with self.assertRaisesRegex(
-            release.ReleaseError, "release_target_contract_invalid"
+            release.ReleaseError, "release_manifest_invalid"
         ):
             release.verify_release(release_root)
         with self.assertRaisesRegex(
-            release.ReleaseError, "release_target_contract_invalid"
+            release.ReleaseError, "release_manifest_invalid"
         ):
             release.verify_rollback_release(release_root)
         with self.assertRaisesRegex(
@@ -3641,7 +3651,7 @@ if a.command == 'run-once':
                 list(release.CONCURRENT_TOPOLOGY),
             )
             with self.assertRaisesRegex(
-                release.ReleaseError, "release_target_contract_invalid"
+                release.ReleaseError, "release_manifest_invalid"
             ):
                 release.activate_release(
                     release_base=self.release_base,
@@ -4501,6 +4511,10 @@ if a.command == 'run-once':
             ])
             self.assertEqual(payload["EnvironmentVariables"]["PYTHONDONTWRITEBYTECODE"], "1")
             self.assertEqual(payload["EnvironmentVariables"]["PYTHONUNBUFFERED"], "1")
+            self.assertEqual(
+                payload["EnvironmentVariables"]["STUDY_INTAKE_EXECUTION_MODE"],
+                "live_authorized",
+            )
             self.assertEqual(payload["WorkingDirectory"], "${CURRENT_ROOT}")
 
         dashboard = next(
@@ -5141,7 +5155,7 @@ LIVE_CONFIG = Path(
         self.assertFalse(release._contains_config_marker(rendered))
         self.assertEqual(rendered["worker"]["poll_interval_seconds"], 1)
         self.assertEqual(rendered["worker"]["english_poll_interval_seconds"], 1)
-        self.assertEqual(rendered["execution_mode"], "offline")
+        self.assertEqual(rendered["execution_mode"], "live_authorized")
         self.assertTrue(rendered["live_execution_gate"]["default_locked"])
         self.assertEqual(rendered["models"]["orchestrator"]["model"], "gpt-5.6-terra")
         self.assertEqual(rendered["models"]["reader"]["model"], "gpt-5.6-luna")
@@ -5157,6 +5171,27 @@ LIVE_CONFIG = Path(
             "/synthetic/user",
             json.dumps(rendered, ensure_ascii=False),
         )
+
+    def test_live_target_keeps_exact_offline_rollback_contracts(self) -> None:
+        self.assertEqual(
+            release.REQUIRED_MODEL_CONTRACT["execution_mode"],
+            "live_authorized",
+        )
+        self.assertEqual(
+            release.HISTORICAL_OFFLINE_MODEL_CONTRACT["execution_mode"],
+            "offline",
+        )
+        self.assertEqual(
+            release.HISTORICAL_TARGET_RUNTIME_ROLLBACK_CONTRACT[
+                "model_contract"
+            ],
+            release.HISTORICAL_OFFLINE_MODEL_CONTRACT,
+        )
+        self.assertEqual(
+            release.HISTORICAL_THREE_ROLE_MODEL_CONTRACT["execution_mode"],
+            "offline",
+        )
+
     def test_math_resume_requires_hmac_acceptance_and_zero_backlog(self) -> None:
         built = self.build(passed=True)
         release_id = built["release_id"]

@@ -1,6 +1,6 @@
 {
   "schema_version": "study-intake-preprocessor-config-v1",
-  "execution_mode": "offline",
+  "execution_mode": "live_authorized",
   "runtime_root": "${RUNTIME_DATA_ROOT}",
   "timezone": "Asia/Shanghai",
   "release": {

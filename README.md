@@ -18,13 +18,11 @@ release.
 - Each subject dispatcher rescans for newly frozen work at least once per
   second. This is a discovery-latency ceiling only; it does not limit how many
   independent tasks may be submitted by the scan.
-- Luna performs two ordered structured stages: analysis first, then critical
-  review of that frozen draft. Both stages are fixed to `gpt-5.6-luna` with
-  `reasoning=max`. The host overwrites every source, evidence, runtime-identity
-  and zero-write binding before the repository-owned English pipeline CLI
-  validates and renders the final candidate.
-- A completed analysis may be retained as a recovery checkpoint, but it is not
-  consumable unless the critical-review stage also completes successfully.
+- In the production `live_authorized` V2 path, English uses the same durable
+  `AnalysisPackageV1` route as Math and CS408: Terra Max analysis, Luna Max
+  analysis, then Terra Max final review. Raw Provider output is persisted before
+  tolerant normalization, and every model stage remains read-only. The older
+  two-stage English route remains only for non-live legacy compatibility.
 - Requested and observed runtime identity remain separate. A requested runtime
   may be published as `requested_unverified`; only verifiable runtime metadata
   may be displayed as `confirmed`.
@@ -64,23 +62,25 @@ canonical runtime-data root into the release ID.  `config.json` is rebuilt
 deterministically from the bound template and roots.  Verification requires an
 exact regular-file and directory closure, rejects symlinks and undeclared
 bytecode, and checks all release directories and files are sealed read-only.
-The current target contract is
-`study-intake-model-request-contract-v2`: `model=gpt-5.6-luna`,
-`reasoning_effort=max`, no `service_tier` key in config or the actual argv,
-`requested_service_tier=null`, `fast_mode_requested=false`, and
-`fast_mode_effective=not_requested`. Historical priority releases and the
-pre-plugin no-tier release remain byte-for-byte reopenable for explicit
-rollback, but cannot pass a target build or activation gate.
+The current production target uses `execution_mode=live_authorized` together
+with task-scoped manual Capture authorization. Its compatibility projection is
+`model=gpt-5.6-luna`, `reasoning_effort=max`, with no `service_tier` key in
+config or the actual argv, `requested_service_tier=null`,
+`fast_mode_requested=false`, and `fast_mode_effective=not_requested`.
+Historical offline, priority, and pre-plugin releases remain byte-for-byte
+reopenable for explicit rollback, but cannot pass a new target activation gate.
 
 The Phase 3 successor contract is independently versioned as
 `study-intake-consumer-stage-chain-v1`. It binds durable Capture, Terra Max
 analysis, Luna Max analysis, Terra Max critical review, and a lease-bound Sol
 formal commit. All model stages are read-only with agents and mutation tools
 disabled. The role assets, single successor schema, zero-model executor, and
-hash/receipt validators are source-complete. The live driver is deliberately
-fail-closed with `consumer_stage_chain_live_driver_not_integrated`; a release
-must not fall back to the historical Luna/Luna path when live authorization is
-requested. This state is contract-ready, not production-ready.
+hash/receipt validators are source-complete. An enabled production config also
+binds `analysis_package_v1`, so `CodexRunner.run()` enters
+`AnalysisPackageDriver`. The legacy
+`consumer_stage_chain_live_driver_not_integrated` guard remains only for a
+misconfigured live release that omits the required driver profile; it prevents
+fallback to the historical Luna/Luna path.
 
 Build and verify the default `concurrent_v2` profile without changing the active
 runtime or LaunchAgents. A non-skipped build requires the formal-surface guard:

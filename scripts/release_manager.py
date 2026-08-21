@@ -151,7 +151,7 @@ REQUIRED_MODEL_CONTRACT = {
     "requested_service_tier": None,
     "fast_mode_requested": False,
     "fast_mode_effective": "not_requested",
-    "execution_mode": "offline",
+    "execution_mode": "live_authorized",
     "roles": {
         "orchestrator": {
             "model": "gpt-5.6-terra",
@@ -261,10 +261,14 @@ CONSUMER_STAGE_ROLE_ORDER = (
     "terra_critical_review",
 )
 CONSUMER_STAGE_ROLE_NAMES = frozenset(CONSUMER_STAGE_ROLE_ORDER)
-HISTORICAL_THREE_ROLE_MODEL_CONTRACT = {
+HISTORICAL_OFFLINE_MODEL_CONTRACT = {
     **REQUIRED_MODEL_CONTRACT,
+    "execution_mode": "offline",
+}
+HISTORICAL_THREE_ROLE_MODEL_CONTRACT = {
+    **HISTORICAL_OFFLINE_MODEL_CONTRACT,
     "roles": {
-        role: REQUIRED_MODEL_CONTRACT["roles"][role]
+        role: HISTORICAL_OFFLINE_MODEL_CONTRACT["roles"][role]
         for role in ("orchestrator", "reader", "critical_reviewer")
     },
 }
@@ -286,7 +290,7 @@ HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS = frozenset(
 )
 HISTORICAL_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
     "name": "historical_target_runtime_v1",
-    "model_contract": REQUIRED_MODEL_CONTRACT,
+    "model_contract": HISTORICAL_OFFLINE_MODEL_CONTRACT,
     "component_inventory_profile": "full",
     "target_runtime_contract_required": False,
 }
@@ -3204,7 +3208,8 @@ def _validate_target_release_config(
         or (
             multi_agent_contract_required
             and (
-                config.get("execution_mode") != "offline"
+                config.get("execution_mode")
+                != target_model_contract.get("execution_mode")
                 or not role_config_valid
                 or not isinstance(live_gate, Mapping)
                 or live_gate.get("enabled") is not True
@@ -4103,6 +4108,7 @@ def _verify_release_with_model_contract(
             required_model_contract
             not in {
                 "current": REQUIRED_MODEL_CONTRACT,
+                "historical_offline": HISTORICAL_OFFLINE_MODEL_CONTRACT,
                 "three_role": HISTORICAL_THREE_ROLE_MODEL_CONTRACT,
             }.values()
             or component_inventory_profile != "full"
@@ -4841,6 +4847,8 @@ def build_legacy_rollback(
     inventory_profile = "full"
     if source_contract == REQUIRED_MODEL_CONTRACT:
         rollback_model_contract = dict(REQUIRED_MODEL_CONTRACT)
+    elif source_contract == HISTORICAL_OFFLINE_MODEL_CONTRACT:
+        rollback_model_contract = dict(HISTORICAL_OFFLINE_MODEL_CONTRACT)
     else:
         historical = (
             _historical_release_contract(source_contract)

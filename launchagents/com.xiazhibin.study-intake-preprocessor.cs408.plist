@@ -25,7 +25,7 @@
     <key>PYTHONUNBUFFERED</key>
     <string>1</string>
     <key>STUDY_INTAKE_EXECUTION_MODE</key>
-    <string>offline</string>
+    <string>live_authorized</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>${CURRENT_ROOT}</string>

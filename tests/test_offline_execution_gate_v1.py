@@ -48,7 +48,7 @@ def substitute(
 
 
 class OfflineExecutionGateV1Tests(unittest.TestCase):
-    def test_release_config_is_explicitly_offline_and_role_separated(self) -> None:
+    def test_release_config_is_live_authorized_and_role_separated(self) -> None:
         template = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as temporary:
             portable = build_portable_plugin_fixture(Path(temporary), ROOT)
@@ -80,7 +80,7 @@ class OfflineExecutionGateV1Tests(unittest.TestCase):
             config_path = Path(temporary) / "config.json"
             config_path.write_text(json.dumps(value), encoding="utf-8")
             config = load_config(config_path)
-        self.assertEqual(config["execution_mode"], "offline")
+        self.assertEqual(config["execution_mode"], "live_authorized")
         self.assertTrue(config["live_execution_gate"]["default_locked"])
         self.assertEqual(config["models"]["orchestrator"]["model"], "gpt-5.6-terra")
         self.assertEqual(config["models"]["orchestrator"]["reasoning_effort"], "ultra")
