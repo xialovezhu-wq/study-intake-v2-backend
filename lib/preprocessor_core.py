@@ -19752,7 +19752,15 @@ class CodexRunner:
             tool = item.get("tool") or item.get("name")
             server = item.get("server") or item.get("server_name")
             if server != expected_server or tool not in allowed_tools:
-                raise PreprocessorError(f"{stage_name}_mcp_tool_scope_violation")
+                raise PreprocessorError(
+                    f"{stage_name}_mcp_tool_scope_violation",
+                    diagnostic={
+                        "expected_server": expected_server,
+                        "observed_server": server,
+                        "observed_tool": tool,
+                        "allowed_tools": sorted(allowed_tools),
+                    },
+                )
             arguments = self._json_object(item.get("arguments"))
             if arguments is None:
                 raise PreprocessorError(f"{stage_name}_mcp_arguments_invalid")

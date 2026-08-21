@@ -478,6 +478,32 @@ class FocusedMcpHostIntegrationTests(unittest.TestCase):
         with self.assertRaises(PreprocessorError):
             self._parse("math", tampered)
 
+    def test_tool_scope_violation_reports_the_observed_call(self) -> None:
+        tampered = copy.deepcopy(self.bundle["cs408"]["events"])
+        target = next(
+            event for event in tampered
+            if event["item"]["tool"] == "get_task_context"
+        )
+        target["item"]["tool"] = "unapproved_tool"
+        with self.assertRaises(PreprocessorError) as caught:
+            self._parse("cs408", tampered)
+        self.assertEqual(
+            caught.exception.code,
+            "cs408_analysis_mcp_tool_scope_violation",
+        )
+        self.assertEqual(
+            caught.exception.diagnostic["expected_server"],
+            "kaoyan_cs408_read",
+        )
+        self.assertEqual(
+            caught.exception.diagnostic["observed_server"],
+            "kaoyan_cs408_read",
+        )
+        self.assertEqual(
+            caught.exception.diagnostic["observed_tool"],
+            "unapproved_tool",
+        )
+
     def test_task_and_artifact_grounding_use_returned_collection(self) -> None:
         calls, transcript_sha256, _ = self._parse("math")
         stage = types.SimpleNamespace(
