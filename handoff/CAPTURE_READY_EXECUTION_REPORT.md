@@ -1,5 +1,10 @@
 # Study Intake V2 Capture-Ready Execution Report
 
+> Historical report only. This report is superseded by
+> `handoff/NIGHTLY_SOL_ALIGNMENT_EXECUTION_REPORT.md`. Its
+> `BLOCKED_TEST_CONTRACT` conclusion records the earlier source state and must
+> not override the current code or the later targeted-repair evidence.
+
 - Report date: 2026-08-21 Asia/Shanghai
 - Feature branch: `feat/study-intake-v2-capture-ready-v1`
 - Terminal status: `BLOCKED_TEST_CONTRACT`
