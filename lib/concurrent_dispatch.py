@@ -71,16 +71,28 @@ COMPLETION_SCHEMA = "study-intake-concurrent-completion-v2"
 TASK_EVENT_SCHEMA = "study-intake-dispatch-task-event-v2"
 TASK_DETAIL_SCHEMA = "study-intake-dispatch-task-detail-v2"
 STAGE_PROGRESS_RECEIPT_SCHEMA = "study-intake-stage-progress-receipt-v1"
+STAGE_PROGRESS_RECEIPT_SCHEMA_V2 = "study-intake-stage-progress-receipt-v2"
 MODEL_STAGE_RAW_OUTPUT_SCHEMA = "study-intake-model-stage-raw-output-v1"
+MODEL_STAGE_RAW_OUTPUT_SCHEMA_V2 = "study-intake-model-stage-raw-output-v2"
 MODEL_STAGE_RAW_CHUNK_SCHEMA = "study-intake-model-stage-raw-chunk-v1"
+MODEL_STAGE_RAW_CHUNK_SCHEMA_V2 = "study-intake-model-stage-raw-chunk-v2"
 MODEL_STAGE_RAW_CHAIN_MANIFEST_SCHEMA = (
     "study-intake-model-stage-raw-chain-manifest-v1"
+)
+MODEL_STAGE_RAW_CHAIN_MANIFEST_SCHEMA_V2 = (
+    "study-intake-model-stage-raw-chain-manifest-v2"
 )
 MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA = (
     "study-intake-model-stage-execution-receipt-v1"
 )
+MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V2 = (
+    "study-intake-model-stage-execution-receipt-v2"
+)
 MODEL_STAGE_NORMALIZATION_RECEIPT_SCHEMA = (
     "study-intake-model-stage-normalization-receipt-v1"
+)
+MODEL_STAGE_NORMALIZATION_RECEIPT_SCHEMA_V2 = (
+    "study-intake-model-stage-normalization-receipt-v2"
 )
 AUTHORITY_LEDGER_SCHEMA = "study-intake-dispatch-authority-ledger-entry-v1"
 EVIDENCE_READINESS_AUTHORITY_SCHEMA = (
@@ -159,9 +171,16 @@ TASK_PROCESS_EXIT_SCHEMA = "study-intake-task-process-exit-v1"
 PROVIDER_PROCESS_IDENTITY_SCHEMA = (
     "study-intake-provider-process-identity-v1"
 )
+PROVIDER_PROCESS_IDENTITY_SCHEMA_V2 = (
+    "study-intake-provider-process-identity-v2"
+)
 PROVIDER_PROCESS_EXIT_SCHEMA = "study-intake-provider-process-exit-v1"
+PROVIDER_PROCESS_EXIT_SCHEMA_V2 = "study-intake-provider-process-exit-v2"
 PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA = (
     "study-intake-provider-kernel-probe-receipt-v1"
+)
+PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA_V2 = (
+    "study-intake-provider-kernel-probe-receipt-v2"
 )
 STALE_CLAIM_QUARANTINE_RECEIPT_SCHEMA = (
     "study-intake-stale-claim-quarantine-receipt-v1"
@@ -254,6 +273,16 @@ ENGLISH_PRESERVED_REVIEW_REPAIR_AUTHORIZATION = {
     ),
     "batch_id": "LUNA-ENGLISH-2026-08-13-2F171BD0B92CE1926349",
 }
+
+
+def _is_luna_analysis_provider_stage(stage_name: object) -> bool:
+    return isinstance(stage_name, str) and stage_name.endswith("_luna_analysis")
+
+
+def _provider_schema_version(
+    stage_name: object, *, legacy: str, successor: str
+) -> str:
+    return successor if _is_luna_analysis_provider_stage(stage_name) else legacy
 
 PRODUCTION_CANARY_PRECLAIM_FAILURE_STAGES = frozenset(
     {
@@ -11691,6 +11720,7 @@ class LeaseStore:
     def _provider_stage_name(subject: str, stage_name: str) -> str:
         expected = {
             f"{subject}_analysis",
+            f"{subject}_luna_analysis",
             f"{subject}_critical_review",
         }
         if subject not in {"math", "cs408", "english"} or stage_name not in expected:
@@ -11701,6 +11731,8 @@ class LeaseStore:
     def _semantic_stage_name(cls, subject: str, stage_name: str) -> str:
         checked = cls._provider_stage_name(subject, stage_name)
         semantic = checked.removeprefix(f"{subject}_")
+        if semantic == "luna_analysis":
+            return "analysis"
         if semantic not in {"analysis", "critical_review"}:
             raise DispatchError("provider_process_stage_invalid")
         return semantic
@@ -12068,7 +12100,11 @@ class LeaseStore:
             if execution_root != context_root:
                 raise DispatchError("provider_process_context_root_mismatch")
             core = {
-                "schema_version": PROVIDER_PROCESS_IDENTITY_SCHEMA,
+                "schema_version": _provider_schema_version(
+                    checked_stage,
+                    legacy=PROVIDER_PROCESS_IDENTITY_SCHEMA,
+                    successor=PROVIDER_PROCESS_IDENTITY_SCHEMA_V2,
+                ),
                 "role": "codex_exec_provider_child",
                 "stage_name": checked_stage,
                 "unit_sha256": task.unit_sha256,
@@ -12210,7 +12246,11 @@ class LeaseStore:
         )
         if (
             identity.get("schema_version")
-            != PROVIDER_PROCESS_IDENTITY_SCHEMA
+            != _provider_schema_version(
+                checked_stage,
+                legacy=PROVIDER_PROCESS_IDENTITY_SCHEMA,
+                successor=PROVIDER_PROCESS_IDENTITY_SCHEMA_V2,
+            )
             or identity.get("unit_sha256") != task.unit_sha256
             or identity.get("frozen_payload_sha256")
             != task.frozen_payload_sha256
@@ -12397,7 +12437,11 @@ class LeaseStore:
             )
             receipt = self._seal(
                 {
-                    "schema_version": PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA,
+                    "schema_version": _provider_schema_version(
+                        stage_name,
+                        legacy=PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA,
+                        successor=PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA_V2,
+                    ),
                     "sequence": sequence,
                     "unit_sha256": task.unit_sha256,
                     "frozen_payload_sha256": task.frozen_payload_sha256,
@@ -12556,7 +12600,11 @@ class LeaseStore:
             )
             if (
                 receipt.get("schema_version")
-                != PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA
+                != _provider_schema_version(
+                    checked_stage,
+                    legacy=PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA,
+                    successor=PROVIDER_KERNEL_PROBE_RECEIPT_SCHEMA_V2,
+                )
                 or isinstance(receipt.get("sequence"), bool)
                 or not isinstance(receipt.get("sequence"), int)
                 or int(receipt["sequence"]) < 1
@@ -12838,7 +12886,11 @@ class LeaseStore:
             )
             if (
                 identity.get("schema_version")
-                != PROVIDER_PROCESS_IDENTITY_SCHEMA
+                != _provider_schema_version(
+                    checked_stage,
+                    legacy=PROVIDER_PROCESS_IDENTITY_SCHEMA,
+                    successor=PROVIDER_PROCESS_IDENTITY_SCHEMA_V2,
+                )
                 or identity.get("unit_sha256") != task.unit_sha256
                 or identity.get("owner_id") != lease.owner_id
                 or identity.get("lease_fence") != lease.fence
@@ -12856,7 +12908,11 @@ class LeaseStore:
                 ) from exc
             exit_value = self._seal(
                 {
-                    "schema_version": PROVIDER_PROCESS_EXIT_SCHEMA,
+                    "schema_version": _provider_schema_version(
+                        checked_stage,
+                        legacy=PROVIDER_PROCESS_EXIT_SCHEMA,
+                        successor=PROVIDER_PROCESS_EXIT_SCHEMA_V2,
+                    ),
                     "unit_sha256": task.unit_sha256,
                     "frozen_payload_sha256": task.frozen_payload_sha256,
                     "subject": subject,
@@ -12933,6 +12989,7 @@ class LeaseStore:
         closures: dict[str, Any] = {}
         for stage_name in (
             f"{subject}_analysis",
+            f"{subject}_luna_analysis",
             f"{subject}_critical_review",
         ):
             identity_index_path = (
@@ -12992,9 +13049,17 @@ class LeaseStore:
             )
             if (
                 identity.get("schema_version")
-                != PROVIDER_PROCESS_IDENTITY_SCHEMA
+                != _provider_schema_version(
+                    stage_name,
+                    legacy=PROVIDER_PROCESS_IDENTITY_SCHEMA,
+                    successor=PROVIDER_PROCESS_IDENTITY_SCHEMA_V2,
+                )
                 or exit_value.get("schema_version")
-                != PROVIDER_PROCESS_EXIT_SCHEMA
+                != _provider_schema_version(
+                    stage_name,
+                    legacy=PROVIDER_PROCESS_EXIT_SCHEMA,
+                    successor=PROVIDER_PROCESS_EXIT_SCHEMA_V2,
+                )
                 or identity.get("unit_sha256") != task.unit_sha256
                 or exit_value.get("unit_sha256") != task.unit_sha256
                 or identity.get("owner_id") != lease.owner_id
@@ -13154,7 +13219,11 @@ class LeaseStore:
                 "provider_process_identity_sha256": identity_sha256,
             }
             value = {
-                "schema_version": MODEL_STAGE_RAW_OUTPUT_SCHEMA,
+                "schema_version": _provider_schema_version(
+                    provider_stage,
+                    legacy=MODEL_STAGE_RAW_OUTPUT_SCHEMA,
+                    successor=MODEL_STAGE_RAW_OUTPUT_SCHEMA_V2,
+                ),
                 "stage_name": binding["stage_name"],
                 "provider_stage_name": provider_stage,
                 "execution_binding": raw_binding,
@@ -13346,7 +13415,11 @@ class LeaseStore:
             offset_end = offset_start + len(chunk)
             value = self._seal(
                 {
-                    "schema_version": MODEL_STAGE_RAW_CHUNK_SCHEMA,
+                    "schema_version": _provider_schema_version(
+                        provider_stage,
+                        legacy=MODEL_STAGE_RAW_CHUNK_SCHEMA,
+                        successor=MODEL_STAGE_RAW_CHUNK_SCHEMA_V2,
+                    ),
                     "stage_name": binding["stage_name"],
                     "provider_stage_name": provider_stage,
                     "execution_binding": chunk_binding,
@@ -13478,7 +13551,11 @@ class LeaseStore:
             )
             value = self._seal(
                 {
-                    "schema_version": MODEL_STAGE_RAW_CHAIN_MANIFEST_SCHEMA,
+                    "schema_version": _provider_schema_version(
+                        provider_stage,
+                        legacy=MODEL_STAGE_RAW_CHAIN_MANIFEST_SCHEMA,
+                        successor=MODEL_STAGE_RAW_CHAIN_MANIFEST_SCHEMA_V2,
+                    ),
                     "stage_name": binding["stage_name"],
                     "provider_stage_name": provider_stage,
                     "execution_binding": chain_binding,
@@ -13543,6 +13620,8 @@ class LeaseStore:
         last_mcp_error_code: str | None,
         provider_returncode: int | None,
         duration_ms: int,
+        requested_model: str = REQUIRED_MODEL,
+        requested_reasoning_effort: str = REQUIRED_REASONING_EFFORT,
     ) -> dict[str, Any]:
         if execution_status not in {"completed", "failed", "cancelled", "stalled"}:
             raise DispatchError("model_stage_execution_status_invalid")
@@ -13566,6 +13645,8 @@ class LeaseStore:
             or isinstance(duration_ms, bool)
             or not isinstance(duration_ms, int)
             or duration_ms < 0
+            or requested_model not in {"gpt-5.6-luna", "gpt-5.6-terra"}
+            or requested_reasoning_effort != "max"
             or (failed_mcp_tool_call_count == 0)
             != (last_mcp_error_code is None)
             or (
@@ -13663,7 +13744,12 @@ class LeaseStore:
                     )
             receipt = self._seal(
                 {
-                    "schema_version": MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA,
+                    "schema_version": (
+                        MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V2
+                        if requested_model == "gpt-5.6-terra"
+                        or _is_luna_analysis_provider_stage(provider_stage)
+                        else MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA
+                    ),
                     "stage_name": binding["stage_name"],
                     "provider_stage_name": provider_stage,
                     "execution_status": execution_status,
@@ -13695,8 +13781,8 @@ class LeaseStore:
                     "last_mcp_error_code": last_mcp_error_code,
                     "provider_returncode": provider_returncode,
                     "duration_ms": int(duration_ms),
-                    "requested_model": REQUIRED_MODEL,
-                    "requested_reasoning_effort": REQUIRED_REASONING_EFFORT,
+                    "requested_model": requested_model,
+                    "requested_reasoning_effort": requested_reasoning_effort,
                     "requested_service_tier": None,
                     "fast_mode_requested": False,
                     "formal_write_count": 0,
@@ -13808,7 +13894,11 @@ class LeaseStore:
             )
             receipt = self._seal(
                 {
-                    "schema_version": MODEL_STAGE_NORMALIZATION_RECEIPT_SCHEMA,
+                    "schema_version": _provider_schema_version(
+                        provider_stage,
+                        legacy=MODEL_STAGE_NORMALIZATION_RECEIPT_SCHEMA,
+                        successor=MODEL_STAGE_NORMALIZATION_RECEIPT_SCHEMA_V2,
+                    ),
                     "stage_name": binding["stage_name"],
                     "provider_stage_name": provider_stage,
                     "execution_binding": binding,
@@ -13948,7 +14038,11 @@ class LeaseStore:
             )
             receipt = self._seal(
                 {
-                    "schema_version": STAGE_PROGRESS_RECEIPT_SCHEMA,
+                    "schema_version": _provider_schema_version(
+                        provider_stage,
+                        legacy=STAGE_PROGRESS_RECEIPT_SCHEMA,
+                        successor=STAGE_PROGRESS_RECEIPT_SCHEMA_V2,
+                    ),
                     "sequence": sequence,
                     "unit_sha256": task.unit_sha256,
                     "frozen_payload_sha256": binding["frozen_payload_sha256"],

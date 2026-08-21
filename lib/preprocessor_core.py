@@ -1661,6 +1661,28 @@ def load_config(path: Path) -> dict[str, Any]:
         config["multi_agent_model_contract"] = model_contract_from_config(config)
     except ModelRoleContractError as exc:
         raise PreprocessorError(exc.code) from exc
+    analysis_package = config.get("analysis_package_v1")
+    if analysis_package is not None:
+        if (
+            not isinstance(analysis_package, Mapping)
+            or set(analysis_package) != {
+                "enabled",
+                "stage_output_schema",
+                "max_prompt_bytes",
+                "max_output_bytes",
+            }
+            or analysis_package.get("enabled") is not True
+            or not isinstance(analysis_package.get("stage_output_schema"), str)
+            or not Path(str(analysis_package["stage_output_schema"])).is_absolute()
+            or not Path(str(analysis_package["stage_output_schema"])).is_file()
+            or any(
+                isinstance(analysis_package.get(key), bool)
+                or not isinstance(analysis_package.get(key), int)
+                or not 4096 <= int(analysis_package[key]) <= 2 * 1024 * 1024
+                for key in ("max_prompt_bytes", "max_output_bytes")
+            )
+        ):
+            raise PreprocessorError("config_analysis_package_v1_invalid")
     processing_plugin = config.get("processing_plugin")
     if processing_plugin is not None:
         if (
@@ -16563,6 +16585,37 @@ class CodexRunner:
             },
         }
 
+    def _persist_direct_model_stage_raw(
+        self, *, stage_name: str, raw_output: bytes
+    ) -> dict[str, str]:
+        """Persist exact Provider output when no dispatcher lifecycle is bound.
+
+        Candidate Build and hosted synthetic trials run in isolated temporary
+        roots without a production lease.  They still need durable exact bytes,
+        but must not manufacture dispatcher receipts or mutate shared state.
+        """
+
+        digest = hashlib.sha256(raw_output).hexdigest()
+        path = (
+            self.runtime_root
+            / "private"
+            / "reports"
+            / "direct-model-stage-raw"
+            / stage_name
+            / digest[:2]
+            / f"{digest}.json"
+        )
+        atomic_publish_bytes_no_clobber(path, raw_output)
+        if sha256_file(path) != digest:
+            raise PreprocessorError("model_stage_raw_output_write_mismatch")
+        return {
+            "raw_output_object_sha256": digest,
+            "raw_output_object_ref": (
+                "study-intake-direct-model-stage-raw://sha256/" + digest
+            ),
+            "raw_output_object_path": str(path),
+        }
+
     def _publish_model_stage_raw_chunk(
         self,
         *,
@@ -16613,6 +16666,8 @@ class CodexRunner:
         attempt_counts: Mapping[str, Any],
         provider_returncode: int | None,
         duration_ms: int,
+        requested_model: str = "gpt-5.6-luna",
+        requested_reasoning_effort: str = "max",
         last_error_code: str | None = None,
     ) -> dict[str, Any]:
         lifecycle = self._dispatch_process_lifecycle
@@ -16662,6 +16717,8 @@ class CodexRunner:
             ),
             provider_returncode=provider_returncode,
             duration_ms=duration_ms,
+            requested_model=requested_model,
+            requested_reasoning_effort=requested_reasoning_effort,
         )
 
     def _publish_model_stage_normalization(
@@ -17789,6 +17846,8 @@ class CodexRunner:
         runtime_reasoning_effort: str | None,
         runtime_metadata_provenance: str,
         runtime_identity_status: str,
+        requested_model: str | None = None,
+        requested_reasoning_effort: str | None = None,
     ) -> tuple[str, str]:
         """Persist schema-valid output before downstream semantic validation."""
 
@@ -17811,8 +17870,10 @@ class CodexRunner:
             "payload_sha256": sha256_value(payload),
             "payload": copy.deepcopy(dict(payload)),
             "duration_ms": duration_ms,
-            "requested_model": self.config["model"],
-            "requested_reasoning_effort": self.config["reasoning_effort"],
+            "requested_model": requested_model or self.config["model"],
+            "requested_reasoning_effort": (
+                requested_reasoning_effort or self.config["reasoning_effort"]
+            ),
             "runtime_model": runtime_model,
             "runtime_reasoning_effort": runtime_reasoning_effort,
             "runtime_metadata_provenance": runtime_metadata_provenance,
@@ -18762,21 +18823,28 @@ class CodexRunner:
                             stdout_bytes=len(stdout),
                             stderr_bytes=len(stderr),
                         )
-                    raw_refs = self._publish_model_stage_raw(
-                        stage_name=stage_name,
-                        raw_output=stage_raw_output,
-                        completed=subprocess.CompletedProcess(
-                            list(command),
-                            int(process.returncode),
-                            stdout=stdout,
-                            stderr=stderr,
-                        ),
-                        provider_schema_sha256=provider_schema_sha256,
-                        provider_process_identity_sha256=str(
-                            identity_refs[
-                                "provider_process_identity_sha256"
-                            ]
-                        ) if identity_refs is not None else "",
+                    raw_refs = (
+                        self._publish_model_stage_raw(
+                            stage_name=stage_name,
+                            raw_output=stage_raw_output,
+                            completed=subprocess.CompletedProcess(
+                                list(command),
+                                int(process.returncode),
+                                stdout=stdout,
+                                stderr=stderr,
+                            ),
+                            provider_schema_sha256=provider_schema_sha256,
+                            provider_process_identity_sha256=str(
+                                identity_refs[
+                                    "provider_process_identity_sha256"
+                                ]
+                            ) if identity_refs is not None else "",
+                        )
+                        if self._dispatch_process_lifecycle is not None
+                        else self._persist_direct_model_stage_raw(
+                            stage_name=stage_name,
+                            raw_output=stage_raw_output,
+                        )
                     )
                     with self._process_lock:
                         self._provider_raw_refs[stage_name] = dict(raw_refs)
@@ -19643,7 +19711,8 @@ class CodexRunner:
         library_call_count = 0
         math_search_backoff_required = (
             subject == "math"
-            and stage_name in {"math_analysis", "math_critical_review"}
+            and stage_name
+            in {"math_analysis", "math_luna_analysis", "math_critical_review"}
         )
         pending_math_search_backoff: dict[str, Any] | None = None
         exhausted_math_search_backoffs: set[str] = set()
@@ -20655,6 +20724,22 @@ class CodexRunner:
             f'mcp_servers.{server}.env.PYTHONNOUSERSITE="1"',
             f'mcp_servers.{server}.env.PYTHONSAFEPATH="1"',
             (
+                f"mcp_servers.{server}.env.STUDY_READ_MATH_ROOT="
+                f"{json.dumps(str(self._processing_host.runtime_root))}"
+            ),
+            (
+                f"mcp_servers.{server}.env.STUDY_READ_CS408_ROOT="
+                f"{json.dumps(str(self._processing_host.runtime_root))}"
+            ),
+            (
+                f"mcp_servers.{server}.env.STUDY_READ_ENGLISH_ROOT="
+                f"{json.dumps(str(self._processing_host.runtime_root))}"
+            ),
+            (
+                f"mcp_servers.{server}.env.STUDY_INTAKE_RUNTIME_ROOT="
+                f"{json.dumps(str(self._processing_host.runtime_root))}"
+            ),
+            (
                 f"mcp_servers.{server}.env.STUDY_READ_MCP_EXPECTED_PROJECT_ROOT="
                 f"{json.dumps(str(release_root))}"
             ),
@@ -21250,14 +21335,14 @@ class CodexRunner:
             )
             if (
                 authority_snapshot_manifest_sha256 is None
-                or SHA256_RE.fullmatch(
-                    authority_snapshot_manifest_sha256
-                )
+                or SHA256_RE.fullmatch(authority_snapshot_manifest_sha256)
                 is None
             ):
-                raise PreprocessorError(
-                    "authority_snapshot_manifest_binding_missing"
-                )
+                if self.config.get("execution_mode") != "hosted_synthetic":
+                    raise PreprocessorError(
+                        "authority_snapshot_manifest_binding_missing"
+                    )
+                authority_snapshot_manifest_sha256 = None
         temp_dir = self._model_temp_dir()
         execution_root = self._model_execution_root()
         fd, output_name = tempfile.mkstemp(
@@ -21469,6 +21554,17 @@ class CodexRunner:
                         ),
                     }
                 )
+                if self.config.get("execution_mode") == "hosted_synthetic":
+                    diagnostic.update(
+                        {
+                            "synthetic_provider_stdout_tail": completed.stdout[
+                                -4096:
+                            ].decode("utf-8", errors="replace"),
+                            "synthetic_provider_stderr_tail": completed.stderr[
+                                -4096:
+                            ].decode("utf-8", errors="replace"),
+                        }
+                    )
                 if isinstance(transport_sha256, str):
                     diagnostic["model_mcp_transport_sha256"] = transport_sha256
                     diagnostic["model_mcp_transport_ref"] = str(
@@ -21496,6 +21592,8 @@ class CodexRunner:
                     attempt_counts=attempt_counts,
                     provider_returncode=int(completed.returncode),
                     duration_ms=duration_ms,
+                    requested_model=requested_model,
+                    requested_reasoning_effort=requested_reasoning_effort,
                     last_error_code=error_code,
                 )
                 diagnostic.update(execution_refs)
@@ -21556,6 +21654,8 @@ class CodexRunner:
                     attempt_counts=attempt_counts,
                     provider_returncode=int(completed.returncode),
                     duration_ms=duration_ms,
+                    requested_model=requested_model,
+                    requested_reasoning_effort=requested_reasoning_effort,
                     last_error_code=(
                         attempt_counts.get("last_mcp_error_code")
                         or exc.code
@@ -21598,6 +21698,8 @@ class CodexRunner:
                 attempt_counts=attempt_counts,
                 provider_returncode=int(completed.returncode),
                 duration_ms=duration_ms,
+                requested_model=requested_model,
+                requested_reasoning_effort=requested_reasoning_effort,
             )
             if raw_output_missing:
                 error_code = f"{stage_name}_output_missing"
@@ -21734,6 +21836,10 @@ class CodexRunner:
                         runtime_reasoning_effort=runtime_effort,
                         runtime_metadata_provenance=provenance,
                         runtime_identity_status="quarantined",
+                        requested_model=requested_model,
+                        requested_reasoning_effort=(
+                            requested_reasoning_effort
+                        ),
                     )
                 )
                 quarantined_result = StructuredStageResult(
@@ -21897,6 +22003,8 @@ class CodexRunner:
                     runtime_reasoning_effort=runtime_effort,
                     runtime_metadata_provenance=provenance,
                     runtime_identity_status=identity_status,
+                    requested_model=requested_model,
+                    requested_reasoning_effort=requested_reasoning_effort,
                 )
             )
             stage_result = StructuredStageResult(
@@ -22255,10 +22363,7 @@ class CodexRunner:
             if normalized_payload is not None
             else result.payload
         )
-        if (
-            result.stage_execution_receipt_sha256 is not None
-            or result.raw_output_object_sha256 is not None
-        ):
+        if result.stage_execution_receipt_sha256 is not None:
             if not isinstance(result.stage_name, str):
                 raise PreprocessorError("model_stage_normalization_stage_missing")
             normalization = self._publish_model_stage_normalization(
@@ -24940,6 +25045,172 @@ class CodexRunner:
             ),
         )
 
+    def _analysis_package_prompt(
+        self,
+        *,
+        candidate: Candidate,
+        stage: str,
+        stage_input: Mapping[str, Any],
+        prior_reports: Mapping[str, Mapping[str, Any]],
+        processing_context: Mapping[str, Any],
+    ) -> str:
+        envelope = {
+            "contract": "study-intake-analysis-package-v1",
+            "stage": stage,
+            "subject": candidate.subject,
+            "capture_id": candidate.capture_id,
+            "study_date": candidate.study_date,
+            "captured_at": candidate.recorded_at,
+            "capture_intake_date": stage_input["capture_intake_date"],
+            "read_session": self._processing_prompt_context(
+                processing_context
+            ),
+            "prior_reports": copy.deepcopy(dict(prior_reports)),
+            "instructions": [
+                "Use only the subject-scoped read-only MCP for knowledge-base facts.",
+                "Call get_task_context exactly once with the empty JSON object {} before making claims; do not pass subject or session arguments, never repeat identical MCP arguments, and cite unique mcp-item evidence refs.",
+                "Proposals are advisory and must not be executable writer commands.",
+                "Missing fields, disagreement, duplicate candidates, and warnings remain reportable and do not reject the Capture.",
+                "Set formal_write_count to zero.",
+            ],
+        }
+        return (
+            "Produce exactly one Study Intake V2 analysis-stage report matching "
+            "the supplied JSON Schema.\n"
+            + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
+        )
+
+    def run_analysis_package_v1(self, candidate: Candidate) -> ModelResult:
+        """Run Terra -> Luna -> Terra final and persist AnalysisPackageV1."""
+
+        from analysis_package_v1 import (
+            AnalysisPackageDriver,
+            AnalysisPackageStore,
+            build_durable_capture,
+            sha256_value as analysis_sha256_value,
+        )
+
+        profile = self.config.get("analysis_package_v1")
+        if not isinstance(profile, Mapping) or profile.get("enabled") is not True:
+            raise PreprocessorError("analysis_package_profile_missing")
+        schema_path = Path(str(profile.get("stage_output_schema") or ""))
+        if not schema_path.is_file():
+            raise PreprocessorError("analysis_package_stage_schema_missing")
+        if not isinstance(candidate.recorded_at, str):
+            raise PreprocessorError("analysis_package_captured_at_missing")
+        processing_context = self._background_context(candidate)
+        if not isinstance(processing_context, Mapping):
+            raise PreprocessorError("analysis_package_read_session_missing")
+        capture = build_durable_capture(
+            capture_id=candidate.capture_id,
+            subject=candidate.subject,
+            study_date=candidate.study_date,
+            captured_at=candidate.recorded_at,
+            payload={
+                "input_fingerprint": candidate.input_fingerprint,
+                "input_binding": copy.deepcopy(candidate.input_binding),
+                "model_input": copy.deepcopy(candidate.model_input),
+            },
+            source_kind=(
+                "synthetic"
+                if self.config.get("execution_mode") == "fixture"
+                else "canonical"
+            ),
+        )
+        prior_reports: dict[str, dict[str, Any]] = {}
+        semantic_receipts: dict[str, dict[str, Any]] = {}
+        stage_results: dict[str, StructuredStageResult] = {}
+        provider_stage_names = {
+            "terra_analysis": f"{candidate.subject}_analysis",
+            "luna_analysis": f"{candidate.subject}_luna_analysis",
+            "terra_final": f"{candidate.subject}_critical_review",
+        }
+        role_names = {
+            "terra_analysis": "terra_analysis",
+            "luna_analysis": "luna_analysis",
+            "terra_final": "terra_critical_review",
+        }
+
+        def execute_stage(
+            stage: str, model: str, stage_input: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            prompt = self._analysis_package_prompt(
+                candidate=candidate,
+                stage=stage,
+                stage_input=stage_input,
+                prior_reports=prior_reports,
+                processing_context=processing_context,
+            )
+            result = self._execute_prompt(
+                prompt=prompt,
+                output_schema=schema_path,
+                image_paths=(),
+                stage_name=provider_stage_names[stage],
+                max_prompt_bytes=int(profile["max_prompt_bytes"]),
+                max_output_bytes=int(profile["max_output_bytes"]),
+                allowed_evidence_refs=(),
+                bind_evidence_schema=False,
+                timeout_seconds=None,
+                subject=candidate.subject,
+                processing_context=processing_context,
+                model_role=role_names[stage],
+            )
+            prompt_version = f"analysis-package-{stage}-v1"
+            receipt = self._stage_receipt(
+                result,
+                prompt_version=prompt_version,
+                prompt_sha256=sha256_text(prompt),
+                schema_sha256=str(result.schema_sha256),
+                result_sha256=analysis_sha256_value(result.payload),
+                processing_context=processing_context,
+                requested_model=model,
+                requested_reasoning_effort="max",
+            )
+            prior_reports[stage] = copy.deepcopy(result.payload)
+            semantic_receipts[stage] = copy.deepcopy(receipt)
+            stage_results[stage] = result
+            return {
+                "report": copy.deepcopy(result.payload),
+                "runtime": {
+                    "requested_model": model,
+                    "requested_reasoning_effort": "max",
+                    "runtime_model": result.runtime_model,
+                    "runtime_reasoning_effort": (
+                        result.runtime_reasoning_effort
+                    ),
+                    "runtime_metadata_provenance": (
+                        result.runtime_metadata_provenance
+                    ),
+                    "duration_ms": result.duration_ms,
+                },
+                "receipt": receipt,
+            }
+
+        package = AnalysisPackageDriver(
+            AnalysisPackageStore(self.runtime_root), execute_stage
+        ).run(capture)
+        final_result = stage_results["terra_final"]
+        return ModelResult(
+            analysis=package,
+            duration_ms=sum(row.duration_ms for row in stage_results.values()),
+            runtime_model=final_result.runtime_model,
+            runtime_reasoning_effort=final_result.runtime_reasoning_effort,
+            runtime_metadata_provenance=(
+                final_result.runtime_metadata_provenance
+            ),
+            pipeline_status="analysis_package_ready",
+            draft_analysis=prior_reports["terra_analysis"],
+            critical_review=prior_reports["terra_final"],
+            stage_receipts=semantic_receipts,
+            semantic_stage_count=3,
+            provider_request_count=sum(
+                row.provider_request_count for row in stage_results.values()
+            ),
+            mcp_tool_call_count=sum(
+                row.mcp_tool_call_count for row in stage_results.values()
+            ),
+        )
+
     def run(self, candidate: Candidate) -> ModelResult:
         consumer_chain = self.config.get("consumer_stage_chain")
         if (
@@ -24947,9 +25218,13 @@ class CodexRunner:
             and consumer_chain.get("enabled") is True
             and self.config.get("execution_mode") == "live_authorized"
         ):
-            raise PreprocessorError(
-                "consumer_stage_chain_live_driver_not_integrated"
-            )
+            analysis_package = self.config.get("analysis_package_v1")
+            if (
+                isinstance(analysis_package, Mapping)
+                and analysis_package.get("enabled") is True
+            ):
+                return self.run_analysis_package_v1(candidate)
+            raise PreprocessorError("consumer_stage_chain_live_driver_not_integrated")
         if candidate.subject == "english":
             return self._run_english(candidate)
         math_profile = self.config.get(MATH_V2_PROFILE)
@@ -26168,6 +26443,9 @@ class Worker:
         model_config["models"] = copy.deepcopy(dict(config.get("models") or {}))
         model_config["consumer_stage_chain"] = copy.deepcopy(
             dict(config.get("consumer_stage_chain") or {})
+        )
+        model_config["analysis_package_v1"] = copy.deepcopy(
+            dict(config.get("analysis_package_v1") or {})
         )
         model_config["branch_scheduler"] = copy.deepcopy(
             dict(config.get("branch_scheduler") or {})

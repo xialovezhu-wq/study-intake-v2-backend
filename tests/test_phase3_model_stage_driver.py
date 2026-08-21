@@ -4,6 +4,7 @@ import inspect
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +111,22 @@ class Phase3ModelStageDriverTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
 
-    def test_live_mode_fails_closed_until_successor_driver_is_integrated(self) -> None:
+    def test_live_mode_routes_to_analysis_package_driver(self) -> None:
+        self.runner.config.update(
+            {
+                "consumer_stage_chain": {"enabled": True},
+                "analysis_package_v1": {"enabled": True},
+                "execution_mode": "live_authorized",
+            }
+        )
+        sentinel = object()
+        with mock.patch.object(
+            self.runner, "run_analysis_package_v1", return_value=sentinel
+        ) as routed:
+            self.assertIs(self.runner.run(object()), sentinel)
+        routed.assert_called_once()
+
+    def test_legacy_live_mode_still_fails_closed_without_new_driver(self) -> None:
         self.runner.config.update(
             {
                 "consumer_stage_chain": {"enabled": True},
@@ -118,8 +134,7 @@ class Phase3ModelStageDriverTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(
-            PreprocessorError,
-            "consumer_stage_chain_live_driver_not_integrated",
+            PreprocessorError, "consumer_stage_chain_live_driver_not_integrated"
         ):
             self.runner.run(object())
 

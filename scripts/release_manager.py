@@ -261,6 +261,13 @@ CONSUMER_STAGE_ROLE_ORDER = (
     "terra_critical_review",
 )
 CONSUMER_STAGE_ROLE_NAMES = frozenset(CONSUMER_STAGE_ROLE_ORDER)
+HISTORICAL_THREE_ROLE_MODEL_CONTRACT = {
+    **REQUIRED_MODEL_CONTRACT,
+    "roles": {
+        role: REQUIRED_MODEL_CONTRACT["roles"][role]
+        for role in ("orchestrator", "reader", "critical_reviewer")
+    },
+}
 HISTORICAL_PRIORITY_MODEL_CONTRACT = {
     "model": "gpt-5.6-luna",
     "reasoning_effort": "max",
@@ -274,6 +281,7 @@ HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS = frozenset(
     {
         "a4ff96b8932344211ca51c69edda98a06e95382bcdc4de79e2520fdcf8e343d6",
         "693450d5e1ccd0814b1a4b0998ed59ec280ad9e6efb7279c5639ef5b6ec6cc65",
+        "ad1807186ac277c6bacfb7fd8d83b9cbc86cf75027698e70f994f3228d815cc9",
     }
 )
 HISTORICAL_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
@@ -285,6 +293,12 @@ HISTORICAL_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
 HISTORICAL_LEGACY_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
     "name": "historical_target_runtime_v1",
     "model_contract": LEGACY_REQUIRED_MODEL_CONTRACT,
+    "component_inventory_profile": "full",
+    "target_runtime_contract_required": False,
+}
+HISTORICAL_THREE_ROLE_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
+    "name": "historical_three_role_target_runtime_v3",
+    "model_contract": HISTORICAL_THREE_ROLE_MODEL_CONTRACT,
     "component_inventory_profile": "full",
     "target_runtime_contract_required": False,
 }
@@ -2319,12 +2333,12 @@ RELEASE_GATE_CORE_TESTS = (
     "tests.test_subject_quality_receipt_v2",
     "tests.test_successor_schema_roundtrip",
     "tests.test_production_canary_schema_contract",
-    "tests.test_math_shadow_backaudit.RealAugustFourthBackauditTests."
-    "test_real_august_fourth_selection_is_exactly_ten",
+    "tests.test_math_shadow_backaudit.SyntheticAugustFourthBackauditTests."
+    "test_synthetic_selection_is_exact_and_read_only",
     "tests.test_math_shadow_replay.MathShadowReplayTests."
     "test_plan_hash_checks_are_read_only",
     "tests.test_math_shadow_replay.MathShadowReplayTests."
-    "test_real_manifest_builds_ten_frozen_shadow_candidates",
+    "test_synthetic_manifest_builds_frozen_shadow_candidates",
     "tests.test_math_v2_core.MathV2CoreTests."
     "test_historical_publish_uses_only_manifest_candidate",
     "tests.test_subject_sol_contract_v2",
@@ -3068,6 +3082,32 @@ def _validate_consumer_stage_chain_config(
         raise ReleaseError("release_consumer_stage_chain_invalid")
 
 
+def _validate_analysis_package_config(
+    config: Mapping[str, Any], *, release_root: Path
+) -> None:
+    profile = config.get("analysis_package_v1")
+    if profile is None:
+        return
+    expected_schema = release_root / "schemas/analysis-stage-report-v1.json"
+    if (
+        not isinstance(profile, Mapping)
+        or set(profile) != {
+            "enabled", "stage_output_schema", "max_prompt_bytes", "max_output_bytes"
+        }
+        or profile.get("enabled") is not True
+        or profile.get("stage_output_schema") != str(expected_schema)
+        or expected_schema.is_symlink()
+        or not expected_schema.is_file()
+        or any(
+            isinstance(profile.get(key), bool)
+            or not isinstance(profile.get(key), int)
+            or not 4096 <= int(profile[key]) <= 2 * 1024 * 1024
+            for key in ("max_prompt_bytes", "max_output_bytes")
+        )
+    ):
+        raise ReleaseError("release_analysis_package_v1_invalid")
+
+
 def _validate_target_release_config(
     config: Mapping[str, Any],
     *,
@@ -3152,6 +3192,9 @@ def _validate_target_release_config(
             try:
                 _validate_consumer_stage_chain_config(
                     config, available_roles=set(models)
+                )
+                _validate_analysis_package_config(
+                    config, release_root=release_root
                 )
             except ReleaseError:
                 role_config_valid = False
@@ -4057,7 +4100,11 @@ def _verify_release_with_model_contract(
     if (
         not target_runtime_contract_required
         and (
-            required_model_contract != REQUIRED_MODEL_CONTRACT
+            required_model_contract
+            not in {
+                "current": REQUIRED_MODEL_CONTRACT,
+                "three_role": HISTORICAL_THREE_ROLE_MODEL_CONTRACT,
+            }.values()
             or component_inventory_profile != "full"
         )
     ):
@@ -4117,6 +4164,19 @@ def _verify_release_with_model_contract(
         frozenset(base_generated),
         frozenset(base_generated | set(STAGING_GENERATED_SOURCE_PATHS)),
     }
+    if (
+        not target_runtime_contract_required
+        and required_model_contract == HISTORICAL_THREE_ROLE_MODEL_CONTRACT
+    ):
+        allowed_generated_sets.add(
+            frozenset(
+                base_generated
+                | {
+                    "plugin/kaoyan-study-intake/component-lock.json",
+                    "validation/source-freeze-sha256-final-20260813.txt",
+                }
+            )
+        )
     expected_generated = set(generated) if isinstance(generated, dict) else set()
     if (
         not isinstance(source, dict)
@@ -4197,7 +4257,10 @@ def _verify_release_with_model_contract(
     if set(directories) != actual_directories:
         raise ReleaseError("release_directory_identity_mismatch")
     if stat.S_IMODE(root.stat().st_mode) != SEALED_DIRECTORY_MODE:
-        raise ReleaseError("release_directory_mode_mismatch")
+        raise ReleaseError(
+            "release_directory_mode_mismatch:root:"
+            f"{stat.S_IMODE(root.stat().st_mode):04o}"
+        )
     for relative in actual_directories:
         directory_stat = (root / relative).lstat()
         expected_directory = directories.get(relative)
@@ -4209,7 +4272,11 @@ def _verify_release_with_model_contract(
             or expected_directory.get("mode") != SEALED_DIRECTORY_MODE
             or stat.S_IMODE(directory_stat.st_mode) != SEALED_DIRECTORY_MODE
         ):
-            raise ReleaseError("release_directory_mode_mismatch")
+            raise ReleaseError(
+                "release_directory_mode_mismatch:"
+                f"{relative}:{stat.S_IMODE(directory_stat.st_mode):04o}:"
+                f"{expected_directory}"
+            )
     _verify_hashes(root, source, label="source_file")
     _verify_modes(root, modes, label="source_mode")
     _verify_owners(
@@ -4456,6 +4523,7 @@ def verify_rollback_release(release_dir: Path) -> dict[str, Any]:
         if declared_release_id in HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS:
             descriptors = (
                 HISTORICAL_TARGET_RUNTIME_ROLLBACK_CONTRACT,
+                HISTORICAL_THREE_ROLE_TARGET_RUNTIME_ROLLBACK_CONTRACT,
                 HISTORICAL_LEGACY_TARGET_RUNTIME_ROLLBACK_CONTRACT,
                 *descriptors,
             )

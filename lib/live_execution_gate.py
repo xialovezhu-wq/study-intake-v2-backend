@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-EXECUTION_MODES = frozenset({"fixture", "offline", "live_authorized"})
+EXECUTION_MODES = frozenset(
+    {"fixture", "offline", "hosted_synthetic", "live_authorized"}
+)
 EXTERNAL_PURPOSES = frozenset(
     {
         "terra_orchestrator",
@@ -188,6 +190,58 @@ def assert_external_launch_allowed(
         if payload_path is None or not roots or not _inside(payload_path, roots):
             raise LiveExecutionDenied("fixture_executable_not_allowlisted", evidence=evidence)
         return {**evidence, "allowed": True, "reason": "fixture_allowlist"}
+
+    if mode == "hosted_synthetic":
+        trial = config.get("hosted_synthetic_trial")
+        runtime_root = (
+            Path(str(trial.get("runtime_root"))).resolve()
+            if isinstance(trial, Mapping)
+            and isinstance(trial.get("runtime_root"), str)
+            else None
+        )
+        subject_roots = (
+            trial.get("subject_roots") if isinstance(trial, Mapping) else None
+        )
+        roots_valid = bool(
+            runtime_root is not None
+            and runtime_root.is_dir()
+            and isinstance(subject_roots, Mapping)
+            and set(subject_roots) == {"math", "cs408", "english"}
+        )
+        if roots_valid:
+            for raw_root in subject_roots.values():
+                if not isinstance(raw_root, str):
+                    roots_valid = False
+                    break
+                try:
+                    Path(raw_root).resolve(strict=True).relative_to(
+                        runtime_root.resolve(strict=True)
+                    )
+                except (OSError, ValueError):
+                    roots_valid = False
+                    break
+        if (
+            purpose != "provider_model_request"
+            or not isinstance(trial, Mapping)
+            or set(trial) != {
+                "enabled", "synthetic_only", "capture_source_kind",
+                "runtime_root", "subject_roots", "formal_write_count",
+            }
+            or trial.get("enabled") is not True
+            or trial.get("synthetic_only") is not True
+            or trial.get("capture_source_kind") != "synthetic"
+            or trial.get("formal_write_count") != 0
+            or not roots_valid
+            or not _looks_like_real_codex(argv)
+        ):
+            raise LiveExecutionDenied(
+                "hosted_synthetic_launch_invalid", evidence=evidence
+            )
+        return {
+            **evidence,
+            "allowed": True,
+            "reason": "hosted_synthetic_isolated_allowlist",
+        }
 
     if purpose not in LIVE_PURPOSES:
         raise LiveExecutionDenied("live_mode_fake_launch_forbidden", evidence=evidence)

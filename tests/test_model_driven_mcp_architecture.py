@@ -1797,6 +1797,7 @@ class ModelDrivenMcpArchitectureTests(unittest.TestCase):
                 "kaoyan-math-nightly-qa": {"subject": "math", "tool_name": "math_read_bundle"},
                 "kaoyan-english-vocab-export": {"subject": "english", "tool_name": "english_read_bundle"},
                 "kaoyan-english-intensive-reading": {"subject": "english", "tool_name": "english_read_bundle"},
+                "kaoyan-english-daily-intake-curation": {"subject": "english", "tool_name": "english_read_bundle"},
                 "kaoyan-408-daily-intake-curation": {"subject": "cs408", "tool_name": "cs408_read_bundle"},
             },
             bindings,

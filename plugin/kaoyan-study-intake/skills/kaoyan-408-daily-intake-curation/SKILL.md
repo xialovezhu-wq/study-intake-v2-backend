@@ -51,10 +51,14 @@ identity, new/redo, user fact, unique main knowledge, or answer-safety evidence 
 cannot be resolved from primary evidence becomes `needs_user`.
 Independent read-only semantic preparation may run in parallel on frozen,
 answer-safe, role-specific views when it improves quality. Follow
-`../kaoyan-408-wrong-intake/references/parallel-intake-contract.md`. Do not send
+`../_shared/native-luna-parallel-contract.md` and
+`../kaoyan-408-wrong-intake/references/parallel-intake-contract.md`. These are native
+Codex Luna Max Fast leaf reviews and are separate from the optional one-shot
+background report consumer below. Do not send
 complete stems, answers, options, screenshots, handwriting, or protected paths.
-A skill cannot switch its own model. Only claim a stronger model or higher reasoning
-effort when execution metadata confirms it. Subagent count is not model evidence.
+Only accept a role result when execution metadata confirms `gpt-5.6-luna`, `max`,
+and `fast`. Subagent count is not model evidence. Wait for all selected roles and
+merge their bounded proposals once before any serial formal publication.
 
 ## Optional one-shot Luna report consumer
 After `start-batch` succeeds or an exact `active_batch` is resumed, run once per frozen capture before the first `curate_one`:

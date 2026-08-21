@@ -600,6 +600,7 @@ class ProcessingPluginHost:
         self, *, subject_root: Path | None = None
     ) -> dict[str, str]:
         repository_root = (subject_root or self.runtime_root).resolve()
+        runtime = self._sealed_runtime_binding()
         return {
             "PATH": "/usr/bin:/bin",
             "PYTHONUTF8": "1",
@@ -610,6 +611,13 @@ class ProcessingPluginHost:
             "STUDY_READ_CS408_ROOT": str(repository_root),
             "STUDY_READ_ENGLISH_ROOT": str(repository_root),
             "STUDY_INTAKE_RUNTIME_ROOT": str(self.runtime_root),
+            "STUDY_READ_MCP_EXPECTED_PROJECT_ROOT": str(
+                runtime["release_root"]
+            ),
+            "STUDY_READ_MCP_EXPECTED_RELEASE_ID": str(runtime["release_id"]),
+            "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256": str(
+                runtime["release_manifest_sha256"]
+            ),
         }
 
     def _route(
@@ -752,7 +760,15 @@ class ProcessingPluginHost:
         except OSError as exc:
             raise ProcessingPluginError("background_mcp_exec_failed") from exc
         if completed.returncode != 0 or len(completed.stdout) > 262_144:
-            raise ProcessingPluginError("background_mcp_client_failed")
+            raise ProcessingPluginError(
+                "background_mcp_client_failed",
+                diagnostic={
+                    "returncode": str(completed.returncode),
+                    "stderr_tail": completed.stderr[-2048:].decode(
+                        "utf-8", errors="replace"
+                    ),
+                },
+            )
         try:
             value = json.loads(completed.stdout)
         except (UnicodeError, json.JSONDecodeError) as exc:
@@ -2278,7 +2294,17 @@ class ProcessingPluginHost:
             or not isinstance(base_release_id, str)
             or not SHA256_RE.fullmatch(base_release_id)
         ):
-            raise ProcessingPluginError("background_mcp_authority_binding_invalid")
+            raise ProcessingPluginError(
+                "background_mcp_authority_binding_invalid",
+                diagnostic={
+                    "base_release_id": str(base_release_id),
+                    "subject_available": str(
+                        subject_item.get("available")
+                        if isinstance(subject_item, Mapping)
+                        else None
+                    ),
+                },
+            )
         generation = subject_item.get("generation")
         fingerprint = subject_item.get("authority_fingerprint")
         adapter_release = subject_item.get("adapter_release")

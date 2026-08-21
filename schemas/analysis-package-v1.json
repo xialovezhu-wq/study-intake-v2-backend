@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "study-intake-analysis-package-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "package_id", "capture_id", "subject", "study_date",
+    "captured_at", "capture_intake_date", "capture_sha256", "capture_ref",
+    "stage_order", "stages", "warnings", "status", "formal_write_count"
+  ],
+  "properties": {
+    "schema_version": {"const": "study-intake-analysis-package-v1"},
+    "package_id": {"type": "string", "pattern": "^ANPKG-[A-F0-9]{24}$"},
+    "capture_id": {"type": "string", "minLength": 1},
+    "subject": {"enum": ["math", "cs408", "english"]},
+    "study_date": {"type": "string", "format": "date"},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "capture_intake_date": {"type": "string", "format": "date"},
+    "capture_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "capture_ref": {"type": "string", "pattern": "^study-intake-durable-capture://sha256/[0-9a-f]{64}$"},
+    "stage_order": {"const": ["terra_analysis", "luna_analysis", "terra_final"]},
+    "stages": {"type": "array", "minItems": 3, "maxItems": 3},
+    "warnings": {"type": "array"},
+    "status": {"const": "ready_for_nightly"},
+    "formal_write_count": {"const": 0}
+  }
+}

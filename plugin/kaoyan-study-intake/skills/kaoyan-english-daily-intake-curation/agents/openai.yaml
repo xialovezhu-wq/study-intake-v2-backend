@@ -1,0 +1,4 @@
+interface:
+  display_name: "考研英语日终正式入库"
+  short_description: "精确日期冻结、Sol typed actions 与确定性正式写入"
+  default_prompt: "Use $kaoyan-english-daily-intake-curation only for the exact command 开始 YYYY-MM-DD 英语正式入库. Freeze that date, validate Luna candidates, let Sol emit typed actions only, then dry-run and apply safe actions through the deterministic writer without asking twice; report ambiguous items as needs_user and PARTIAL."

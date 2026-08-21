@@ -18,6 +18,7 @@ for directory in (ROOT / "lib", ROOT / "bin"):
 
 import preprocess_dispatcher as dispatcher
 from concurrent_dispatch import DispatchError
+from live_execution_gate import LiveExecutionDenied, assert_external_launch_allowed
 from preprocessor_core import CodexRunner, PreprocessorError, load_config
 
 
@@ -139,6 +140,55 @@ class OfflineExecutionGateV1Tests(unittest.TestCase):
                     caught.exception.code, "offline_external_launch_forbidden"
                 )
                 popen.assert_not_called()
+
+    def test_hosted_synthetic_mode_requires_all_roots_inside_temp_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary).resolve()
+            roots = {}
+            for subject in ("math", "cs408", "english"):
+                path = runtime / "subjects" / subject
+                path.mkdir(parents=True)
+                roots[subject] = str(path)
+            config = {
+                "execution_mode": "hosted_synthetic",
+                "hosted_synthetic_trial": {
+                    "enabled": True,
+                    "synthetic_only": True,
+                    "capture_source_kind": "synthetic",
+                    "runtime_root": str(runtime),
+                    "subject_roots": roots,
+                    "formal_write_count": 0,
+                },
+            }
+            decision = assert_external_launch_allowed(
+                config,
+                purpose="provider_model_request",
+                command=[
+                    "/Applications/ChatGPT.app/Contents/Resources/codex",
+                    "exec",
+                    "--model",
+                    "gpt-5.6-terra",
+                ],
+            )
+            self.assertTrue(decision["allowed"])
+            drifted = json.loads(json.dumps(config))
+            drifted["hosted_synthetic_trial"]["subject_roots"]["math"] = str(
+                runtime.parent
+            )
+            with self.assertRaises(LiveExecutionDenied) as caught:
+                assert_external_launch_allowed(
+                    drifted,
+                    purpose="provider_model_request",
+                    command=[
+                        "/Applications/ChatGPT.app/Contents/Resources/codex",
+                        "exec",
+                        "--model",
+                        "gpt-5.6-terra",
+                    ],
+                )
+            self.assertEqual(
+                caught.exception.code, "hosted_synthetic_launch_invalid"
+            )
 
 
 if __name__ == "__main__":

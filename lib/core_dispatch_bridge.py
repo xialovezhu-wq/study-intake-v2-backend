@@ -1766,7 +1766,10 @@ class _CapturingRunner:
 class _DirectStageEventRecorder:
     _EVENTS = {
         "math_analysis": ("analysis_submitted", None),
+        "math_luna_analysis": (None, None),
         "math_critical_review": ("critical_started", "critical_completed"),
+        "cs408_luna_analysis": (None, None),
+        "english_luna_analysis": (None, None),
     }
 
     def __init__(
@@ -1789,7 +1792,10 @@ class _DirectStageEventRecorder:
         events = self._EVENTS.get(str(kwargs.get("stage_name") or ""))
         if events is None or not self.store.is_current(self.context.lease):
             raise DispatchError("direct_candidate_stage_event_invalid")
-        self.store.record_task_event(self.task, self.context.lease, events[0])
+        if events[0] is not None:
+            self.store.record_task_event(
+                self.task, self.context.lease, events[0]
+            )
         result = self._execute(*args, **kwargs)
         if events[1] is not None:
             self.store.record_task_event(self.task, self.context.lease, events[1])
@@ -2822,6 +2828,7 @@ class CoreCandidateSubprocessRunner:
         subject = str(task.frozen_payload.get("subject") or "")
         stage_candidates = [
             f"{subject}_analysis",
+            f"{subject}_luna_analysis",
             f"{subject}_critical_review",
         ]
         live_identities: list[dict[str, Any]] = []

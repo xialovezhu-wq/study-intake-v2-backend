@@ -733,6 +733,13 @@ class ProcessingPluginHostTests(unittest.TestCase):
                 "STUDY_READ_CS408_ROOT": str(self.runtime.resolve()),
                 "STUDY_READ_ENGLISH_ROOT": str(self.runtime.resolve()),
                 "STUDY_INTAKE_RUNTIME_ROOT": str(self.runtime.resolve()),
+                "STUDY_READ_MCP_EXPECTED_PROJECT_ROOT": str(self.mcp_root),
+                "STUDY_READ_MCP_EXPECTED_RELEASE_ID": self.RELEASE_ID,
+                "STUDY_READ_MCP_EXPECTED_RELEASE_MANIFEST_SHA256": (
+                    hashlib.sha256(
+                        (self.mcp_root / "release.json").read_bytes()
+                    ).hexdigest()
+                ),
             },
         )
 

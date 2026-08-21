@@ -167,6 +167,10 @@
         "subject": "english",
         "tool_name": "english_read_bundle"
       },
+      "kaoyan-english-daily-intake-curation": {
+        "subject": "english",
+        "tool_name": "english_read_bundle"
+      },
       "kaoyan-408-daily-intake-curation": {
         "subject": "cs408",
         "tool_name": "cs408_read_bundle"
@@ -265,6 +269,7 @@
     "kaoyan-math-nightly-qa": "2.1.0",
     "kaoyan-english-vocab-export": "2.1.0",
     "kaoyan-english-intensive-reading": "2.1.1",
+    "kaoyan-english-daily-intake-curation": "2.1.0",
     "kaoyan-408-daily-intake-curation": "2.1.0"
   }
 }

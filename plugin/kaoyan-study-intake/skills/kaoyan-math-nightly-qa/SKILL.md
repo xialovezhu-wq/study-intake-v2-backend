@@ -36,6 +36,14 @@ If the user supplies explicit IDs, treat them as a requested subset of pending t
 
 No pending events means stop cleanly. Do not expand into historical maintenance.
 
+## Native Luna read-only preparation
+
+Read `../_shared/native-luna-parallel-contract.md`. This section governs native Codex children only and must never invoke, poll, configure, or inspect the separate preprocessing consumer described below.
+
+After the authoritative target set and exact freeze are complete, Sol may split two or more grouped formal targets into disjoint frozen evidence groups and assign one `explorer` Luna Max Fast leaf per group. Each child may check only immutable fact preservation, source/hash completeness, schema consistency, and explicit missing evidence; it returns a read-only proposal with target IDs, frozen hashes, findings, conflicts, and `write_attempted=false`. It may not decide identity, allocate a formal ID, judge relationships, edit Wiki or cards, invoke repository scripts, or touch ledgers and receipts.
+
+Wait for every group at one barrier. Sol reopens the canonical evidence, resolves all semantic and relationship judgments, and performs every formal-card, rollback, rebuild, relationship, Wiki, ledger, and receipt operation serially. More groups than available slots continue in waves; there is no Skill-level fixed count, but there is always one formal writer.
+
 ## Pre-write Freeze
 
 Read `数学一回滚复习系统/schema/quick_intake_events.md`, then complete the read-only identity plan before touching any formal or derived file. Use `apply_patch` to create one compact JSON file under `/private/tmp`, then run:

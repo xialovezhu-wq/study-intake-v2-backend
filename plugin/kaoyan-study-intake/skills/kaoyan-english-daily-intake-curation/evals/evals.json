@@ -1,0 +1,42 @@
+{
+  "skill_name": "kaoyan-english-daily-intake-curation",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "开始 2026-08-05 英语正式入库",
+      "expected_output": "Freezes only 2026-08-05 Luna candidates, produces schema-valid typed Sol actions, dry-runs and applies safe actions through the deterministic writer with the frozen batch authorization, then reports receipts without asking for a second confirmation.",
+      "files": [],
+      "expectations": [
+        "Uses the exact requested date and does not substitute today or another date.",
+        "Requires Luna candidates with formal_writeback=none and validation PASS; accepts confirmed or requested_unverified runtime status while preserving requested/observed/provenance, and blocks mismatch or unavailable.",
+        "If captures lack Luna coverage, calls the deployed English worker run-once exactly once, refreezes once, and reports remaining gaps as needs_preprocess rather than NOOP.",
+        "Sol emits only typed actions and never directly edits formal files.",
+        "Runs deterministic writer dry-run, then applies safe actions with authorization equal to batch_id without a second confirmation."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "开始 2026-08-04 英语正式入库",
+      "expected_output": "Applies independently safe items for the exact date while isolating an ambiguous duplicate or mastery proposal as needs_user, preserving safe receipts and reporting PARTIAL.",
+      "files": [],
+      "expectations": [
+        "Requires the exact independent_correct_use evidence enum and does not convert guided understanding or self-reported familiarity into mastered_insert.",
+        "Keeps ambiguous items outside writer actions with status needs_user.",
+        "Does not discard or re-confirm safe actions because another item is ambiguous.",
+        "Reports PARTIAL and asks only for the smallest decision affecting unresolved items."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "以后每天晚上自动帮我正式入库今天英语，今晚先开始吧",
+      "expected_output": "Does not trigger the skill, freeze a date, create a schedule or treat the message as standing authorization; it requests the one exact dated command only if formal curation is desired.",
+      "files": [],
+      "expectations": [
+        "Rejects non-exact trigger wording and relative dates.",
+        "Does not freeze candidates or call apply-nightly.",
+        "Does not create an automatic timer or standing authorization.",
+        "States the required format 开始 YYYY-MM-DD 英语正式入库."
+      ]
+    }
+  ]
+}
