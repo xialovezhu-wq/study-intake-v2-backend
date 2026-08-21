@@ -91,9 +91,13 @@ python3 scripts/release_manager.py build \
   --release-base /absolute/path/to/runtime-root \
   --runtime-data-root /absolute/path/to/runtime-root \
   --formal-config /absolute/path/to/formal-surface-config.json \
-  --formal-baseline /absolute/path/to/formal-surface-baseline.json \
-  --historical-test-input-manifest /absolute/path/to/sha256.json
+  --formal-baseline /absolute/path/to/formal-surface-baseline.json
 ```
+
+The default build test lane uses only repository-owned synthetic fixtures.
+When an exact historical evidence lane is separately authorized, add
+`--historical-test-input-manifest /absolute/path/to/sha256.json`; that optional
+manifest never replaces the paired production formal config and baseline.
 
 The rollback artifact for the currently active legacy monolith must be derived
 from that exact release rather than rebuilt from mutable staging source. The

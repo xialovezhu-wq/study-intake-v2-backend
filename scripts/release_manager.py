@@ -2425,42 +2425,46 @@ def run_tests(
     environment = dict(os.environ)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment.pop("STUDY_PREPROCESSOR_RUN_REAL_RUNTIME_TESTS", None)
-    if historical_test_input_manifest is None:
-        raise ReleaseError("historical_test_input_manifest_required")
-    historical_input = historical_test_input_manifest.expanduser()
-    if (
-        not historical_input.is_absolute()
-        or historical_input.is_symlink()
-        or not historical_input.is_file()
-        or historical_input.stat().st_mode & 0o222
-    ):
-        raise ReleaseError("historical_test_input_manifest_invalid")
-    historical_input = historical_input.resolve()
-    historical_input_sha256 = sha256_file(historical_input)
-    if historical_input.name != f"{historical_input_sha256}.json":
-        raise ReleaseError("historical_test_input_manifest_not_content_addressed")
-    verifier = subprocess.run(
-        [
-            sys.executable,
-            str(source_root / "scripts/historical_test_input.py"),
-            "verify",
-            "--manifest",
-            str(historical_input),
-        ],
-        cwd=source_root,
-        env=environment,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if verifier.returncode != 0:
-        raise ReleaseError("historical_test_input_manifest_verification_failed")
-    environment["STUDY_PREPROCESSOR_HISTORICAL_TEST_INPUT_MANIFEST"] = str(
-        historical_input
-    )
-    environment["STUDY_INTAKE_FIXTURE_EXECUTION"] = "1"
+    historical_input_sha256: str | None = None
+    if historical_test_input_manifest is not None:
+        historical_input = historical_test_input_manifest.expanduser()
+        if (
+            not historical_input.is_absolute()
+            or historical_input.is_symlink()
+            or not historical_input.is_file()
+            or historical_input.stat().st_mode & 0o222
+        ):
+            raise ReleaseError("historical_test_input_manifest_invalid")
+        historical_input = historical_input.resolve()
+        historical_input_sha256 = sha256_file(historical_input)
+        if historical_input.name != f"{historical_input_sha256}.json":
+            raise ReleaseError(
+                "historical_test_input_manifest_not_content_addressed"
+            )
+        verifier = subprocess.run(
+            [
+                sys.executable,
+                str(source_root / "scripts/historical_test_input.py"),
+                "verify",
+                "--manifest",
+                str(historical_input),
+            ],
+            cwd=source_root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if verifier.returncode != 0:
+            raise ReleaseError(
+                "historical_test_input_manifest_verification_failed"
+            )
+        environment[
+            "STUDY_PREPROCESSOR_HISTORICAL_TEST_INPUT_MANIFEST"
+        ] = str(historical_input)
+        environment["STUDY_INTAKE_FIXTURE_EXECUTION"] = "1"
     legacy_parity_fixture = source_root / LEGACY_PARITY_FIXTURE
     if legacy_parity_fixture.is_file() and not legacy_parity_fixture.is_symlink():
         environment[LEGACY_PARITY_CONFIG_ENV] = str(legacy_parity_fixture)
@@ -2521,6 +2525,7 @@ def verify_formal_surfaces(
     *,
     config_path: Path,
     baseline_path: Path,
+    config_bindings: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the independent content manifest verifier and bind its hashes.
 
@@ -2561,6 +2566,16 @@ def verify_formal_surfaces(
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ReleaseError("formal_surface_config_invalid") from exc
+    if config_bindings is not None:
+        if set(config_bindings) != set(CONFIG_BINDING_MARKERS):
+            raise ReleaseError("formal_surface_config_binding_mismatch")
+        release_template = substitute(
+            release_template,
+            {
+                CONFIG_BINDING_MARKERS[key]: str(value)
+                for key, value in config_bindings.items()
+            },
+        )
     guard_adapters = guard_config.get("adapters")
     template_adapters = release_template.get("adapters")
     if not isinstance(guard_adapters, Mapping) or not isinstance(
@@ -2692,7 +2707,7 @@ def _prepare_staging_generated_files(
     *,
     hashes: Mapping[str, str],
     modes: Mapping[str, int],
-    verification_root: Path,
+    verification_root: Path | None,
     config_bindings: Mapping[str, str],
 ) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, str]]:
     holder = tempfile.TemporaryDirectory(prefix="study-intake-generated-")
@@ -2712,23 +2727,24 @@ def _prepare_staging_generated_files(
     )
     if not generator.is_file():
         return holder, prepared, {}
+    command = [
+        sys.executable,
+        str(generator),
+        "--math-root",
+        config_bindings["math_root"],
+        "--cs408-root",
+        config_bindings["cs408_root"],
+        "--english-root",
+        config_bindings["english_root"],
+        "--mcp-root",
+        config_bindings["mcp_root"],
+        "--mcp-python-executable",
+        config_bindings["mcp_python_executable"],
+    ]
+    if verification_root is not None:
+        command[2:2] = ["--verification-root", str(verification_root)]
     completed = subprocess.run(
-        [
-            sys.executable,
-            str(generator),
-            "--verification-root",
-            str(verification_root),
-            "--math-root",
-            config_bindings["math_root"],
-            "--cs408-root",
-            config_bindings["cs408_root"],
-            "--english-root",
-            config_bindings["english_root"],
-            "--mcp-root",
-            config_bindings["mcp_root"],
-            "--mcp-python-executable",
-            config_bindings["mcp_python_executable"],
-        ],
+        command,
         cwd=generator.parents[1],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -2737,6 +2753,7 @@ def _prepare_staging_generated_files(
         check=False,
     )
     if completed.returncode != 0:
+        holder.cleanup()
         raise ReleaseError("release_component_generator_failed")
     for relative, expected in hashes.items():
         path = prepared / relative
@@ -3632,8 +3649,12 @@ def build_release(
             raise ReleaseError("concurrent_target_component_inventory_required")
     if (formal_config is None) != (formal_baseline is None):
         raise ReleaseError("formal_surface_gate_arguments_incomplete")
-    if not skip_tests and historical_test_input_manifest is None:
-        raise ReleaseError("historical_test_input_manifest_required")
+    if (
+        release_profile == "concurrent_v2"
+        and not skip_tests
+        and formal_config is None
+    ):
+        raise ReleaseError("formal_surface_gate_required")
     try:
         config_template = json.loads(
             (source_root / "config.example.json").read_text(encoding="utf-8")
@@ -3667,18 +3688,24 @@ def build_release(
     if (
         release_profile == "concurrent_v2"
         and plugin_generator.is_file()
-        and fixture is None
+        and not normalized_config_bindings
     ):
-        raise ReleaseError("historical_test_input_manifest_required")
+        raise ReleaseError("release_config_bindings_required")
     test_results = (
         _not_run_test_results()
         if skip_tests
         else run_tests(source_root, historical_test_input_manifest)
     )
-    if fixture is not None:
-        test_results["formal_surface_gate"] = verify_fixture_formal_surfaces(
+    if formal_config is not None and formal_baseline is not None:
+        test_results["formal_surface_gate"] = verify_formal_surfaces(
             source_root,
-            historical_test_input_manifest=historical_test_input_manifest,
+            config_path=formal_config,
+            baseline_path=formal_baseline,
+            config_bindings=(
+                normalized_config_bindings
+                if normalized_config_bindings
+                else None
+            ),
         )
     hashes = source_hashes(source_root)
     modes = source_modes(source_root)
@@ -3690,13 +3717,15 @@ def build_release(
     generated_holder: tempfile.TemporaryDirectory[str] | None = None
     generated_root: Path | None = None
     staging_generated: dict[str, str] = {}
-    if fixture is not None and plugin_generator.is_file():
+    if plugin_generator.is_file():
         generated_holder, generated_root, staging_generated = (
             _prepare_staging_generated_files(
                 source_root,
                 hashes=hashes,
                 modes=modes,
-                verification_root=fixture.verification_root,
+                verification_root=(
+                    fixture.verification_root if fixture is not None else None
+                ),
                 config_bindings=normalized_config_bindings,
             )
         )
@@ -3748,6 +3777,10 @@ def build_release(
                 target.chmod(SEALED_GENERATED_MODE)
                 if sha256_file(target) != expected:
                     raise ReleaseError("release_generated_staging_drift")
+        if generated_holder is not None:
+            generated_holder.cleanup()
+            generated_holder = None
+            generated_root = None
 
         template_path = staging / "config.example.json"
         template = json.loads(template_path.read_text(encoding="utf-8"))
@@ -3845,6 +3878,8 @@ def build_release(
             verify_live_runtime_bindings=False,
         )
     except Exception:
+        if generated_holder is not None:
+            generated_holder.cleanup()
         cleanup = destination if published else staging
         if cleanup.exists() and cleanup.parent == releases:
             _make_tree_removable(cleanup)

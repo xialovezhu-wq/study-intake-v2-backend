@@ -2406,7 +2406,7 @@ class ReleaseManagerTests(unittest.TestCase):
             ),
             mock.patch.object(
                 release,
-                "verify_fixture_formal_surfaces",
+                "verify_formal_surfaces",
                 return_value=self.passed_formal_gate(),
             ),
             mock.patch.object(
@@ -2420,10 +2420,67 @@ class ReleaseManagerTests(unittest.TestCase):
                 release_base=self.release_base,
                 runtime_data_root=self.runtime_data,
                 skip_tests=False,
+                formal_config=self.base / "formal-config.json",
+                formal_baseline=self.base / "formal-baseline.json",
                 historical_test_input_manifest=(
                     self.base / "historical-fixture.json"
                 ),
             )
+
+    def test_default_test_lane_uses_no_historical_manifest(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [sys.executable, "-m", "unittest"],
+            0,
+            "Ran 1 test in 0.001s\n\nOK\n",
+            "",
+        )
+        with mock.patch.object(
+            release, "_run_test_suite", return_value=completed
+        ) as run_suite:
+            result = release.run_tests(self.source)
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(
+            [row["historical_test_input_manifest_sha256"] for row in result["suites"]],
+            [None, None],
+        )
+        for call in run_suite.call_args_list:
+            environment = call.kwargs["environment"]
+            self.assertNotIn(
+                "STUDY_PREPROCESSOR_HISTORICAL_TEST_INPUT_MANIFEST",
+                environment,
+            )
+            self.assertNotIn("STUDY_INTAKE_FIXTURE_EXECUTION", environment)
+
+    def test_non_skipped_build_consumes_formal_config_and_baseline(self) -> None:
+        formal_config = self.base / "formal-config.json"
+        formal_baseline = self.base / "formal-baseline.json"
+        with (
+            mock.patch.object(
+                release, "run_tests", return_value=self.passed_test_results()
+            ),
+            mock.patch.object(
+                release,
+                "verify_formal_surfaces",
+                return_value=self.passed_formal_gate(),
+            ) as verify_formal,
+        ):
+            built = release.build_release(
+                source_root=self.source,
+                release_base=self.release_base,
+                runtime_data_root=self.runtime_data,
+                skip_tests=False,
+                formal_config=formal_config,
+                formal_baseline=formal_baseline,
+            )
+
+        self.assertEqual(built["test_results"]["formal_surface_gate"]["status"], "passed")
+        verify_formal.assert_called_once_with(
+            self.source.resolve(),
+            config_path=formal_config,
+            baseline_path=formal_baseline,
+            config_bindings=None,
+        )
 
     def build_pre_target_runtime_release(self, *, passed: bool = True) -> dict:
         legacy_schema = self.source / "schemas" / "preprocess-package-v2.json"
@@ -3780,9 +3837,23 @@ if a.command == 'run-once':
         generator = plugin / "generate_manifests.py"
         generator.write_text("raise SystemExit(7)\n", encoding="utf-8")
         with self.assertRaisesRegex(
-            release.ReleaseError, "historical_test_input_manifest_required"
+            release.ReleaseError, "release_component_generator_failed"
         ):
-            self.build()
+            release.build_release(
+                source_root=self.source,
+                release_base=self.release_base,
+                runtime_data_root=self.runtime_data,
+                skip_tests=True,
+                config_bindings={
+                    "math_root": self.portable_fixture.subject_roots["math"],
+                    "cs408_root": self.portable_fixture.subject_roots["cs408"],
+                    "english_root": self.portable_fixture.subject_roots["english"],
+                    "mcp_root": self.portable_fixture.mcp_root,
+                    "python_executable": Path(sys.executable),
+                    "mcp_python_executable": self.portable_fixture.mcp_python,
+                    "codex_executable": Path("/usr/bin/true"),
+                },
+            )
 
     def test_release_tree_is_sealed_read_only(self) -> None:
         built = self.build()
@@ -4386,31 +4457,27 @@ if a.command == 'run-once':
         self.assertLess(max(drain_positions), min(post_drain_bootouts))
 
     def test_release_contains_four_launchagent_templates(self) -> None:
-        with self.assertRaisesRegex(
-            release.ReleaseError, "historical_test_input_manifest_required"
-        ):
-            release.build_release(
-                source_root=ROOT,
-                release_base=self.base / "full-release-base",
-                runtime_data_root=self.runtime_data,
-                skip_tests=True,
-                config_bindings={
-                    "math_root": self.portable_fixture.subject_roots["math"],
-                    "cs408_root": self.portable_fixture.subject_roots["cs408"],
-                    "english_root": self.portable_fixture.subject_roots[
-                        "english"
-                    ],
-                    "mcp_root": self.portable_fixture.mcp_root,
-                    "python_executable": Path(sys.executable),
-                    "mcp_python_executable": self.portable_fixture.mcp_python,
-                    "codex_executable": Path("/usr/bin/true"),
-                },
-            )
+        full = release.build_release(
+            source_root=ROOT,
+            release_base=self.base / "full-release-base",
+            runtime_data_root=self.runtime_data,
+            skip_tests=True,
+            config_bindings={
+                "math_root": self.portable_fixture.subject_roots["math"],
+                "cs408_root": self.portable_fixture.subject_roots["cs408"],
+                "english_root": self.portable_fixture.subject_roots[
+                    "english"
+                ],
+                "mcp_root": self.portable_fixture.mcp_root,
+                "python_executable": Path(sys.executable),
+                "mcp_python_executable": self.portable_fixture.mcp_python,
+                "codex_executable": Path("/usr/bin/true"),
+            },
+        )
         self.assertEqual(len(release.CONCURRENT_TOPOLOGY), 4)
         self.assertTrue(
             all((ROOT / row["template"]).is_file() for row in release.CONCURRENT_TOPOLOGY)
         )
-        return
         released_root = Path(full["release_dir"])
         released_config = json.loads(
             (released_root / "config.json").read_text(encoding="utf-8")
@@ -4621,7 +4688,7 @@ LIVE_CONFIG = Path(
                 operation="activate",
             )
         with self.assertRaisesRegex(
-            release.ReleaseError, "historical_test_input_manifest_required"
+            release.ReleaseError, "formal_surface_gate_required"
         ):
             release.build_release(
                 source_root=self.source,
