@@ -111,6 +111,11 @@ class Phase3ModelStageDriverTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
 
+    def test_analysis_package_uses_tolerant_raw_json_before_strict_canonical_report(self) -> None:
+        source = inspect.getsource(CodexRunner.run_analysis_package_v1)
+        self.assertIn("enforce_output_schema=False", source)
+        self.assertIn("AnalysisPackageDriver", source)
+
     def test_live_mode_routes_to_analysis_package_driver(self) -> None:
         self.runner.config.update(
             {

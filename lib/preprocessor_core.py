@@ -21255,6 +21255,7 @@ class CodexRunner:
         allow_empty_predeclared_evidence_refs: bool = False,
         math_source_bundle_formalization_mode: bool = False,
         model_role: str | None = None,
+        enforce_output_schema: bool = True,
     ) -> StructuredStageResult:
         codex_path = Path(str(self.config["codex_path"]))
         if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
@@ -21438,6 +21439,11 @@ class CodexRunner:
                 )
             else:
                 mcp_config_args = []
+            output_schema_args = (
+                ["--output-schema", str(schema_path)]
+                if enforce_output_schema
+                else []
+            )
             command = [
                 str(codex_path),
                 "exec",
@@ -21466,8 +21472,7 @@ class CodexRunner:
                 "--config",
                 'web_search="disabled"',
                 *mcp_config_args,
-                "--output-schema",
-                str(schema_path),
+                *output_schema_args,
                 "--output-last-message",
                 str(output_path),
                 "--json",
@@ -21724,7 +21729,19 @@ class CodexRunner:
                 )
                 raise PreprocessorError(error_code, diagnostic=diagnostic)
             size = len(raw_output)
-            if size > max_output_bytes:
+            raw_boundary_warnings: list[dict[str, Any]] = []
+            payload: Any = None
+            if size > max_output_bytes and not enforce_output_schema:
+                error_code = f"{stage_name}_output_too_large"
+                payload = {"warnings": [error_code]}
+                raw_boundary_warnings.append(
+                    {
+                        "code": error_code,
+                        "stage": stage_name,
+                        "kind": "raw_report_normalization_incomplete",
+                    }
+                )
+            if size > max_output_bytes and enforce_output_schema:
                 error_code = f"{stage_name}_output_too_large"
                 normalization_refs = (
                     self._publish_failed_model_stage_normalization(
@@ -21754,65 +21771,86 @@ class CodexRunner:
                     diagnostic=diagnostic,
                 )
             try:
-                payload = json.loads(raw_output.decode("utf-8"))
+                if payload is None:
+                    payload = json.loads(raw_output.decode("utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 error_code = f"{stage_name}_output_invalid_json"
-                normalization_refs = (
-                    self._publish_failed_model_stage_normalization(
-                        stage_name=stage_name,
-                        raw_refs=raw_refs,
-                        execution_refs=execution_refs,
-                        error_code=error_code,
+                if not enforce_output_schema:
+                    payload = {"warnings": [error_code]}
+                    raw_boundary_warnings.append(
+                        {
+                            "code": error_code,
+                            "stage": stage_name,
+                            "kind": "raw_report_normalization_incomplete",
+                        }
                     )
-                )
-                diagnostic = self._sign_mcp_stage_failure(
-                    stage_name=stage_name,
-                    subject=str(subject),
-                    processing_context=processing_context,
-                    transport_sha256=str(
-                        transport_sha256
-                        or hashlib.sha256(b"").hexdigest()
-                    ),
-                    error_code=error_code,
-                    calls=mcp_calls,
-                    transcript_sha256=mcp_transcript_sha256,
-                )
-                diagnostic.update(raw_refs)
-                diagnostic.update(execution_refs)
-                diagnostic.update(normalization_refs)
-                raise PreprocessorError(
-                    error_code,
-                    diagnostic=diagnostic,
-                ) from exc
+                else:
+                    normalization_refs = (
+                        self._publish_failed_model_stage_normalization(
+                            stage_name=stage_name,
+                            raw_refs=raw_refs,
+                            execution_refs=execution_refs,
+                            error_code=error_code,
+                        )
+                    )
+                    diagnostic = self._sign_mcp_stage_failure(
+                        stage_name=stage_name,
+                        subject=str(subject),
+                        processing_context=processing_context,
+                        transport_sha256=str(
+                            transport_sha256
+                            or hashlib.sha256(b"").hexdigest()
+                        ),
+                        error_code=error_code,
+                        calls=mcp_calls,
+                        transcript_sha256=mcp_transcript_sha256,
+                    )
+                    diagnostic.update(raw_refs)
+                    diagnostic.update(execution_refs)
+                    diagnostic.update(normalization_refs)
+                    raise PreprocessorError(
+                        error_code,
+                        diagnostic=diagnostic,
+                    ) from exc
             if not isinstance(payload, dict):
                 error_code = f"{stage_name}_output_not_object"
-                normalization_refs = (
-                    self._publish_failed_model_stage_normalization(
-                        stage_name=stage_name,
-                        raw_refs=raw_refs,
-                        execution_refs=execution_refs,
-                        error_code=error_code,
+                if not enforce_output_schema:
+                    payload = {"warnings": [error_code]}
+                    raw_boundary_warnings.append(
+                        {
+                            "code": error_code,
+                            "stage": stage_name,
+                            "kind": "raw_report_normalization_incomplete",
+                        }
                     )
-                )
-                diagnostic = self._sign_mcp_stage_failure(
-                    stage_name=stage_name,
-                    subject=str(subject),
-                    processing_context=processing_context,
-                    transport_sha256=str(
-                        transport_sha256
-                        or hashlib.sha256(b"").hexdigest()
-                    ),
-                    error_code=error_code,
-                    calls=mcp_calls,
-                    transcript_sha256=mcp_transcript_sha256,
-                )
-                diagnostic.update(raw_refs)
-                diagnostic.update(execution_refs)
-                diagnostic.update(normalization_refs)
-                raise PreprocessorError(
-                    error_code,
-                    diagnostic=diagnostic,
-                )
+                else:
+                    normalization_refs = (
+                        self._publish_failed_model_stage_normalization(
+                            stage_name=stage_name,
+                            raw_refs=raw_refs,
+                            execution_refs=execution_refs,
+                            error_code=error_code,
+                        )
+                    )
+                    diagnostic = self._sign_mcp_stage_failure(
+                        stage_name=stage_name,
+                        subject=str(subject),
+                        processing_context=processing_context,
+                        transport_sha256=str(
+                            transport_sha256
+                            or hashlib.sha256(b"").hexdigest()
+                        ),
+                        error_code=error_code,
+                        calls=mcp_calls,
+                        transcript_sha256=mcp_transcript_sha256,
+                    )
+                    diagnostic.update(raw_refs)
+                    diagnostic.update(execution_refs)
+                    diagnostic.update(normalization_refs)
+                    raise PreprocessorError(
+                        error_code,
+                        diagnostic=diagnostic,
+                    )
             runtime_model, runtime_effort, provenance = self._runtime_metadata(
                 completed.stderr, completed.stdout
             )
@@ -22069,6 +22107,13 @@ class CodexRunner:
                 ),
                 mcp_calls=mcp_calls,
                 stage_name=stage_name,
+                normalization_status=(
+                    "normalized_with_warnings"
+                    if raw_boundary_warnings
+                    else "normalized"
+                ),
+                normalization_warning_count=len(raw_boundary_warnings),
+                normalization_warnings=tuple(raw_boundary_warnings),
             )
             if review_policy_violation is not None:
                 warning = {
@@ -25075,8 +25120,9 @@ class CodexRunner:
             ],
         }
         return (
-            "Produce exactly one Study Intake V2 analysis-stage report matching "
-            "the supplied JSON Schema.\n"
+            "Produce exactly one JSON object for the Study Intake V2 raw "
+            "analysis-stage boundary. Missing advisory fields are preserved "
+            "as normalization warnings by the Host.\n"
             + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
         )
 
@@ -25134,11 +25180,18 @@ class CodexRunner:
         def execute_stage(
             stage: str, model: str, stage_input: Mapping[str, Any]
         ) -> Mapping[str, Any]:
+            canonical_prior_reports = {
+                str(row["stage"]): copy.deepcopy(dict(row["report"]))
+                for row in stage_input.get("prior_reports", [])
+                if isinstance(row, Mapping)
+                and isinstance(row.get("stage"), str)
+                and isinstance(row.get("report"), Mapping)
+            }
             prompt = self._analysis_package_prompt(
                 candidate=candidate,
                 stage=stage,
                 stage_input=stage_input,
-                prior_reports=prior_reports,
+                prior_reports=canonical_prior_reports,
                 processing_context=processing_context,
             )
             result = self._execute_prompt(
@@ -25154,6 +25207,7 @@ class CodexRunner:
                 subject=candidate.subject,
                 processing_context=processing_context,
                 model_role=role_names[stage],
+                enforce_output_schema=False,
             )
             prompt_version = f"analysis-package-{stage}-v1"
             receipt = self._stage_receipt(
@@ -25165,7 +25219,9 @@ class CodexRunner:
                 processing_context=processing_context,
                 requested_model=model,
                 requested_reasoning_effort="max",
+                normalization_warnings=result.normalization_warnings,
             )
+            receipt["provider_output_mode"] = "tolerant_json_object"
             prior_reports[stage] = copy.deepcopy(result.payload)
             semantic_receipts[stage] = copy.deepcopy(receipt)
             stage_results[stage] = result

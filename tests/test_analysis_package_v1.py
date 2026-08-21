@@ -24,6 +24,9 @@ from analysis_package_v1 import (  # noqa: E402
 def executor(stage: str, model: str, stage_input: dict) -> dict:
     subject = stage_input["subject"]
     capture_id = stage_input["capture_id"]
+    raw_sha = sha256_value(
+        {"stage": stage, "stage_input": stage_input, "raw": "synthetic"}
+    )
     return {
         "report": {
             "schema_version": REPORT_SCHEMA,
@@ -55,6 +58,10 @@ def executor(stage: str, model: str, stage_input: dict) -> dict:
             "schema_version": "synthetic-analysis-stage-receipt-v1",
             "stage": stage,
             "input_sha256": sha256_value(stage_input),
+            "raw_output_object_sha256": raw_sha,
+            "raw_output_object_ref": (
+                "study-intake-direct-model-stage-raw://sha256/" + raw_sha
+            ),
             "formal_write_count": 0,
         },
     }
@@ -138,6 +145,62 @@ class AnalysisPackageV1Tests(unittest.TestCase):
             ).run(capture)
             self.assertEqual(len(package["warnings"]), 3)
             self.assertEqual(package["status"], "ready_for_nightly")
+
+    def test_missing_optional_model_fields_normalize_to_warning_and_remain_ready(self) -> None:
+        def incomplete(stage: str, model: str, stage_input: dict) -> dict:
+            result = executor(stage, model, stage_input)
+            if stage == "terra_analysis":
+                result["report"] = {
+                    "summary": "durable but structurally incomplete",
+                    "evidence_refs": result["report"]["evidence_refs"],
+                }
+            elif stage == "luna_analysis":
+                result["report"]["proposals"] = "malformed"
+                result["report"]["warnings"] = ["luna_quality_warning", 1]
+            return result
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = AnalysisPackageStore(Path(folder))
+            package = AnalysisPackageDriver(store, incomplete).run(
+                build_durable_capture(
+                    capture_id="CAP-EN-NORMALIZE-001",
+                    subject="english",
+                    study_date="2026-08-20",
+                    captured_at="2026-08-21T10:00:00+08:00",
+                    payload={"synthetic": True},
+                    source_kind="synthetic",
+                )
+            )
+            self.assertEqual(package["status"], "ready_for_nightly")
+            self.assertTrue(
+                any("normalization" in warning for warning in package["warnings"])
+            )
+            self.assertEqual(package["stages"][0]["normalization_status"], "incomplete")
+            self.assertTrue(package["stages"][0]["raw_output_ref"])
+            self.assertTrue(package["stages"][0]["execution_receipt_ref"])
+
+    def test_missing_raw_output_binding_is_retryable_technical_failure(self) -> None:
+        def missing_raw(stage: str, model: str, stage_input: dict) -> dict:
+            result = executor(stage, model, stage_input)
+            result["receipt"].pop("raw_output_object_sha256")
+            result["receipt"].pop("raw_output_object_ref")
+            return result
+
+        with tempfile.TemporaryDirectory() as folder:
+            capture = build_durable_capture(
+                capture_id="CAP-RAW-MISSING-001",
+                subject="math",
+                study_date="2026-08-21",
+                captured_at="2026-08-21T10:00:00+08:00",
+                payload={"synthetic": True},
+                source_kind="synthetic",
+            )
+            with self.assertRaisesRegex(
+                AnalysisPackageError, "analysis_stage_raw_output_sha256_invalid"
+            ):
+                AnalysisPackageDriver(
+                    AnalysisPackageStore(Path(folder)), missing_raw
+                ).run(capture)
 
     def test_naive_timestamp_and_runtime_or_evidence_drift_fail_closed(self) -> None:
         with self.assertRaisesRegex(AnalysisPackageError, "captured_at_timezone_missing"):

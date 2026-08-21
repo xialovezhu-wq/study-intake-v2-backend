@@ -102,7 +102,7 @@
   },
   "analysis_package_v1": {
     "enabled": true,
-    "stage_output_schema": "${RELEASE_ROOT}/schemas/analysis-stage-report-v1.json",
+    "stage_output_schema": "${RELEASE_ROOT}/schemas/analysis-stage-report-v2.json",
     "max_prompt_bytes": 262144,
     "max_output_bytes": 262144
   },

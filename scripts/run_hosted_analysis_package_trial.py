@@ -269,7 +269,7 @@ def run_trial(*, codex_path: Path, mcp_python: Path) -> dict[str, Any]:
                 "analysis_package_v1": {
                     "enabled": True,
                     "stage_output_schema": str(
-                        ROOT / "schemas/analysis-stage-report-v1.json"
+                        ROOT / "schemas/analysis-stage-report-v2.json"
                     ),
                     "max_prompt_bytes": 262144,
                     "max_output_bytes": 262144,

@@ -20,7 +20,11 @@ from zoneinfo import ZoneInfo
 
 
 CAPTURE_SCHEMA = "study-intake-durable-capture-v1"
-REPORT_SCHEMA = "study-intake-analysis-stage-report-v1"
+REPORT_SCHEMA = "study-intake-analysis-stage-report-v2"
+EXECUTION_RECEIPT_SCHEMA = "study-intake-analysis-stage-execution-receipt-v1"
+NORMALIZATION_RECEIPT_SCHEMA = (
+    "study-intake-analysis-stage-normalization-receipt-v1"
+)
 PACKAGE_SCHEMA = "study-intake-analysis-package-v1"
 SUBJECTS = ("math", "cs408", "english")
 SOURCE_KINDS = ("canonical", "synthetic")
@@ -156,7 +160,7 @@ def validate_stage_report(
     required = {
         "schema_version", "stage", "subject", "capture_id", "summary",
         "proposals", "duplicate_candidates", "warnings", "evidence_refs",
-        "formal_write_count",
+        "normalization_status", "formal_write_count",
     }
     if not isinstance(value, Mapping) or set(value) != required:
         raise AnalysisPackageError("analysis_report_shape_invalid")
@@ -165,6 +169,7 @@ def validate_stage_report(
         or value.get("stage") != stage
         or value.get("subject") != subject
         or value.get("capture_id") != capture_id
+        or value.get("normalization_status") not in {"complete", "incomplete"}
         or value.get("formal_write_count") != 0
     ):
         raise AnalysisPackageError("analysis_report_binding_invalid")
@@ -213,14 +218,176 @@ def validate_stage_report(
         not isinstance(refs, list)
         or not refs
         or len(refs) != len(set(refs))
-        or any(
-            not isinstance(ref, str)
-            or not ref.startswith(f"mcp-item:{subject}:")
-            for ref in refs
-        )
+        or any(not _valid_evidence_ref(ref, subject=subject) for ref in refs)
     ):
         raise AnalysisPackageError("analysis_report_evidence_invalid")
     return copy.deepcopy(dict(value))
+
+
+def _valid_evidence_ref(value: Any, *, subject: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    if value.startswith(f"mcp-item:{subject}:"):
+        return True
+    prefixes = (
+        "study-intake-durable-capture://sha256/",
+        "study-intake-analysis-stage-execution-receipt://sha256/",
+        "study-intake-model-stage-raw-output://sha256/",
+        "study-intake-direct-model-stage-raw://sha256/",
+    )
+    return any(
+        value.startswith(prefix)
+        and SHA256_RE.fullmatch(value[len(prefix):]) is not None
+        for prefix in prefixes
+    )
+
+
+def _valid_proposal(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and set(value)
+        == {"kind", "summary", "target_hint", "field_hints", "evidence_refs"}
+        and isinstance(value.get("kind"), str)
+        and value.get("kind")
+        and isinstance(value.get("summary"), str)
+        and value.get("summary")
+        and (
+            value.get("target_hint") is None
+            or isinstance(value.get("target_hint"), str)
+        )
+        and isinstance(value.get("field_hints"), list)
+        and all(isinstance(item, str) for item in value["field_hints"])
+        and isinstance(value.get("evidence_refs"), list)
+        and all(isinstance(item, str) for item in value["evidence_refs"])
+    )
+
+
+def _valid_duplicate(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and set(value) == {"candidate_id", "reason", "evidence_refs"}
+        and isinstance(value.get("candidate_id"), str)
+        and value.get("candidate_id")
+        and isinstance(value.get("reason"), str)
+        and value.get("reason")
+        and isinstance(value.get("evidence_refs"), list)
+        and all(isinstance(item, str) for item in value["evidence_refs"])
+    )
+
+
+def normalize_stage_report(
+    value: Any,
+    *,
+    subject: str,
+    capture_id: str,
+    stage: str,
+    fallback_evidence_refs: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    """Normalize fallible model JSON into one strict canonical report.
+
+    Unusable advisory fields become safe empty structures.  No learning fact
+    is synthesized; nightly Sol can reopen the durable raw output and the
+    execution receipt from the package stage row.
+    """
+
+    raw = dict(value) if isinstance(value, Mapping) else {}
+    normalization_warnings: list[str] = []
+    expected_bindings = {
+        "schema_version": REPORT_SCHEMA,
+        "stage": stage,
+        "subject": subject,
+        "capture_id": capture_id,
+        "formal_write_count": 0,
+    }
+    if any(raw.get(key) != expected for key, expected in expected_bindings.items()):
+        normalization_warnings.append("analysis_normalization_binding_repaired")
+
+    summary = raw.get("summary")
+    if not isinstance(summary, str) or not summary.strip() or len(summary) > 16_000:
+        summary = (
+            "Normalization incomplete; inspect the durable raw output and "
+            "execution receipt references."
+        )
+        normalization_warnings.append("analysis_normalization_summary_unusable")
+
+    raw_proposals = raw.get("proposals")
+    proposals = (
+        [copy.deepcopy(dict(item)) for item in raw_proposals if _valid_proposal(item)]
+        if isinstance(raw_proposals, list)
+        else []
+    )
+    if not isinstance(raw_proposals, list) or len(proposals) != len(raw_proposals):
+        normalization_warnings.append("analysis_normalization_proposals_defaulted")
+
+    raw_duplicates = raw.get("duplicate_candidates")
+    duplicates = (
+        [copy.deepcopy(dict(item)) for item in raw_duplicates if _valid_duplicate(item)]
+        if isinstance(raw_duplicates, list)
+        else []
+    )
+    if not isinstance(raw_duplicates, list) or len(duplicates) != len(raw_duplicates):
+        normalization_warnings.append(
+            "analysis_normalization_duplicate_candidates_defaulted"
+        )
+
+    raw_warnings = raw.get("warnings")
+    warnings = (
+        [item for item in raw_warnings if isinstance(item, str) and item]
+        if isinstance(raw_warnings, list)
+        else []
+    )
+    if not isinstance(raw_warnings, list) or len(warnings) != len(raw_warnings):
+        normalization_warnings.append("analysis_normalization_warnings_defaulted")
+
+    raw_refs = raw.get("evidence_refs")
+    refs = (
+        list(dict.fromkeys(
+            item
+            for item in raw_refs
+            if _valid_evidence_ref(item, subject=subject)
+        ))
+        if isinstance(raw_refs, list)
+        else []
+    )
+    if not refs:
+        refs = list(dict.fromkeys(
+            item
+            for item in fallback_evidence_refs
+            if _valid_evidence_ref(item, subject=subject)
+        ))
+        normalization_warnings.append("analysis_normalization_evidence_fallback")
+    elif not isinstance(raw_refs, list) or len(refs) != len(raw_refs):
+        normalization_warnings.append("analysis_normalization_evidence_filtered")
+    if not refs:
+        raise AnalysisPackageError("analysis_report_evidence_unavailable")
+
+    allowed_keys = {
+        *expected_bindings,
+        "summary", "proposals", "duplicate_candidates", "warnings",
+        "evidence_refs", "normalization_status",
+    }
+    if set(raw) - allowed_keys:
+        normalization_warnings.append("analysis_normalization_unknown_fields_dropped")
+
+    normalization_warnings = list(dict.fromkeys(normalization_warnings))
+    warnings = list(dict.fromkeys([*warnings, *normalization_warnings]))
+    report = {
+        **expected_bindings,
+        "summary": summary,
+        "proposals": proposals,
+        "duplicate_candidates": duplicates,
+        "warnings": warnings,
+        "evidence_refs": refs,
+        "normalization_status": (
+            "incomplete" if normalization_warnings else "complete"
+        ),
+    }
+    return (
+        validate_stage_report(
+            report, subject=subject, capture_id=capture_id, stage=stage
+        ),
+        normalization_warnings,
+    )
 
 
 def _validate_runtime(value: Mapping[str, Any], *, model: str) -> dict[str, Any]:
@@ -251,6 +418,12 @@ class AnalysisPackageStore:
         self.root = Path(root).resolve()
         self.capture_root = self.root / "dispatch/analysis-captures/sha256"
         self.report_root = self.root / "dispatch/analysis-stage-reports/sha256"
+        self.execution_receipt_root = (
+            self.root / "dispatch/analysis-stage-execution-receipts/sha256"
+        )
+        self.normalization_receipt_root = (
+            self.root / "dispatch/analysis-stage-normalization-receipts/sha256"
+        )
         self.package_root = self.root / "dispatch/analysis-packages/sha256"
         self.index_root = self.root / "dispatch/analysis-package-index"
 
@@ -292,6 +465,24 @@ class AnalysisPackageStore:
     def publish_report(self, value: Mapping[str, Any]) -> tuple[str, str]:
         return self._publish(
             self.report_root, value, "study-intake-analysis-stage-report"
+        )
+
+    def publish_execution_receipt(
+        self, value: Mapping[str, Any]
+    ) -> tuple[str, str]:
+        return self._publish(
+            self.execution_receipt_root,
+            value,
+            "study-intake-analysis-stage-execution-receipt",
+        )
+
+    def publish_normalization_receipt(
+        self, value: Mapping[str, Any]
+    ) -> tuple[str, str]:
+        return self._publish(
+            self.normalization_receipt_root,
+            value,
+            "study-intake-analysis-stage-normalization-receipt",
         )
 
     def publish_package(self, value: Mapping[str, Any]) -> tuple[str, str]:
@@ -361,18 +552,68 @@ class AnalysisPackageDriver:
                 "report", "runtime", "receipt"
             }:
                 raise AnalysisPackageError("analysis_stage_execution_invalid")
-            report = validate_stage_report(
-                execution["report"],
-                subject=checked["subject"],
-                capture_id=checked["capture_id"],
-                stage=stage,
-            )
             runtime = _validate_runtime(execution["runtime"], model=model)
             receipt = execution["receipt"]
             if not isinstance(receipt, Mapping):
                 raise AnalysisPackageError("analysis_stage_receipt_invalid")
-            report_sha, report_ref = self.store.publish_report(report)
             receipt_copy = copy.deepcopy(dict(receipt))
+            raw_sha = _sha(
+                receipt_copy.get("raw_output_object_sha256"),
+                "analysis_stage_raw_output_sha256_invalid",
+            )
+            raw_ref = receipt_copy.get("raw_output_object_ref")
+            raw_prefixes = (
+                "study-intake-model-stage-raw-output://sha256/",
+                "study-intake-direct-model-stage-raw://sha256/",
+            )
+            if (
+                not isinstance(raw_ref, str)
+                or not raw_ref
+                or not any(raw_ref.startswith(prefix) for prefix in raw_prefixes)
+                or not raw_ref.endswith("/" + raw_sha)
+                or receipt_copy.get("formal_write_count") != 0
+            ):
+                raise AnalysisPackageError("analysis_stage_raw_output_binding_invalid")
+            execution_receipt = {
+                "schema_version": EXECUTION_RECEIPT_SCHEMA,
+                "stage": stage,
+                "subject": checked["subject"],
+                "capture_id": checked["capture_id"],
+                "raw_output_sha256": raw_sha,
+                "raw_output_ref": raw_ref,
+                "executor_receipt": receipt_copy,
+                "executor_receipt_sha256": sha256_value(receipt_copy),
+                "formal_write_count": 0,
+            }
+            execution_sha, execution_ref = self.store.publish_execution_receipt(
+                execution_receipt
+            )
+            report, normalization_warnings = normalize_stage_report(
+                execution["report"],
+                subject=checked["subject"],
+                capture_id=checked["capture_id"],
+                stage=stage,
+                fallback_evidence_refs=[capture_ref, execution_ref, raw_ref],
+            )
+            report_sha, report_ref = self.store.publish_report(report)
+            normalization_receipt = {
+                "schema_version": NORMALIZATION_RECEIPT_SCHEMA,
+                "stage": stage,
+                "subject": checked["subject"],
+                "capture_id": checked["capture_id"],
+                "execution_receipt_sha256": execution_sha,
+                "execution_receipt_ref": execution_ref,
+                "raw_output_sha256": raw_sha,
+                "raw_output_ref": raw_ref,
+                "report_sha256": report_sha,
+                "report_ref": report_ref,
+                "normalization_status": report["normalization_status"],
+                "warning_codes": normalization_warnings,
+                "formal_write_count": 0,
+            }
+            normalization_sha, normalization_ref = (
+                self.store.publish_normalization_receipt(normalization_receipt)
+            )
             stage_rows.append(
                 {
                     "stage": stage,
@@ -381,6 +622,13 @@ class AnalysisPackageDriver:
                     "read_only": True,
                     "report_sha256": report_sha,
                     "report_ref": report_ref,
+                    "raw_output_sha256": raw_sha,
+                    "raw_output_ref": raw_ref,
+                    "execution_receipt_sha256": execution_sha,
+                    "execution_receipt_ref": execution_ref,
+                    "normalization_receipt_sha256": normalization_sha,
+                    "normalization_receipt_ref": normalization_ref,
+                    "normalization_status": report["normalization_status"],
                     "runtime": runtime,
                     "receipt": receipt_copy,
                     "receipt_sha256": sha256_value(receipt_copy),
@@ -388,7 +636,12 @@ class AnalysisPackageDriver:
                 }
             )
             prior_reports.append(
-                {"stage": stage, "report_sha256": report_sha, "report_ref": report_ref}
+                {
+                    "stage": stage,
+                    "report_sha256": report_sha,
+                    "report_ref": report_ref,
+                    "report": copy.deepcopy(report),
+                }
             )
             all_warnings.extend(copy.deepcopy(report["warnings"]))
         core = {
@@ -419,6 +672,7 @@ class AnalysisPackageDriver:
 __all__ = [
     "AnalysisPackageDriver", "AnalysisPackageError", "AnalysisPackageStore",
     "CAPTURE_SCHEMA", "PACKAGE_SCHEMA", "REPORT_SCHEMA", "STAGES",
-    "build_durable_capture", "capture_intake_date", "sha256_value",
+    "build_durable_capture", "capture_intake_date", "normalize_stage_report",
+    "sha256_value",
     "validate_durable_capture", "validate_stage_report",
 ]

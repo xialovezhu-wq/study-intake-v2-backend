@@ -11507,6 +11507,223 @@ class SubjectSolRuntimeStore:
             self._write_writer_locked(writer)
             return written
 
+    def admit_nightly_analysis_batch(
+        self,
+        *,
+        batch_id: str,
+        subject: str,
+        capture_intake_date: str,
+        capture_high_watermark: str,
+        scan_snapshot_sha256: str,
+        authority_generation: str,
+        authority_fingerprint: str,
+        tasks: Sequence[Mapping[str, Any]],
+        issued_at: str,
+    ) -> dict[str, Any]:
+        """Admit a ready AnalysisPackageV1 set into this control plane.
+
+        This is an alternate producer for the existing subject_luna_batch_v2
+        state, not another queue or writer platform.  The caller supplies only
+        immutable package/stage identities; this method publishes the normal
+        terminal and Sol-handoff receipts, then marks the existing subject
+        writer ready for the standard authorization, claim and fencing path.
+        """
+
+        checked_subject = _subject(subject)
+        checked_batch_id = _nonempty(batch_id, "batch_id")
+        checked_date = _nonempty(capture_intake_date, "capture_intake_date")
+        terminal_time = _timestamp(issued_at, "nightly_batch_issued_at")
+        rows: list[dict[str, Any]] = []
+        for raw in tasks:
+            task = dict(_mapping(raw, "nightly_analysis_task"))
+            required = {
+                "capture_id", "unit_sha256", "input_fingerprint",
+                "study_date", "frozen_payload_sha256",
+                "authority_snapshot_sha256", "analysis",
+                "critical_review", "package_sha256", "warning_codes",
+            }
+            if set(task) != required:
+                raise SubjectSolContractError(
+                    "nightly_analysis_task_shape_invalid"
+                )
+            capture_id = _nonempty(task.get("capture_id"), "capture_id")
+            unit_sha = _sha256(task.get("unit_sha256"), "unit_sha256")
+            input_fingerprint = _sha256(
+                task.get("input_fingerprint"), "input_fingerprint"
+            )
+            study_date = _nonempty(task.get("study_date"), "study_date")
+            frozen_payload = _sha256(
+                task.get("frozen_payload_sha256"),
+                "frozen_payload_sha256",
+            )
+            authority_snapshot = _sha256(
+                task.get("authority_snapshot_sha256"),
+                "authority_snapshot_sha256",
+            )
+            analysis = _validate_sol_handoff_stage(
+                task.get("analysis"), label="analysis"
+            )
+            critical_review = _validate_sol_handoff_stage(
+                task.get("critical_review"), label="critical_review"
+            )
+            package_sha = _sha256(
+                task.get("package_sha256"), "package_sha256"
+            )
+            warning_codes = _warning_codes(task.get("warning_codes"))
+            status = (
+                "workflow_complete_with_warnings"
+                if warning_codes
+                else "workflow_complete"
+            )
+            artifact_fields = {
+                "analysis_execution_receipt_sha256": analysis[
+                    "execution_receipt_sha256"
+                ],
+                "analysis_raw_output_sha256": analysis[
+                    "raw_output_sha256"
+                ],
+                "analysis_normalization_receipt_sha256": analysis[
+                    "normalization_receipt_sha256"
+                ],
+                "analysis_report_sha256": analysis["report_sha256"],
+                "critical_review_execution_receipt_sha256": critical_review[
+                    "execution_receipt_sha256"
+                ],
+                "critical_review_raw_output_sha256": critical_review[
+                    "raw_output_sha256"
+                ],
+                "critical_review_normalization_receipt_sha256": (
+                    critical_review["normalization_receipt_sha256"]
+                ),
+                "critical_review_report_sha256": critical_review[
+                    "report_sha256"
+                ],
+                "package_sha256": package_sha,
+            }
+            terminal_receipt = self._seal(
+                {
+                    "schema_version": "subject_luna_terminal_receipt_v2",
+                    "batch_id": checked_batch_id,
+                    "subject": checked_subject,
+                    "capture_id": capture_id,
+                    "unit_sha256": unit_sha,
+                    "status": status,
+                    "task_artifacts": copy.deepcopy(artifact_fields),
+                    "warning_codes": warning_codes,
+                    "error_code": None,
+                    "dispatch_completion_sha256": package_sha,
+                    "dispatch_receipt_sha256": analysis[
+                        "execution_receipt_sha256"
+                    ],
+                    "formal_write_count": 0,
+                    "issued_at": terminal_time,
+                },
+                purpose="subject-luna-terminal-receipt-v2",
+            )
+            terminal_sha, _ = self._publish_immutable(
+                self.receipt_root / "subject-terminal-v2", terminal_receipt
+            )
+            envelope = validate_sol_task_handoff_envelope_v1(
+                {
+                    "schema_version": SOL_TASK_HANDOFF_SCHEMA,
+                    "batch_id": checked_batch_id,
+                    "subject": checked_subject,
+                    "capture_id": capture_id,
+                    "unit_sha256": unit_sha,
+                    "input_fingerprint": input_fingerprint,
+                    "study_date": study_date,
+                    "frozen_payload_sha256": frozen_payload,
+                    "authority_snapshot_sha256": authority_snapshot,
+                    "analysis": analysis,
+                    "critical_review": critical_review,
+                    "package_sha256": package_sha,
+                    "terminal_receipt_sha256": terminal_sha,
+                    "warning_codes": warning_codes,
+                    "execution_status": status,
+                    "formal_write_count": 0,
+                }
+            )
+            handoff_sha, _ = self._publish_immutable(
+                self.sol_task_handoff_root, envelope
+            )
+            rows.append(
+                {
+                    "capture_id": capture_id,
+                    "unit_sha256": unit_sha,
+                    "input_fingerprint": input_fingerprint,
+                    "study_date": study_date,
+                    "frozen_payload_sha256": frozen_payload,
+                    "status": status,
+                    **artifact_fields,
+                    "sol_handoff_envelope_sha256": handoff_sha,
+                    "terminal_receipt_sha256": terminal_sha,
+                    "warning_codes": warning_codes,
+                    "error_code": None,
+                }
+            )
+        if not rows:
+            raise SubjectSolContractError("nightly_analysis_tasks_empty")
+        value = recompute_subject_luna_batch_v2(
+            {
+                "schema_version": SUBJECT_BATCH_V2_SCHEMA,
+                "batch_id": checked_batch_id,
+                "subject": checked_subject,
+                "study_date": checked_date,
+                "status": "frozen",
+                "capture_high_watermark": _nonempty(
+                    capture_high_watermark, "capture_high_watermark"
+                ),
+                "scan_snapshot_sha256": _sha256(
+                    scan_snapshot_sha256, "scan_snapshot_sha256"
+                ),
+                "authority_generation": _nonempty(
+                    authority_generation, "authority_generation"
+                ),
+                "authority_fingerprint": _sha256(
+                    authority_fingerprint, "authority_fingerprint"
+                ),
+                "tasks": rows,
+                "exclusion_receipt_sha256s": [],
+                "all_terminal": True,
+                "sol_ready": True,
+                "blocking_task_ids": [],
+                "sol_candidate_task_ids": [],
+                "diagnostic_task_ids": [],
+                "formal_write_count": 0,
+                "revision": -1,
+                "updated_at": None,
+            }
+        )
+        with _FileLock(self._subject_lock_path(checked_subject)):
+            existing = self._read_batch_locked(checked_subject)
+            if existing is not None:
+                candidate = copy.deepcopy(value)
+                candidate["revision"] = existing["revision"]
+                candidate["updated_at"] = existing["updated_at"]
+                if candidate == existing:
+                    return existing
+                raise SubjectSolContractError("subject_nightly_batch_conflict")
+            writer = self._read_writer_locked(checked_subject)
+            if (
+                writer["handoff_status"] != "awaiting_luna"
+                or writer["batch_id"] is not None
+                or writer["generation_fence"]["blocked"] is not False
+            ):
+                raise SubjectSolContractError("subject_not_ready_for_nightly_batch")
+            written = self._write_batch_locked(value)
+            writer.update(
+                {
+                    "handoff_status": "ready_for_authorization",
+                    "batch_id": written["batch_id"],
+                    "authorization_receipt_sha256": None,
+                    "daily_sol_batch_sha256": None,
+                    "review_receipt_sha256": None,
+                    "commit_receipt_sha256": None,
+                }
+            )
+            self._write_writer_locked(writer)
+            return written
+
     def freeze_subject_batch(self, subject: str, batch_id: str) -> dict[str, Any]:
         checked = _subject(subject)
         with _FileLock(self._subject_lock_path(checked)):
@@ -13612,6 +13829,79 @@ class SubjectSolRuntimeStore:
     ) -> dict[str, Any]:
         raise SubjectSolContractError("public_sol_commit_signer_disabled")
 
+    def _validated_active_writer_apply_locked(
+        self,
+        *,
+        state: dict[str, Any],
+        subject: str,
+        apply_sha: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Validate one apply receipt while the existing global lock is held."""
+
+        active_raw = state.get("active_writer")
+        if not isinstance(active_raw, Mapping) or active_raw.get("subject") != subject:
+            raise SubjectSolContractError("global_sol_writer_not_active")
+        active = dict(active_raw)
+        batch = self._sol_batch_by_digest(str(active["daily_sol_batch_sha256"]))
+        try:
+            raw_apply = self._read_content_addressed(
+                self.writer_apply_receipt_root,
+                apply_sha,
+                "deterministic_writer_apply_receipt",
+            )
+            is_v2 = raw_apply.get("schema_version") == SOL_COMMIT_RECEIPT_V2_SCHEMA
+            if is_v2 != (batch.get("schema_version") == DAILY_SOL_BATCH_V3_SCHEMA):
+                raise SubjectSolContractError(
+                    "sol_commit_schema_generation_mismatch"
+                )
+            validated = (
+                validate_sol_commit_receipt_v2(raw_apply, batch=batch)
+                if is_v2
+                else validate_sol_commit_receipt_v1(raw_apply, batch=batch)
+            )
+            self._verify_external_seal(
+                validated,
+                purpose=(
+                    "deterministic-writer-apply-receipt-v2"
+                    if is_v2
+                    else "deterministic-writer-apply-receipt"
+                ),
+                key_path=self.writer_adapter_authority_key_path,
+                label="deterministic_writer_apply",
+            )
+            _, derived_core = self._verify_writer_execution_result(
+                validated["execution_result_sha256"], batch=batch
+            )
+            if any(
+                validated.get(key) != expected
+                for key, expected in derived_core.items()
+            ):
+                raise SubjectSolContractError(
+                    "writer_apply_execution_result_binding_mismatch"
+                )
+            if (
+                validated["batch_id"] != active["batch_id"]
+                or validated["fencing_token"] != active["fencing_token"]
+                or validated["sol_review_receipt_sha256"]
+                != active.get("review_receipt_sha256")
+            ):
+                raise SubjectSolContractError("stale_global_sol_fence")
+        except SubjectSolContractError:
+            active["status"] = "safe_paused"
+            state["active_writer"] = active
+            queue_entry = next(
+                row for row in state["queue"]
+                if row["batch_id"] == active["batch_id"]
+            )
+            queue_entry["status"] = "safe_paused"
+            with _FileLock(self._subject_lock_path(subject)):
+                writer = self._read_writer_locked(subject)
+                writer["handoff_status"] = "safe_paused"
+                self._write_writer_locked(writer)
+                self._write_global_locked(state)
+            raise
+        return active, batch, validated
+
     def finish_subject_commit(
         self, subject: str, writer_apply_receipt_sha256: str
     ) -> dict[str, Any]:
@@ -13621,93 +13911,285 @@ class SubjectSolRuntimeStore:
         )
         with _FileLock(self.global_lock_path):
             state = self._read_global_locked()
-            active = state.get("active_writer")
-            if not isinstance(active, Mapping) or active.get("subject") != checked:
-                raise SubjectSolContractError("global_sol_writer_not_active")
-            batch = self._sol_batch_by_digest(str(active["daily_sol_batch_sha256"]))
-            try:
-                raw_apply = self._read_content_addressed(
-                    self.writer_apply_receipt_root,
-                    apply_sha,
-                    "deterministic_writer_apply_receipt",
-                )
-                is_v2 = (
-                    raw_apply.get("schema_version") == SOL_COMMIT_RECEIPT_V2_SCHEMA
-                )
-                if is_v2 != (
-                    batch.get("schema_version") == DAILY_SOL_BATCH_V3_SCHEMA
-                ):
-                    raise SubjectSolContractError(
-                        "sol_commit_schema_generation_mismatch"
-                    )
-                validated = (
-                    validate_sol_commit_receipt_v2(raw_apply, batch=batch)
-                    if is_v2
-                    else validate_sol_commit_receipt_v1(raw_apply, batch=batch)
-                )
-                self._verify_external_seal(
-                    validated,
-                    purpose=(
-                        "deterministic-writer-apply-receipt-v2"
-                        if is_v2
-                        else "deterministic-writer-apply-receipt"
-                    ),
-                    key_path=self.writer_adapter_authority_key_path,
-                    label="deterministic_writer_apply",
-                )
-                _, derived_core = self._verify_writer_execution_result(
-                    validated["execution_result_sha256"],
-                    batch=batch,
-                )
-                if any(
-                    validated.get(key) != expected
-                    for key, expected in derived_core.items()
-                ):
-                    raise SubjectSolContractError(
-                        "writer_apply_execution_result_binding_mismatch"
-                    )
-                if (
-                    validated["batch_id"] != active["batch_id"]
-                    or validated["fencing_token"] != active["fencing_token"]
-                    or validated["sol_review_receipt_sha256"]
-                    != active.get("review_receipt_sha256")
-                ):
-                    raise SubjectSolContractError("stale_global_sol_fence")
-            except SubjectSolContractError:
-                active = dict(active)
-                active["status"] = "safe_paused"
-                state["active_writer"] = active
-                queue_entry = next(
-                    row for row in state["queue"]
-                    if row["batch_id"] == active["batch_id"]
-                )
-                queue_entry["status"] = "safe_paused"
-                with _FileLock(self._subject_lock_path(checked)):
-                    writer = self._read_writer_locked(checked)
-                    writer["handoff_status"] = "safe_paused"
-                    self._write_writer_locked(writer)
-                    self._write_global_locked(state)
-                raise
-            digest = apply_sha
+            active, _batch, validated = self._validated_active_writer_apply_locked(
+                state=state, subject=checked, apply_sha=apply_sha
+            )
             with _FileLock(self._subject_lock_path(checked)):
                 writer = self._read_writer_locked(checked)
                 queue_entry = next(
-                    row for row in state["queue"] if row["batch_id"] == active["batch_id"]
+                    row for row in state["queue"]
+                    if row["batch_id"] == active["batch_id"]
                 )
                 success = validated["status"] in {"committed", "already_current"}
                 queue_entry["status"] = "committed" if success else "safe_paused"
                 state["active_writer"] = None
                 state["formal_write_count"] += validated["formal_write_count"]
                 writer["handoff_status"] = "complete" if success else "safe_paused"
-                writer["commit_receipt_sha256"] = digest
+                writer["commit_receipt_sha256"] = apply_sha
                 writer["formal_write_count"] += validated["formal_write_count"]
                 global_written = self._write_global_locked(state)
                 writer_written = self._write_writer_locked(writer)
         return {
             "global": global_written,
             "subject": writer_written,
-            "commit_receipt_sha256": digest,
+            "commit_receipt_sha256": apply_sha,
             "formal_write_count": validated["formal_write_count"],
+        }
+
+    def pause_subject_commit_for_conflict(
+        self,
+        subject: str,
+        writer_apply_receipt_sha256: str,
+        *,
+        conflict: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Commit safe siblings, release the lease, and seal one continuation."""
+
+        checked = _subject(subject)
+        apply_sha = _sha256(
+            writer_apply_receipt_sha256, "writer_apply_receipt_sha256"
+        )
+        value = dict(_mapping(conflict, "nightly_conflict"))
+        required = {
+            "conflict_id", "batch_id", "subject", "conflicted_capture_id",
+            "completed_capture_ids", "native_receipt_sha256", "skill",
+            "issued_at",
+        }
+        if set(value) != required or value.get("subject") != checked:
+            raise SubjectSolContractError("nightly_conflict_shape_invalid")
+        _nonempty(value.get("conflict_id"), "conflict_id")
+        _nonempty(value.get("conflicted_capture_id"), "conflicted_capture_id")
+        completed_ids = _sequence(
+            value.get("completed_capture_ids"), "completed_capture_ids"
+        )
+        if completed_ids != sorted(set(completed_ids)):
+            raise SubjectSolContractError("completed_capture_ids_invalid")
+        _sha256(value.get("native_receipt_sha256"), "native_receipt_sha256")
+        skill = dict(_mapping(value.get("skill"), "skill"))
+        if set(skill) != {"name", "source_sha256", "declared_version"}:
+            raise SubjectSolContractError("nightly_conflict_skill_invalid")
+        _nonempty(skill.get("name"), "skill_name")
+        _sha256(skill.get("source_sha256"), "skill_source_sha256")
+        conflict_time = _timestamp(value.get("issued_at"), "conflict_issued_at")
+        with _FileLock(self.global_lock_path):
+            state = self._read_global_locked()
+            active, batch, validated = self._validated_active_writer_apply_locked(
+                state=state, subject=checked, apply_sha=apply_sha
+            )
+            if (
+                value["batch_id"] != active["batch_id"]
+                or value["conflicted_capture_id"]
+                not in batch.get("sol_candidate_task_ids", [])
+                or value["conflicted_capture_id"] in completed_ids
+                or set(completed_ids)
+                != set(batch.get("sol_candidate_task_ids", []))
+                - {value["conflicted_capture_id"]}
+                or validated["status"] not in {"committed", "already_current"}
+            ):
+                raise SubjectSolContractError("nightly_conflict_binding_invalid")
+            continuation = self._seal(
+                {
+                    "schema_version": "subject_sol_conflict_continuation_v1",
+                    **copy.deepcopy(value),
+                    "partial_commit_receipt_sha256": apply_sha,
+                    "partial_fencing_token": active["fencing_token"],
+                    "status": "PARTIAL_AWAITING_USER",
+                    "formal_write_count": validated["formal_write_count"],
+                    "writer_lease_released": True,
+                    "sealed_at": conflict_time,
+                },
+                purpose="subject-sol-conflict-continuation",
+            )
+            continuation_sha, continuation_path = self._publish_immutable(
+                self.receipt_root / "sol-conflict-continuations", continuation
+            )
+            with _FileLock(self._subject_lock_path(checked)):
+                writer = self._read_writer_locked(checked)
+                queue_entry = next(
+                    row for row in state["queue"]
+                    if row["batch_id"] == active["batch_id"]
+                )
+                queue_entry["status"] = "safe_paused"
+                state["active_writer"] = None
+                state["formal_write_count"] += validated["formal_write_count"]
+                writer["handoff_status"] = "safe_paused"
+                writer["commit_receipt_sha256"] = apply_sha
+                writer["formal_write_count"] += validated["formal_write_count"]
+                global_written = self._write_global_locked(state)
+                writer_written = self._write_writer_locked(writer)
+        return {
+            "status": "PARTIAL_AWAITING_USER",
+            "conflict_id": value["conflict_id"],
+            "conflicted_capture_id": value["conflicted_capture_id"],
+            "continuation_receipt_sha256": continuation_sha,
+            "continuation_receipt_path": str(continuation_path),
+            "partial_commit_receipt_sha256": apply_sha,
+            "global": global_written,
+            "subject": writer_written,
+            "formal_write_count": validated["formal_write_count"],
+            "writer_lease_released": True,
+        }
+
+    def resume_subject_commit_from_resolution(
+        self,
+        subject: str,
+        *,
+        continuation_receipt_sha256: str,
+        resolution: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Requeue one safe-paused batch after an exact single-item answer."""
+
+        checked = _subject(subject)
+        continuation_sha = _sha256(
+            continuation_receipt_sha256,
+            "continuation_receipt_sha256",
+        )
+        continuation = self._read_content_addressed(
+            self.receipt_root / "sol-conflict-continuations",
+            continuation_sha,
+            "subject_sol_conflict_continuation",
+        )
+        self._verify_seal(
+            continuation, purpose="subject-sol-conflict-continuation"
+        )
+        answer = dict(_mapping(resolution, "nightly_conflict_resolution"))
+        required = {
+            "conflict_id", "batch_id", "subject", "conflicted_capture_id",
+            "user_option", "skill", "resolved_at",
+        }
+        if set(answer) != required or answer.get("subject") != checked:
+            raise SubjectSolContractError("nightly_resolution_shape_invalid")
+        skill = dict(_mapping(answer.get("skill"), "skill"))
+        if (
+            answer.get("conflict_id") != continuation.get("conflict_id")
+            or answer.get("batch_id") != continuation.get("batch_id")
+            or answer.get("conflicted_capture_id")
+            != continuation.get("conflicted_capture_id")
+            or skill != continuation.get("skill")
+            or not isinstance(answer.get("user_option"), str)
+            or not answer["user_option"].strip()
+        ):
+            raise SubjectSolContractError("nightly_resolution_binding_invalid")
+        resolved_at = _timestamp(answer.get("resolved_at"), "resolved_at")
+        receipt = self._seal(
+            {
+                "schema_version": "subject_sol_conflict_resolution_v1",
+                **copy.deepcopy(answer),
+                "continuation_receipt_sha256": continuation_sha,
+                "resume_scope": "conflicted_capture_only",
+                "rerun_analysis_package": False,
+                "formal_write_count": 0,
+                "sealed_at": resolved_at,
+            },
+            purpose="subject-sol-conflict-resolution",
+        )
+        resolution_sha, resolution_path = self._publish_immutable(
+            self.receipt_root / "sol-conflict-resolutions", receipt
+        )
+        with _FileLock(self.global_lock_path):
+            state = self._read_global_locked()
+            if state.get("active_writer") is not None:
+                raise SubjectSolContractError("global_sol_writer_busy")
+            queue_entry = next(
+                (
+                    row for row in state["queue"]
+                    if row["batch_id"] == answer["batch_id"]
+                ),
+                None,
+            )
+            if not isinstance(queue_entry, Mapping) or queue_entry.get("status") != "safe_paused":
+                raise SubjectSolContractError("nightly_resolution_batch_not_paused")
+            with _FileLock(self._subject_lock_path(checked)):
+                writer = self._read_writer_locked(checked)
+                if (
+                    writer["handoff_status"] != "safe_paused"
+                    or writer["batch_id"] != answer["batch_id"]
+                    or writer["commit_receipt_sha256"]
+                    != continuation.get("partial_commit_receipt_sha256")
+                ):
+                    raise SubjectSolContractError("nightly_resolution_writer_state_invalid")
+                queue_entry["status"] = "queued"
+                writer["handoff_status"] = "queued_for_sol"
+                writer["review_receipt_sha256"] = None
+                writer["commit_receipt_sha256"] = None
+                global_written = self._write_global_locked(state)
+                writer_written = self._write_writer_locked(writer)
+        return {
+            "status": "resume_ready",
+            "conflict_id": answer["conflict_id"],
+            "conflicted_capture_id": answer["conflicted_capture_id"],
+            "resolution_receipt_sha256": resolution_sha,
+            "resolution_receipt_path": str(resolution_path),
+            "resume_scope": "conflicted_capture_only",
+            "rerun_analysis_package": False,
+            "global": global_written,
+            "subject": writer_written,
+            "formal_write_count": 0,
+        }
+
+    def restore_conflict_resume_after_failure(
+        self,
+        subject: str,
+        *,
+        continuation_receipt_sha256: str,
+    ) -> dict[str, Any]:
+        """Restore the partial commit anchor after a resumed item fails safely."""
+
+        checked = _subject(subject)
+        continuation_sha = _sha256(
+            continuation_receipt_sha256,
+            "continuation_receipt_sha256",
+        )
+        continuation = self._read_content_addressed(
+            self.receipt_root / "sol-conflict-continuations",
+            continuation_sha,
+            "subject_sol_conflict_continuation",
+        )
+        self._verify_seal(
+            continuation, purpose="subject-sol-conflict-continuation"
+        )
+        if continuation.get("subject") != checked:
+            raise SubjectSolContractError("nightly_conflict_subject_mismatch")
+        with _FileLock(self.global_lock_path):
+            state = self._read_global_locked()
+            if state.get("active_writer") is not None:
+                raise SubjectSolContractError("global_sol_writer_busy")
+            queue_entry = next(
+                (
+                    row for row in state["queue"]
+                    if row["batch_id"] == continuation["batch_id"]
+                ),
+                None,
+            )
+            if (
+                not isinstance(queue_entry, Mapping)
+                or queue_entry.get("status") != "safe_paused"
+            ):
+                raise SubjectSolContractError(
+                    "nightly_conflict_retry_not_safe_paused"
+                )
+            with _FileLock(self._subject_lock_path(checked)):
+                writer = self._read_writer_locked(checked)
+                if (
+                    writer["handoff_status"] != "safe_paused"
+                    or writer["batch_id"] != continuation["batch_id"]
+                ):
+                    raise SubjectSolContractError(
+                        "nightly_conflict_retry_writer_state_invalid"
+                    )
+                writer["commit_receipt_sha256"] = continuation[
+                    "partial_commit_receipt_sha256"
+                ]
+                writer_written = self._write_writer_locked(writer)
+        return {
+            "status": "resume_retryable",
+            "batch_id": continuation["batch_id"],
+            "conflict_id": continuation["conflict_id"],
+            "conflicted_capture_id": continuation["conflicted_capture_id"],
+            "continuation_receipt_sha256": continuation_sha,
+            "writer_lease_released": True,
+            "subject": writer_written,
+            "formal_write_count": 0,
         }
 
     def acknowledge_subject_generation(

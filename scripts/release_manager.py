@@ -3088,7 +3088,7 @@ def _validate_analysis_package_config(
     profile = config.get("analysis_package_v1")
     if profile is None:
         return
-    expected_schema = release_root / "schemas/analysis-stage-report-v1.json"
+    expected_schema = release_root / "schemas/analysis-stage-report-v2.json"
     if (
         not isinstance(profile, Mapping)
         or set(profile) != {
