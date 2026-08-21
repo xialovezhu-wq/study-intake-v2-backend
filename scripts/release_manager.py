@@ -288,6 +288,53 @@ HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS = frozenset(
         "ad1807186ac277c6bacfb7fd8d83b9cbc86cf75027698e70f994f3228d815cc9",
     }
 )
+HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES = {
+    "ad1807186ac277c6bacfb7fd8d83b9cbc86cf75027698e70f994f3228d815cc9": {
+        "com.xiazhibin.study-intake-dashboard": {
+            "sha256": "7d0664803a55580739ba431a13ce0c59078a43bfb2bce91a8b1d1f07520a559a",
+            "program_arguments": [
+                "/usr/local/bin/python3",
+                str(DEFAULT_ACTIVE_LINK / "dashboard/server.py"),
+            ],
+        },
+        "com.xiazhibin.study-intake-preprocessor.math": {
+            "sha256": "4fe3d7c8113185f65efc8f9711fd5a1ac793ea29418a3eac010d0da3fcc2a760",
+            "program_arguments": [
+                "/usr/local/bin/python3",
+                str(DEFAULT_ACTIVE_LINK / "bin/preprocess_dispatcher.py"),
+                "--config",
+                str(DEFAULT_ACTIVE_LINK / "config.json"),
+                "--subject",
+                "math",
+                "run",
+            ],
+        },
+        "com.xiazhibin.study-intake-preprocessor.cs408": {
+            "sha256": "ff440648a68ebf2f1e5815784f9ca7320a218e7362699a09aa7ce5acf0ac4529",
+            "program_arguments": [
+                "/usr/local/bin/python3",
+                str(DEFAULT_ACTIVE_LINK / "bin/preprocess_dispatcher.py"),
+                "--config",
+                str(DEFAULT_ACTIVE_LINK / "config.json"),
+                "--subject",
+                "cs408",
+                "run",
+            ],
+        },
+        "com.xiazhibin.study-intake-preprocessor.english": {
+            "sha256": "4297635144ee2dc3a19bfd5ccb3430b224b0e4c4886a781b7f881a1fd242ebf6",
+            "program_arguments": [
+                "/usr/local/bin/python3",
+                str(DEFAULT_ACTIVE_LINK / "bin/preprocess_dispatcher.py"),
+                "--config",
+                str(DEFAULT_ACTIVE_LINK / "config.json"),
+                "--subject",
+                "english",
+                "run",
+            ],
+        },
+    }
+}
 HISTORICAL_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
     "name": "historical_target_runtime_v1",
     "model_contract": HISTORICAL_OFFLINE_MODEL_CONTRACT,
@@ -5389,34 +5436,99 @@ def _restore_optional_file_bytes(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_installed_launchagent_preimage(
+    launchagent_dir: Path,
+    label: str,
+    *,
+    historical_release_id: str | None,
+) -> tuple[dict[str, Any], bytes | None]:
+    source = launchagent_dir / f"{label}.plist"
+    record: dict[str, Any] = {"existed": False, "live_path": str(source)}
+    if not (source.exists() or source.is_symlink()):
+        return record, None
+    if source.is_symlink() or not source.is_file() or source.stat().st_size > 256 * 1024:
+        raise ReleaseError(f"installed_launchagent_invalid:{label}")
+    value = source.read_bytes()
+    payload_format = "plist_dict"
+    try:
+        payload = plistlib.loads(value)
+    except Exception:
+        payload = None
+    if not isinstance(payload, dict) or payload.get("Label") != label:
+        legacy = HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES.get(
+            str(historical_release_id or ""), {}
+        ).get(label)
+        try:
+            legacy_payload = json.loads(value)
+        except (UnicodeError, json.JSONDecodeError):
+            legacy_payload = None
+        if (
+            not isinstance(legacy, Mapping)
+            or legacy.get("sha256") != sha256_bytes(value)
+            or legacy_payload != legacy.get("program_arguments")
+        ):
+            raise ReleaseError(f"installed_launchagent_invalid:{label}")
+        payload_format = "legacy_program_arguments_json"
+    record.update(
+        {
+            "existed": True,
+            "sha256": sha256_bytes(value),
+            "format": payload_format,
+        }
+    )
+    return record, value
+
+
+def _validate_installed_launchagent_preimages(
+    launchagent_dir: Path,
+    topology: Iterable[Mapping[str, Any]],
+    *,
+    historical_release_id: str | None,
+) -> None:
+    for label in sorted({str(service["label"]) for service in topology}):
+        _read_installed_launchagent_preimage(
+            launchagent_dir,
+            label,
+            historical_release_id=historical_release_id,
+        )
+
+
 def _backup_launchagent_plists(
     launchagent_dir: Path,
     topology: Iterable[Mapping[str, Any]],
     backup_root: Path,
+    *,
+    historical_release_id: str | None = None,
+    allow_existing_empty_root: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    backup_root.mkdir(parents=True, exist_ok=False, mode=0o700)
-    records: dict[str, dict[str, Any]] = {}
     labels = sorted({str(service["label"]) for service in topology})
+    prepared = {
+        label: _read_installed_launchagent_preimage(
+            launchagent_dir,
+            label,
+            historical_release_id=historical_release_id,
+        )
+        for label in labels
+    }
+    if backup_root.exists() or backup_root.is_symlink():
+        if (
+            not allow_existing_empty_root
+            or backup_root.is_symlink()
+            or not backup_root.is_dir()
+            or any(backup_root.iterdir())
+        ):
+            raise ReleaseError("launchagent_backup_exists")
+    else:
+        backup_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+    records: dict[str, dict[str, Any]] = {}
     for label in labels:
-        source = launchagent_dir / f"{label}.plist"
-        record: dict[str, Any] = {"existed": False, "live_path": str(source)}
-        if source.exists() or source.is_symlink():
-            if source.is_symlink() or not source.is_file() or source.stat().st_size > 256 * 1024:
-                raise ReleaseError(f"installed_launchagent_invalid:{label}")
-            value = source.read_bytes()
-            try:
-                payload = plistlib.loads(value)
-            except Exception as exc:
-                raise ReleaseError(f"installed_launchagent_invalid:{label}") from exc
-            if not isinstance(payload, dict) or payload.get("Label") != label:
-                raise ReleaseError(f"installed_launchagent_label_mismatch:{label}")
+        record, value = prepared[label]
+        if value is not None:
             backup = backup_root / f"{label}.plist"
             _atomic_bytes(backup, value, mode=0o600)
             record.update(
                 {
-                    "existed": True,
                     "backup_path": str(backup),
-                    "sha256": sha256_bytes(value),
                 }
             )
         records[label] = record
@@ -15816,6 +15928,225 @@ def _assert_no_unresolved_deployment_transaction(release_base: Path) -> None:
         raise ReleaseError("deployment_transaction_unresolved")
 
 
+def resolve_pre_mutation_deployment(
+    *,
+    release_base: Path,
+    prepare_receipt_sha256: str,
+    expected_current: str,
+    active_link: Path,
+    launchagent_dir: Path = DEFAULT_LAUNCHAGENT_DIR,
+    codex_config_path: Path = DEFAULT_CODEX_CONFIG,
+    morning_pointer_path: Path = DEFAULT_MORNING_POINTER,
+    plugin_cache_root: Path = DEFAULT_PLUGIN_CACHE_ROOT,
+    process_inspector: Callable[[str | None, str | None], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Seal one exact no-mutation closure after backup validation failed.
+
+    This command never switches ``current``, changes a live profile, invokes
+    launchctl, or edits a producer/runtime state. It is valid only while the
+    original release, process set, installed LaunchAgent bytes, and external
+    profile preimages still match the deployment prepare receipt.
+    """
+
+    release_base = _safe_base(release_base, label="release_base")
+    if SHA256_RE.fullmatch(prepare_receipt_sha256) is None:
+        raise ReleaseError("pre_mutation_recovery_prepare_invalid")
+    if SHA256_RE.fullmatch(expected_current) is None:
+        raise ReleaseError("pre_mutation_recovery_current_invalid")
+    active_link = active_link.expanduser().absolute()
+    launchagent_dir = _safe_launchagent_dir(launchagent_dir, create=False)
+    receipts = _deployment_receipt_objects(release_base)
+    prepare = receipts.get(prepare_receipt_sha256)
+    if (
+        not isinstance(prepare, Mapping)
+        or prepare.get("schema_version") != DEPLOYMENT_PREPARE_SCHEMA
+        or prepare.get("operation") not in {"activate", "rollback"}
+        or prepare.get("formal_write_count") != 0
+        or prepare.get("observed_current") in {None, ""}
+        or not isinstance(prepare.get("release_id"), str)
+        or SHA256_RE.fullmatch(str(prepare.get("release_id"))) is None
+        or any(
+            value.get("prepare_receipt_sha256") == prepare_receipt_sha256
+            for value in receipts.values()
+        )
+    ):
+        raise ReleaseError("pre_mutation_recovery_prepare_invalid")
+    current_id, current_path = _current_release(active_link)
+    if (
+        current_id != expected_current
+        or current_id != prepare.get("observed_current")
+        or current_path is None
+    ):
+        raise ReleaseError("pre_mutation_recovery_current_drift")
+    current_release = Path(current_path)
+    verified_current = verify_rollback_release(current_release)
+    if verified_current.get("release_id") != current_id:
+        raise ReleaseError("pre_mutation_recovery_current_drift")
+    target = release_base / "releases" / str(prepare["release_id"])
+    verified_target = (
+        verify_rollback_release(target)
+        if prepare.get("operation") == "rollback"
+        else verify_release(target)
+    )
+    if verified_target.get("release_id") != prepare.get("release_id"):
+        raise ReleaseError("pre_mutation_recovery_target_invalid")
+    previous_topology = prepare.get("previous_service_topology")
+    target_topology = prepare.get("service_topology")
+    if not isinstance(previous_topology, list) or not isinstance(target_topology, list):
+        raise ReleaseError("pre_mutation_recovery_prepare_invalid")
+    topology_union: list[Mapping[str, Any]] = []
+    seen_labels: set[str] = set()
+    for service in [*previous_topology, *target_topology]:
+        if not isinstance(service, Mapping) or not isinstance(service.get("label"), str):
+            raise ReleaseError("pre_mutation_recovery_prepare_invalid")
+        label = str(service["label"])
+        if label not in seen_labels:
+            topology_union.append(service)
+            seen_labels.add(label)
+    _validate_installed_launchagent_preimages(
+        launchagent_dir,
+        topology_union,
+        historical_release_id=current_id,
+    )
+    expected_process = prepare.get("live_pre_stop_process_snapshot")
+    if not isinstance(expected_process, Mapping):
+        raise ReleaseError("pre_mutation_recovery_process_drift")
+    inspector = process_inspector or _system_process_snapshot
+    observed_process = dict(inspector(current_path, str(active_link)))
+    _validate_process_snapshot(observed_process)
+    process_fields = {
+        "schema_version",
+        "legacy_worker_pids",
+        "dispatcher_pids",
+        "dashboard_pids",
+        "luna_pids",
+        "process_set_sha256",
+    }
+    if any(
+        observed_process.get(field) != expected_process.get(field)
+        for field in process_fields
+    ):
+        raise ReleaseError("pre_mutation_recovery_process_drift")
+    current_plan = _external_profile_plan(
+        target,
+        codex_config_path=codex_config_path,
+        morning_pointer_path=morning_pointer_path,
+        plugin_cache_root=plugin_cache_root,
+    )
+    if current_plan != prepare.get("external_profile_plan"):
+        raise ReleaseError("pre_mutation_recovery_external_profile_drift")
+    backup_root = (
+        release_base
+        / "deployments"
+        / "launchagent-backups"
+        / prepare_receipt_sha256
+    )
+    launchagent_records = _backup_launchagent_plists(
+        launchagent_dir,
+        topology_union,
+        backup_root,
+        historical_release_id=current_id,
+        allow_existing_empty_root=True,
+    )
+    external_backup_root = (
+        release_base
+        / "deployments"
+        / "external-profile-backups"
+        / prepare_receipt_sha256
+    )
+    external_snapshot = _backup_external_profiles(
+        target,
+        codex_config_path=codex_config_path,
+        morning_pointer_path=morning_pointer_path,
+        plugin_cache_root=plugin_cache_root,
+        backup_root=external_backup_root,
+    )
+    if external_snapshot is None:
+        external_backup_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+        external_core = {
+            "schema_version": "study-intake-external-profile-backup-v1",
+            "ordinary_profile": {"state": "not_managed"},
+            "mcp_profile": {"state": "not_managed"},
+            "morning_pointer": {"state": "not_managed"},
+            "plugin_cache": {"state": "not_managed"},
+        }
+        external_snapshot = {
+            **external_core,
+            "inventory_sha256": sha256_bytes(canonical_bytes(external_core)),
+        }
+        atomic_json(
+            external_backup_root / "inventory.json",
+            external_snapshot,
+            mode=0o600,
+        )
+    launchagent_hashes = {
+        label: record.get("sha256")
+        for label, record in sorted(launchagent_records.items())
+    }
+    if any(not isinstance(value, str) for value in launchagent_hashes.values()):
+        raise ReleaseError("pre_mutation_recovery_launchagent_invalid")
+    if current_plan is None:
+        unmanaged = sha256_bytes(canonical_bytes({"state": "not_managed"}))
+        ordinary_sha256 = unmanaged
+        morning_sha256 = unmanaged
+        plugin_cache_sha256 = unmanaged
+    else:
+        ordinary = external_snapshot.get("ordinary_profile")
+        morning = external_snapshot.get("morning_pointer")
+        plugin = external_snapshot.get("plugin_cache")
+        if not all(isinstance(row, Mapping) for row in (ordinary, morning, plugin)):
+            raise ReleaseError("pre_mutation_recovery_external_profile_drift")
+        ordinary_sha256 = str(ordinary["sha256"])
+        morning_sha256 = str(morning["sha256"])
+        plugin_cache_sha256 = sha256_bytes(
+            canonical_bytes(
+                {
+                    "state": plugin.get("state"),
+                    "tree_sha256": plugin.get("tree_sha256"),
+                }
+            )
+        )
+    marker_core = {
+        "schema_version": DEPLOYMENT_RECOVERY_MARKER_SCHEMA,
+        "prepare_receipt_sha256": prepare_receipt_sha256,
+        "observed_current_release_id": current_id,
+        "launchagent_backup_inventory_sha256": sha256_file(
+            backup_root / "inventory.json"
+        ),
+        "external_profile_backup_inventory_sha256": sha256_file(
+            external_backup_root / "inventory.json"
+        ),
+        "current_surface_sha256s": {
+            "current_symlink": sha256_bytes(os.readlink(active_link).encode("utf-8")),
+            "launchagent_plists": sha256_bytes(
+                canonical_bytes(launchagent_hashes)
+            ),
+            "ordinary_profile": ordinary_sha256,
+            "morning_pointer": morning_sha256,
+            "plugin_cache": plugin_cache_sha256,
+        },
+        "outcome": "verified_no_mutation",
+        "resolved_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "formal_write_count": 0,
+    }
+    marker = _seal_deployment_value(
+        marker_core,
+        release_base=release_base,
+        purpose=DEPLOYMENT_RECOVERY_MARKER_PURPOSE,
+    )
+    marker_sha256 = _write_deployment_receipt(release_base, marker)
+    _assert_no_unresolved_deployment_transaction(release_base)
+    return {
+        "schema_version": DEPLOYMENT_RECOVERY_MARKER_SCHEMA,
+        "status": "resolved_pre_mutation_no_change",
+        "prepare_receipt_sha256": prepare_receipt_sha256,
+        "recovery_marker_sha256": marker_sha256,
+        "observed_current_release_id": current_id,
+        "current_surface_sha256s": marker_core["current_surface_sha256s"],
+        "formal_write_count": 0,
+    }
+
+
 def _exact_20260813_file_bytes(
     path: Path, *, expected_sha256: str, error_code: str
 ) -> bytes:
@@ -19552,6 +19883,18 @@ def activate_release(
                     release_id=release_id,
                     apply=False,
                 )
+            topology_union: list[Mapping[str, Any]] = []
+            seen_labels: set[str] = set()
+            for service in [*previous_topology, *target_topology]:
+                label = str(service["label"])
+                if label not in seen_labels:
+                    topology_union.append(service)
+                    seen_labels.add(label)
+            _validate_installed_launchagent_preimages(
+                launchagent_dir,
+                topology_union,
+                historical_release_id=locked_previous_id,
+            )
             prepare = {
                 "schema_version": DEPLOYMENT_PREPARE_SCHEMA,
                 "operation": operation,
@@ -19618,13 +19961,6 @@ def activate_release(
                     "source_queue_count": 4,
                 }
             prepare_id = _write_deployment_receipt(release_base, prepare)
-            topology_union: list[Mapping[str, Any]] = []
-            seen_labels: set[str] = set()
-            for service in [*previous_topology, *target_topology]:
-                label = str(service["label"])
-                if label not in seen_labels:
-                    topology_union.append(service)
-                    seen_labels.add(label)
             backup_root = (
                 release_base
                 / "deployments"
@@ -19635,6 +19971,7 @@ def activate_release(
                 launchagent_dir,
                 topology_union,
                 backup_root,
+                historical_release_id=locked_previous_id,
             )
             external_backup_root = (
                 release_base
@@ -24525,6 +24862,30 @@ def parser() -> argparse.ArgumentParser:
         "--claim-gate-timeout-seconds", type=float, default=3600.0
     )
 
+    resolve_pre_mutation = sub.add_parser("resolve-pre-mutation-deployment")
+    resolve_pre_mutation.add_argument(
+        "--release-base", type=Path, default=DEFAULT_RELEASE_BASE
+    )
+    resolve_pre_mutation.add_argument(
+        "--prepare-receipt-sha256", required=True
+    )
+    resolve_pre_mutation.add_argument("--expected-current", required=True)
+    resolve_pre_mutation.add_argument(
+        "--active-link", type=Path, default=DEFAULT_ACTIVE_LINK
+    )
+    resolve_pre_mutation.add_argument(
+        "--launchagent-dir", type=Path, default=DEFAULT_LAUNCHAGENT_DIR
+    )
+    resolve_pre_mutation.add_argument(
+        "--codex-config", type=Path, default=DEFAULT_CODEX_CONFIG
+    )
+    resolve_pre_mutation.add_argument(
+        "--morning-pointer", type=Path, default=DEFAULT_MORNING_POINTER
+    )
+    resolve_pre_mutation.add_argument(
+        "--plugin-cache-root", type=Path, default=DEFAULT_PLUGIN_CACHE_ROOT
+    )
+
     verify = sub.add_parser("verify")
     verify.add_argument("--release-dir", type=Path, required=True)
 
@@ -24757,6 +25118,17 @@ def main() -> int:
                 output_path=args.output,
                 operation=args.operation,
                 claim_gate_timeout_seconds=args.claim_gate_timeout_seconds,
+            )
+        elif args.command == "resolve-pre-mutation-deployment":
+            result = resolve_pre_mutation_deployment(
+                release_base=args.release_base,
+                prepare_receipt_sha256=args.prepare_receipt_sha256,
+                expected_current=args.expected_current,
+                active_link=args.active_link,
+                launchagent_dir=args.launchagent_dir,
+                codex_config_path=args.codex_config,
+                morning_pointer_path=args.morning_pointer,
+                plugin_cache_root=args.plugin_cache_root,
             )
         elif args.command == "prepare-canary-manifest":
             result = prepare_canary_manifest(

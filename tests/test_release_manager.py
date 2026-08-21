@@ -11244,6 +11244,139 @@ LIVE_CONFIG = Path(
         self.assertEqual(release._preview_tree_snapshot(self.release_base), expected)
         self.assertNotEqual(before, expected)
 
+    def test_historical_program_argument_preimage_is_exactly_allowlisted(self) -> None:
+        release_id = "a" * 64
+        label = "com.example.study-intake.dashboard"
+        arguments = ["/usr/bin/true", "fixture-dashboard"]
+        raw = (json.dumps(arguments, separators=(",", ":")) + "\n").encode()
+        installed = self.launchagents / f"{label}.plist"
+        installed.write_bytes(raw)
+        allowlist = {
+            release_id: {
+                label: {
+                    "sha256": release.sha256_bytes(raw),
+                    "program_arguments": arguments,
+                }
+            }
+        }
+        with mock.patch.dict(
+            release.HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES,
+            allowlist,
+            clear=True,
+        ):
+            records = release._backup_launchagent_plists(
+                self.launchagents,
+                [{"label": label}],
+                self.base / "legacy-launchagent-backup",
+                historical_release_id=release_id,
+            )
+            self.assertEqual(
+                records[label]["format"],
+                "legacy_program_arguments_json",
+            )
+            self.assertEqual(
+                Path(records[label]["backup_path"]).read_bytes(),
+                raw,
+            )
+            installed.write_bytes(
+                (json.dumps(["/usr/bin/false"], separators=(",", ":")) + "\n").encode()
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseError,
+                f"installed_launchagent_invalid:{label}",
+            ):
+                release._backup_launchagent_plists(
+                    self.launchagents,
+                    [{"label": label}],
+                    self.base / "drifted-launchagent-backup",
+                    historical_release_id=release_id,
+                )
+
+    def test_pre_mutation_recovery_seals_no_change_and_closes_prepare(self) -> None:
+        built = self.build(passed=True)
+        release_id = str(built["release_id"])
+        target = Path(str(built["release_dir"]))
+        active = self.base / "pre-mutation-current"
+        active.symlink_to(target)
+        topology = release._service_commands(
+            built["service_topology"],
+            self.launchagents,
+            uid=501,
+        )
+        allowlisted: dict[str, dict[str, object]] = {}
+        for service in topology:
+            label = str(service["label"])
+            arguments = ["/usr/bin/true", f"fixture-{service['name']}"]
+            raw = (
+                json.dumps(arguments, separators=(",", ":")) + "\n"
+            ).encode()
+            (self.launchagents / f"{label}.plist").write_bytes(raw)
+            allowlisted[label] = {
+                "sha256": release.sha256_bytes(raw),
+                "program_arguments": arguments,
+            }
+        process_snapshot = {
+            "schema_version": release.PROCESS_SNAPSHOT_SCHEMA,
+            "observed_at": "2026-08-21T00:00:00+00:00",
+            "legacy_worker_pids": [],
+            "dispatcher_pids": [],
+            "dashboard_pids": [],
+            "luna_pids": [],
+            "process_set_sha256": release.sha256_bytes(
+                release.canonical_bytes([])
+            ),
+        }
+        prepare = {
+            "schema_version": release.DEPLOYMENT_PREPARE_SCHEMA,
+            "operation": "activate",
+            "release_id": release_id,
+            "observed_current": release_id,
+            "service_topology": topology,
+            "previous_service_topology": topology,
+            "live_pre_stop_process_snapshot": process_snapshot,
+            "external_profile_plan": None,
+            "prepared_at": "2026-08-21T00:00:00+00:00",
+            "formal_write_count": 0,
+        }
+        prepare_sha256 = release._write_deployment_receipt(
+            self.release_base,
+            prepare,
+        )
+        empty_backup = (
+            self.release_base
+            / "deployments"
+            / "launchagent-backups"
+            / prepare_sha256
+        )
+        empty_backup.mkdir(parents=True)
+        with mock.patch.dict(
+            release.HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES,
+            {release_id: allowlisted},
+            clear=True,
+        ):
+            resolved = release.resolve_pre_mutation_deployment(
+                release_base=self.release_base,
+                prepare_receipt_sha256=prepare_sha256,
+                expected_current=release_id,
+                active_link=active,
+                launchagent_dir=self.launchagents,
+                codex_config_path=self.base / "unused-config.toml",
+                morning_pointer_path=self.base / "unused-pointer.json",
+                plugin_cache_root=self.base / "unused-plugin-cache",
+                process_inspector=lambda *_values: copy.deepcopy(
+                    process_snapshot
+                ),
+            )
+        self.assertEqual(
+            resolved["status"],
+            "resolved_pre_mutation_no_change",
+        )
+        self.assertEqual(resolved["observed_current_release_id"], release_id)
+        self.assertEqual(active.resolve(), target)
+        release._assert_no_unresolved_deployment_transaction(
+            self.release_base
+        )
+
     def test_deployment_recovery_marker_must_be_exact_and_hmac_bound(self) -> None:
         built = self.build(passed=True)
         prepare = {

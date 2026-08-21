@@ -181,6 +181,24 @@ When preparing a receipt for an explicit rollback target, add
 receipt. An applied activation or rollback that replaces an existing active
 release always does.
 
+If an applied deployment stops before any service, link, plist, external
+profile, or runtime mutation because an installed LaunchAgent preimage cannot
+be backed up, keep the prepare receipt and production bytes intact. After the
+blocking preimage reader is repaired, close that exact no-mutation transaction
+through the repository-owned recovery command before generating a new drain
+receipt:
+
+```sh
+python3 scripts/release_manager.py resolve-pre-mutation-deployment \
+  --prepare-receipt-sha256 PREPARE_RECEIPT_SHA256 \
+  --expected-current PREVIOUS_RELEASE_ID
+```
+
+The command is valid only while `current`, the process set, installed
+LaunchAgent bytes, and external profile preimages still match the prepare
+receipt. It creates exact backup inventories and an HMAC recovery marker; it
+does not invoke launchctl or mutate a production service or subject runtime.
+
 Use `--expected-current absent` only for the first activation. Applied changes
 write prepare and postcommit receipts and hold the activation lock. When an old
 release is active, activation reacquires the exact claim-gate inode recorded by
