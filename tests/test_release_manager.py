@@ -4098,6 +4098,65 @@ if a.command == 'run-once':
         ):
             release._run_service_deactivation([service], StillLoadedRunner())
 
+    def test_exact_legacy_service_uses_label_bootout_and_fallback_bootstrap(
+        self,
+    ) -> None:
+        service = release._service_commands(
+            [release.CONCURRENT_TOPOLOGY[0]],
+            self.launchagents,
+            uid=501,
+        )[0]
+        fallback_path = self.base / "fallback.plist"
+        fallback_path.write_text("fallback\n", encoding="utf-8")
+        preimages = {
+            str(service["label"]): {
+                "format": "legacy_program_arguments_json",
+                "bootstrap_fallback_path": str(fallback_path),
+            }
+        }
+
+        class LegacyRunner:
+            def __init__(inner_self) -> None:
+                inner_self.commands: list[list[str]] = []
+
+            def __call__(inner_self, command):
+                command = list(command)
+                inner_self.commands.append(command)
+                if command[:2] == ["launchctl", "bootout"]:
+                    return {
+                        "returncode": 0 if len(command) == 3 else 5,
+                        "stdout": "",
+                    }
+                return {"returncode": 0, "stdout": ""}
+
+        deactivation_runner = LegacyRunner()
+        release._run_service_deactivation(
+            [service],
+            deactivation_runner,
+            legacy_preimages=preimages,
+        )
+        self.assertEqual(
+            deactivation_runner.commands,
+            [
+                service["disable"],
+                service["bootout"],
+                service["bootout_by_label"],
+            ],
+        )
+
+        activation_runner = LegacyRunner()
+        release._run_service_activation(
+            [service],
+            activation_runner,
+            legacy_preimages=preimages,
+        )
+        self.assertEqual(activation_runner.commands[0], service["enable"])
+        self.assertEqual(
+            activation_runner.commands[1],
+            [*service["bootstrap"][:-1], str(fallback_path)],
+        )
+        self.assertEqual(activation_runner.commands[2], service["verify"])
+
     def test_previous_canary_deactivation_uses_byte_locked_snapshot_before_status(
         self,
     ) -> None:
@@ -11264,11 +11323,22 @@ LIVE_CONFIG = Path(
             allowlist,
             clear=True,
         ):
+            fallback = plistlib.dumps(
+                {
+                    "Label": label,
+                    "ProgramArguments": arguments,
+                    "WorkingDirectory": "/tmp",
+                    "RunAtLoad": True,
+                    "KeepAlive": True,
+                },
+                sort_keys=True,
+            )
             records = release._backup_launchagent_plists(
                 self.launchagents,
                 [{"label": label}],
                 self.base / "legacy-launchagent-backup",
                 historical_release_id=release_id,
+                bootstrap_fallback_plists={label: fallback},
             )
             self.assertEqual(
                 records[label]["format"],
@@ -11277,6 +11347,10 @@ LIVE_CONFIG = Path(
             self.assertEqual(
                 Path(records[label]["backup_path"]).read_bytes(),
                 raw,
+            )
+            self.assertEqual(
+                Path(records[label]["bootstrap_fallback_path"]).read_bytes(),
+                fallback,
             )
             installed.write_bytes(
                 (json.dumps(["/usr/bin/false"], separators=(",", ":")) + "\n").encode()
@@ -11373,6 +11447,117 @@ LIVE_CONFIG = Path(
         )
         self.assertEqual(resolved["observed_current_release_id"], release_id)
         self.assertEqual(active.resolve(), target)
+        release._assert_no_unresolved_deployment_transaction(
+            self.release_base
+        )
+
+        prepare_two = {
+            **prepare,
+            "prepared_at": "2026-08-21T00:01:00+00:00",
+            "attempt": 2,
+        }
+        prepare_two_sha256 = release._write_deployment_receipt(
+            self.release_base,
+            prepare_two,
+        )
+        launchagent_backup_two = (
+            self.release_base
+            / "deployments"
+            / "launchagent-backups"
+            / prepare_two_sha256
+        )
+        with mock.patch.dict(
+            release.HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES,
+            {release_id: allowlisted},
+            clear=True,
+        ):
+            release._backup_launchagent_plists(
+                self.launchagents,
+                topology,
+                launchagent_backup_two,
+                historical_release_id=release_id,
+            )
+        launchagent_inventory_two = json.loads(
+            (launchagent_backup_two / "inventory.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for label, record in launchagent_inventory_two.items():
+            live = self.launchagents.resolve() / f"{label}.plist"
+            backup = Path(record["backup_path"])
+            self.assertEqual(record["live_path"], str(live))
+            self.assertEqual(release.sha256_file(live), record["sha256"])
+            self.assertEqual(release.sha256_file(backup), record["sha256"])
+        external_backup_two = (
+            self.release_base
+            / "deployments"
+            / "external-profile-backups"
+            / prepare_two_sha256
+        )
+        external_backup_two.mkdir(parents=True)
+        external_core = {
+            "schema_version": "study-intake-external-profile-backup-v1",
+            "ordinary_profile": {"state": "not_managed"},
+            "mcp_profile": {"state": "not_managed"},
+            "morning_pointer": {"state": "not_managed"},
+            "plugin_cache": {"state": "not_managed"},
+        }
+        release.atomic_json(
+            external_backup_two / "inventory.json",
+            {
+                **external_core,
+                "inventory_sha256": release.sha256_bytes(
+                    release.canonical_bytes(external_core)
+                ),
+            },
+        )
+        incomplete = {
+            "schema_version": release.DEPLOYMENT_POSTCOMMIT_SCHEMA,
+            "status": "rollback_incomplete",
+            "operation": "activate",
+            "release_id": release_id,
+            "prepare_receipt_sha256": prepare_two_sha256,
+            "restored_release_id": release_id,
+            "error_code": "service_bootout_failed:dashboard",
+            "rollback_errors": ["service_bootout_failed:dashboard"],
+            "external_profile_apply_proof": None,
+            "previous_canary_deactivation_proof": None,
+            "canary_arm_proof": None,
+            "subject_batch_recovery_proof": None,
+            "subject_batch_recovery_staged_activation_proof": None,
+            "subject_batch_recovery_finalization_proof": None,
+            "subject_batch_recovery_arm_proof": None,
+            "cs408_terminal_retirement_proof": None,
+            "cs408_writer_retirement_binding": None,
+            "formal_write_count": 0,
+        }
+        incomplete_sha256 = release._write_deployment_receipt(
+            self.release_base,
+            incomplete,
+        )
+        with mock.patch.dict(
+            release.HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES,
+            {release_id: allowlisted},
+            clear=True,
+        ):
+            resolved_two = release.resolve_pre_mutation_deployment(
+                release_base=self.release_base,
+                prepare_receipt_sha256=prepare_two_sha256,
+                expected_current=release_id,
+                incomplete_postcommit_receipt_sha256=incomplete_sha256,
+                active_link=active,
+                launchagent_dir=self.launchagents,
+                codex_config_path=self.base / "unused-config.toml",
+                morning_pointer_path=self.base / "unused-pointer.json",
+                plugin_cache_root=self.base / "unused-plugin-cache",
+                process_inspector=lambda *_values: copy.deepcopy(
+                    process_snapshot
+                ),
+            )
+        self.assertEqual(
+            resolved_two["status"],
+            "resolved_pre_mutation_no_change",
+        )
         release._assert_no_unresolved_deployment_transaction(
             self.release_base
         )

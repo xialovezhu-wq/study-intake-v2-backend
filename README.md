@@ -194,6 +194,13 @@ python3 scripts/release_manager.py resolve-pre-mutation-deployment \
   --expected-current PREVIOUS_RELEASE_ID
 ```
 
+If the failed transaction also emitted one `rollback_incomplete` postcommit but
+the old process set and every mutable surface are still byte-identical, bind
+that receipt explicitly with
+`--incomplete-postcommit-receipt-sha256 SHA256`. The resolver rejects any
+target link, external-profile, canary-arm, subject-recovery, or formal-write
+evidence before it can close such a transaction.
+
 The command is valid only while `current`, the process set, installed
 LaunchAgent bytes, and external profile preimages still match the prepare
 receipt. It creates exact backup inventories and an HMAC recovery marker; it

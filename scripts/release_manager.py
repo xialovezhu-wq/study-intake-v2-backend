@@ -5033,6 +5033,11 @@ def _service_commands(
                 f"gui/{resolved_uid}",
                 str(launchagent_dir / f"{service['label']}.plist"),
             ],
+            "bootout_by_label": [
+                "launchctl",
+                "bootout",
+                f"gui/{resolved_uid}/{service['label']}",
+            ],
             "enable": [
                 "launchctl",
                 "enable",
@@ -5075,6 +5080,8 @@ def _command_stdout(result: Any) -> str:
 def _run_service_bootout_idempotent(
     service: Mapping[str, Any],
     runner: CommandRunner,
+    *,
+    legacy_preimage: Mapping[str, Any] | None = None,
 ) -> bool:
     """Boot out one service, accepting only a verified already-absent target."""
 
@@ -5084,6 +5091,14 @@ def _run_service_bootout_idempotent(
     result = runner(command)
     if _command_returncode(result) == 0:
         return True
+
+    if (
+        isinstance(legacy_preimage, Mapping)
+        and legacy_preimage.get("format") == "legacy_program_arguments_json"
+    ):
+        fallback = service.get("bootout_by_label")
+        if isinstance(fallback, list) and _command_returncode(runner(fallback)) == 0:
+            return True
 
     verify = service.get("verify")
     if not isinstance(verify, list):
@@ -5113,12 +5128,19 @@ def _run_service_deactivation(
     runner: CommandRunner,
     *,
     paused_services: frozenset[str] = frozenset(),
+    legacy_preimages: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     for service in topology:
         for phase in ("disable", "bootout"):
             command = service.get(phase)
             if phase == "bootout":
-                succeeded = _run_service_bootout_idempotent(service, runner)
+                succeeded = _run_service_bootout_idempotent(
+                    service,
+                    runner,
+                    legacy_preimage=(legacy_preimages or {}).get(
+                        str(service.get("label") or "")
+                    ),
+                )
             else:
                 result = runner(command) if isinstance(command, list) else None
                 succeeded = (
@@ -5140,6 +5162,7 @@ def _run_service_activation(
     runner: CommandRunner,
     *,
     paused_services: frozenset[str] = frozenset(),
+    legacy_preimages: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     for service in topology:
         if service.get("name") in paused_services:
@@ -5159,6 +5182,21 @@ def _run_service_activation(
             continue
         for phase in ("enable", "bootstrap", "verify"):
             command = service.get(phase)
+            if phase == "bootstrap":
+                preimage = (legacy_preimages or {}).get(
+                    str(service.get("label") or "")
+                )
+                fallback_path = (
+                    preimage.get("bootstrap_fallback_path")
+                    if isinstance(preimage, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(command, list)
+                    and isinstance(fallback_path, str)
+                    and fallback_path
+                ):
+                    command = [*command[:-1], fallback_path]
             if not isinstance(command, list) or _command_returncode(runner(command)) != 0:
                 raise ReleaseError(f"service_{phase}_failed:{service.get('name')}")
 
@@ -5485,6 +5523,7 @@ def _validate_installed_launchagent_preimages(
     *,
     historical_release_id: str | None,
 ) -> None:
+    launchagent_dir = launchagent_dir.expanduser().resolve()
     for label in sorted({str(service["label"]) for service in topology}):
         _read_installed_launchagent_preimage(
             launchagent_dir,
@@ -5500,7 +5539,9 @@ def _backup_launchagent_plists(
     *,
     historical_release_id: str | None = None,
     allow_existing_empty_root: bool = False,
+    bootstrap_fallback_plists: Mapping[str, bytes] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    launchagent_dir = launchagent_dir.expanduser().resolve()
     labels = sorted({str(service["label"]) for service in topology})
     prepared = {
         label: _read_installed_launchagent_preimage(
@@ -5531,6 +5572,44 @@ def _backup_launchagent_plists(
                     "backup_path": str(backup),
                 }
             )
+            if (
+                record.get("format") == "legacy_program_arguments_json"
+                and bootstrap_fallback_plists is not None
+            ):
+                fallback = (bootstrap_fallback_plists or {}).get(label)
+                try:
+                    fallback_payload = (
+                        plistlib.loads(fallback)
+                        if isinstance(fallback, bytes)
+                        else None
+                    )
+                except Exception as exc:
+                    raise ReleaseError(
+                        f"historical_launchagent_fallback_invalid:{label}"
+                    ) from exc
+                legacy = HISTORICAL_INSTALLED_LAUNCHAGENT_PREIMAGES.get(
+                    str(historical_release_id or ""), {}
+                ).get(label)
+                if (
+                    not isinstance(fallback_payload, Mapping)
+                    or fallback_payload.get("Label") != label
+                    or not isinstance(legacy, Mapping)
+                    or fallback_payload.get("ProgramArguments")
+                    != legacy.get("program_arguments")
+                ):
+                    raise ReleaseError(
+                        f"historical_launchagent_fallback_invalid:{label}"
+                    )
+                fallback_root = backup_root / "bootstrap-fallbacks"
+                fallback_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fallback_path = fallback_root / f"{label}.plist"
+                _atomic_bytes(fallback_path, fallback, mode=0o600)
+                record.update(
+                    {
+                        "bootstrap_fallback_path": str(fallback_path),
+                        "bootstrap_fallback_sha256": sha256_bytes(fallback),
+                    }
+                )
         records[label] = record
     atomic_json(backup_root / "inventory.json", records, mode=0o600)
     return records
@@ -15933,6 +16012,7 @@ def resolve_pre_mutation_deployment(
     release_base: Path,
     prepare_receipt_sha256: str,
     expected_current: str,
+    incomplete_postcommit_receipt_sha256: str | None = None,
     active_link: Path,
     launchagent_dir: Path = DEFAULT_LAUNCHAGENT_DIR,
     codex_config_path: Path = DEFAULT_CODEX_CONFIG,
@@ -15957,6 +16037,22 @@ def resolve_pre_mutation_deployment(
     launchagent_dir = _safe_launchagent_dir(launchagent_dir, create=False)
     receipts = _deployment_receipt_objects(release_base)
     prepare = receipts.get(prepare_receipt_sha256)
+    linked_receipts = [
+        (digest, value)
+        for digest, value in receipts.items()
+        if value.get("prepare_receipt_sha256") == prepare_receipt_sha256
+    ]
+    incomplete_postcommit = None
+    if incomplete_postcommit_receipt_sha256 is not None:
+        if SHA256_RE.fullmatch(incomplete_postcommit_receipt_sha256) is None:
+            raise ReleaseError("pre_mutation_recovery_postcommit_invalid")
+        incomplete_postcommit = receipts.get(
+            incomplete_postcommit_receipt_sha256
+        )
+        if linked_receipts != [
+            (incomplete_postcommit_receipt_sha256, incomplete_postcommit)
+        ]:
+            raise ReleaseError("pre_mutation_recovery_postcommit_invalid")
     if (
         not isinstance(prepare, Mapping)
         or prepare.get("schema_version") != DEPLOYMENT_PREPARE_SCHEMA
@@ -15965,12 +16061,39 @@ def resolve_pre_mutation_deployment(
         or prepare.get("observed_current") in {None, ""}
         or not isinstance(prepare.get("release_id"), str)
         or SHA256_RE.fullmatch(str(prepare.get("release_id"))) is None
-        or any(
-            value.get("prepare_receipt_sha256") == prepare_receipt_sha256
-            for value in receipts.values()
-        )
+        or (linked_receipts and incomplete_postcommit is None)
     ):
         raise ReleaseError("pre_mutation_recovery_prepare_invalid")
+    if incomplete_postcommit is not None and (
+        not isinstance(incomplete_postcommit, Mapping)
+        or incomplete_postcommit.get("schema_version")
+        != DEPLOYMENT_POSTCOMMIT_SCHEMA
+        or incomplete_postcommit.get("status") != "rollback_incomplete"
+        or incomplete_postcommit.get("operation") != prepare.get("operation")
+        or incomplete_postcommit.get("release_id") != prepare.get("release_id")
+        or incomplete_postcommit.get("prepare_receipt_sha256")
+        != prepare_receipt_sha256
+        or incomplete_postcommit.get("restored_release_id")
+        != expected_current
+        or incomplete_postcommit.get("formal_write_count") != 0
+        or not isinstance(incomplete_postcommit.get("rollback_errors"), list)
+        or not incomplete_postcommit.get("rollback_errors")
+        or any(
+            incomplete_postcommit.get(field) is not None
+            for field in (
+                "external_profile_apply_proof",
+                "previous_canary_deactivation_proof",
+                "canary_arm_proof",
+                "subject_batch_recovery_proof",
+                "subject_batch_recovery_staged_activation_proof",
+                "subject_batch_recovery_finalization_proof",
+                "subject_batch_recovery_arm_proof",
+                "cs408_terminal_retirement_proof",
+                "cs408_writer_retirement_binding",
+            )
+        )
+    ):
+        raise ReleaseError("pre_mutation_recovery_postcommit_invalid")
     current_id, current_path = _current_release(active_link)
     if (
         current_id != expected_current
@@ -16041,26 +16164,61 @@ def resolve_pre_mutation_deployment(
         / "launchagent-backups"
         / prepare_receipt_sha256
     )
-    launchagent_records = _backup_launchagent_plists(
-        launchagent_dir,
-        topology_union,
-        backup_root,
-        historical_release_id=current_id,
-        allow_existing_empty_root=True,
-    )
+    launchagent_inventory_path = backup_root / "inventory.json"
+    if launchagent_inventory_path.is_file() and not launchagent_inventory_path.is_symlink():
+        launchagent_records = _bounded_manifest(launchagent_inventory_path)
+        if set(launchagent_records) != seen_labels:
+            raise ReleaseError("pre_mutation_recovery_launchagent_invalid")
+        for label, record in launchagent_records.items():
+            if not isinstance(record, Mapping) or record.get("existed") is not True:
+                raise ReleaseError("pre_mutation_recovery_launchagent_invalid")
+            live = launchagent_dir / f"{label}.plist"
+            backup = Path(str(record.get("backup_path") or ""))
+            checks = {
+                "live_path": record.get("live_path") == str(live),
+                "live_regular": not live.is_symlink() and live.is_file(),
+                "live_sha256": (
+                    live.is_file()
+                    and sha256_file(live) == record.get("sha256")
+                ),
+                "backup_regular": (
+                    not backup.is_symlink() and backup.is_file()
+                ),
+                "backup_sha256": (
+                    backup.is_file()
+                    and sha256_file(backup) == record.get("sha256")
+                ),
+            }
+            failed = next((name for name, passed in checks.items() if not passed), None)
+            if failed is not None:
+                raise ReleaseError(
+                    f"pre_mutation_recovery_launchagent_invalid:{label}:{failed}"
+                )
+    else:
+        launchagent_records = _backup_launchagent_plists(
+            launchagent_dir,
+            topology_union,
+            backup_root,
+            historical_release_id=current_id,
+            allow_existing_empty_root=True,
+        )
     external_backup_root = (
         release_base
         / "deployments"
         / "external-profile-backups"
         / prepare_receipt_sha256
     )
-    external_snapshot = _backup_external_profiles(
-        target,
-        codex_config_path=codex_config_path,
-        morning_pointer_path=morning_pointer_path,
-        plugin_cache_root=plugin_cache_root,
-        backup_root=external_backup_root,
-    )
+    external_inventory_path = external_backup_root / "inventory.json"
+    if external_inventory_path.is_file() and not external_inventory_path.is_symlink():
+        external_snapshot = _bounded_manifest(external_inventory_path)
+    else:
+        external_snapshot = _backup_external_profiles(
+            target,
+            codex_config_path=codex_config_path,
+            morning_pointer_path=morning_pointer_path,
+            plugin_cache_root=plugin_cache_root,
+            backup_root=external_backup_root,
+        )
     if external_snapshot is None:
         external_backup_root.mkdir(parents=True, exist_ok=False, mode=0o700)
         external_core = {
@@ -19890,6 +20048,17 @@ def activate_release(
                 if label not in seen_labels:
                     topology_union.append(service)
                     seen_labels.add(label)
+            rendered_previous_plists: dict[str, bytes] = {}
+            if locked_previous is not None:
+                verified_previous = verify_rollback_release(
+                    Path(locked_previous)
+                )
+                rendered_previous_plists = _render_launchagent_plists(
+                    Path(locked_previous),
+                    verified_previous["service_topology"],
+                    active_link,
+                    Path(str(verified_previous["runtime_data_root"])),
+                )
             _validate_installed_launchagent_preimages(
                 launchagent_dir,
                 topology_union,
@@ -19972,6 +20141,7 @@ def activate_release(
                 topology_union,
                 backup_root,
                 historical_release_id=locked_previous_id,
+                bootstrap_fallback_plists=rendered_previous_plists,
             )
             external_backup_root = (
                 release_base
@@ -20050,6 +20220,7 @@ def activate_release(
                     previous_topology,
                     runner,
                     paused_services=PAUSED_CONCURRENT_SERVICES,
+                    legacy_preimages=backup_records,
                 )
                 if locked_previous is not None:
                     stopped_process_snapshot = _wait_previous_processes_stopped(
@@ -21560,6 +21731,7 @@ def activate_release(
                         previous_topology,
                         runner,
                         paused_services=activation_paused_services,
+                        legacy_preimages=backup_records,
                     )
                 except Exception as service_exc:
                     rollback_errors.append(str(service_exc))
@@ -24871,6 +25043,9 @@ def parser() -> argparse.ArgumentParser:
     )
     resolve_pre_mutation.add_argument("--expected-current", required=True)
     resolve_pre_mutation.add_argument(
+        "--incomplete-postcommit-receipt-sha256"
+    )
+    resolve_pre_mutation.add_argument(
         "--active-link", type=Path, default=DEFAULT_ACTIVE_LINK
     )
     resolve_pre_mutation.add_argument(
@@ -25124,6 +25299,9 @@ def main() -> int:
                 release_base=args.release_base,
                 prepare_receipt_sha256=args.prepare_receipt_sha256,
                 expected_current=args.expected_current,
+                incomplete_postcommit_receipt_sha256=(
+                    args.incomplete_postcommit_receipt_sha256
+                ),
                 active_link=args.active_link,
                 launchagent_dir=args.launchagent_dir,
                 codex_config_path=args.codex_config,
