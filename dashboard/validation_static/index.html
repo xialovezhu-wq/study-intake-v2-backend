@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f4f7fb">
-  <title>Study Intake 上线前验收控制台</title>
+  <title>Study Intake 离线验收控制台</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/validation-console/styles.css">
 </head>
@@ -19,8 +19,8 @@
       </div>
       <div class="brand-copy">
         <p class="utility-label">Commissioning / Study Intake</p>
-        <h1>上线前验收控制台</h1>
-        <p>确认三科入口、只读 MCP 与自动化交接都在同一条安全闭包内。</p>
+        <h1>离线验收控制台</h1>
+        <p>查看三科入口、只读 MCP 与自动化交接的离线验收快照。</p>
       </div>
       <div class="header-links">
         <a href="/" class="quiet-link">返回任务 Dashboard</a>
@@ -29,20 +29,28 @@
     </header>
 
     <main id="console-main" tabindex="-1">
+      <section class="scope-note" aria-labelledby="scope-heading">
+        <div>
+          <p class="utility-label">Console scope</p>
+          <h2 id="scope-heading">离线验收与审计界面</h2>
+        </div>
+        <p>本页不参与真实 Capture 的授权或消费。生产运行状态请查看<a href="/">任务 Dashboard</a>和<a href="/healthz">/healthz</a>。</p>
+      </section>
+
       <section class="status-bench" aria-labelledby="status-heading">
         <div class="bench-title">
           <div>
             <p class="utility-label">Safety bench</p>
-            <h2 id="status-heading">当前生产面保持离线互锁</h2>
+            <h2 id="status-heading">离线验收面保持安全锁定</h2>
           </div>
           <span id="updated-at" class="updated-at" role="status" aria-live="polite">读取中</span>
         </div>
         <div class="status-grid">
           <div class="status-cell"><span>Current release</span><strong id="release-value">—</strong></div>
           <div class="status-cell"><span>Execution mode</span><strong id="execution-value" data-tone="safe">—</strong></div>
-          <div class="status-cell"><span>Live gate</span><strong id="gate-value" data-tone="safe">—</strong></div>
-          <div class="status-cell"><span>Authorization</span><strong id="authorization-value" data-tone="safe">—</strong></div>
-          <div class="status-cell"><span>Production accepted</span><strong id="production-value">—</strong></div>
+          <div class="status-cell"><span>Offline console gate</span><strong id="gate-value" data-tone="safe">—</strong></div>
+          <div class="status-cell"><span>Console authorization</span><strong id="authorization-value" data-tone="safe">—</strong></div>
+          <div class="status-cell"><span>参与真实 Capture 放行</span><strong id="production-value">否</strong></div>
           <div class="status-cell"><span>Formal write</span><strong id="formal-value">—</strong></div>
         </div>
       </section>
@@ -78,6 +86,7 @@
           <div class="readiness-row" role="row" data-subject-row="cs408"><strong role="cell">408</strong><span role="cell" data-skill-state>—</span><span role="cell" data-mcp-state>—</span></div>
           <div class="readiness-row" role="row" data-subject-row="english"><strong role="cell">英语</strong><span role="cell" data-skill-state>—</span><span role="cell" data-mcp-state>—</span></div>
         </div>
+        <p class="snapshot-note">PENDING 表示该离线技术验收快照尚未发布，不代表生产 Dispatcher、MCP 或 Capture 路由运行失败。</p>
       </section>
 
       <section class="stage-cards" aria-label="自动化阶段">
@@ -109,14 +118,14 @@
           <button id="preflight-button" class="button button--quiet" type="button" disabled>运行只读预检</button>
           <button id="report-button" class="button button--quiet" type="button">查看技术验收报告</button>
           <button id="audit-button" class="button button--quiet" type="button" disabled>导出审核包</button>
-          <button id="lock-button" class="button button--danger" type="button">紧急锁定</button>
+          <button id="lock-button" class="button button--danger" type="button" disabled>离线控制台已锁定</button>
           <button id="future-button" class="button button--quiet" type="button">未来 Live 验收步骤</button>
         </div>
       </section>
 
       <section class="remaining-panel" aria-labelledby="remaining-heading">
-        <span class="remaining-icon" aria-hidden="true">1</span>
-        <div><p class="utility-label">Remaining gate</p><h2 id="remaining-heading">等待本轮技术复验</h2><p id="remaining-copy">真实模型 Capture 验收仍被明确锁定；技术状态完成后这里会只保留这一项。</p></div>
+        <span id="remaining-icon" class="remaining-icon" aria-hidden="true">i</span>
+        <div><p class="utility-label">Offline snapshot</p><h2 id="remaining-heading">离线验收快照尚未发布</h2><p id="remaining-copy">生产运行状态以任务 Dashboard 和 /healthz 为准。</p></div>
       </section>
 
       <section id="error-panel" class="error-panel" role="alert" hidden>

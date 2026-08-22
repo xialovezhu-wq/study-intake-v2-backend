@@ -10,6 +10,9 @@ CSS = (ROOT / "static/styles.css").read_text(encoding="utf-8")
 JS = (ROOT / "static/app.js").read_text(encoding="utf-8")
 ITEMS = json.loads((ROOT / "tests/fixtures/api-items-response-v5.json").read_text(encoding="utf-8"))
 DETAIL = json.loads((ROOT / "tests/fixtures/api-item-detail-v2.json").read_text(encoding="utf-8"))
+VALIDATION_HTML = (ROOT / "validation_static/index.html").read_text(encoding="utf-8")
+VALIDATION_CSS = (ROOT / "validation_static/styles.css").read_text(encoding="utf-8")
+VALIDATION_JS = (ROOT / "validation_static/app.js").read_text(encoding="utf-8")
 
 
 class ApiBindingTests(unittest.TestCase):
@@ -87,6 +90,74 @@ class StaticBoundaryTests(unittest.TestCase):
         self.assertIn("缺少唯一的等待或处理中映射", JS)
         self.assertIn("技术失败映射不完整", JS)
         self.assertIn("成功质量映射不符合冻结合同", JS)
+
+
+class ValidationConsoleStaticBindingTests(unittest.TestCase):
+    def test_error_panel_defaults_hidden_with_local_css_override(self):
+        self.assertRegex(
+            VALIDATION_HTML,
+            r'<section id="error-panel" class="error-panel" role="alert" hidden>',
+        )
+        self.assertRegex(
+            VALIDATION_CSS,
+            r"\.error-panel\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}",
+        )
+        self.assertNotRegex(VALIDATION_CSS, r"(?m)^\s*\[hidden\]\s*\{")
+
+    def test_success_hides_error_and_failure_clears_stale_success(self):
+        self.assertIn('$("#error-panel").hidden = true;', VALIDATION_JS)
+        self.assertIn('$("#error-panel").hidden = false;', VALIDATION_JS)
+        self.assertIn("state.value = null;", VALIDATION_JS)
+        self.assertIn("setWriteActionsDisabled(true);", VALIDATION_JS)
+        self.assertIn('$(".remaining-panel").dataset.complete = "false";', VALIDATION_JS)
+        self.assertIn("renderUnavailable(error);", VALIDATION_JS)
+        self.assertIn("throw new Error(`HTTP ${response.status}`);", VALIDATION_JS)
+        self.assertRegex(
+            VALIDATION_JS,
+            r"(?s)try\s*\{.*render\(await response\.json\(\)\);.*\}\s*catch\s*\(error\)\s*\{\s*renderUnavailable\(error\);",
+        )
+        self.assertIn("`读取失败：${message}`", VALIDATION_JS)
+        self.assertIn('setText("updated-at", "状态不可用");', VALIDATION_JS)
+
+    def test_production_offline_scope_and_pending_semantics_are_explicit(self):
+        self.assertIn("本页不参与真实 Capture 的授权或消费", VALIDATION_HTML)
+        self.assertIn('href="/"', VALIDATION_HTML)
+        self.assertIn('href="/healthz"', VALIDATION_HTML)
+        self.assertIn("离线验收面保持安全锁定", VALIDATION_HTML)
+        self.assertIn("PENDING 表示该离线技术验收快照尚未发布", VALIDATION_HTML)
+        self.assertIn(
+            '({ passed: "PASS", failed: "FAIL", pending: "PENDING" })',
+            VALIDATION_JS,
+        )
+        self.assertIn(
+            'value.mode === "production" && value.execution_mode === "OFFLINE"',
+            VALIDATION_JS,
+        )
+        self.assertIn("生产运行以任务 Dashboard 和 /healthz 为准", VALIDATION_JS)
+        self.assertNotIn('pending: "PASS"', VALIDATION_JS)
+
+    def test_production_write_actions_remain_disabled(self):
+        self.assertIn(
+            'value.mode !== "fixture" || !value.terra.action_enabled',
+            VALIDATION_JS,
+        )
+        self.assertIn(
+            'value.mode !== "fixture" || !value.luna.action_enabled',
+            VALIDATION_JS,
+        )
+        self.assertIn(
+            'value.mode !== "fixture" || !value.sol_handoff.action_enabled',
+            VALIDATION_JS,
+        )
+        self.assertIn(
+            'value.mode !== "fixture" || value.emergency_locked === true',
+            VALIDATION_JS,
+        )
+        self.assertRegex(
+            VALIDATION_HTML,
+            r'<button id="lock-button"[^>]* disabled>',
+        )
+        self.assertIn("离线控制台已锁定", VALIDATION_HTML)
 
 
 class AccessibilityAndResponsiveTests(unittest.TestCase):

@@ -80,6 +80,22 @@ Canary 只接收 activation high-watermark 之后的 producer record。旧
 backlog 保持冻结。单科失败时，该科 producer 与持久队列继续工作，
 只暂停该科 Luna consumer；另外两科保持独立。
 
+## Validation Console 离线语义
+
+`/validation-console/` 是离线验收与审计界面，不参与真实 Capture 的
+授权、认领、消费或生产放行。生产运行状态必须查看根路径任务 Dashboard
+和 `/healthz`。
+
+生产实例的公开状态固定保持 `execution_mode=OFFLINE`、
+`live_gate=LOCKED`、`authorization=ABSENT`、
+`production_accepted=false` 和 `formal_write_count=0`。这些值是该离线界面的
+安全设计，不表示生产 Dispatcher、MCP 或 Capture 路由被阻塞。
+
+三科 Skill、MCP preflight 与 engineering 的 `PENDING` 表示该离线技术验收
+快照尚未发布，不得由 `/healthz` 或部署报告合成为 `passed`。生产页面的
+Terra、Luna、Sol handoff、preflight 与 emergency-lock 写操作保持不可用；
+技术报告、未来步骤和同源只读跳转仍可查看。
+
 ## 固定入口
 
 - 地址：`http://127.0.0.1:8767/`
@@ -251,7 +267,7 @@ v3 要求数学、408、英语三个学科、三个 Dispatcher 和全局 Sol 写
 
 页面可以直接从真实 item 回执计算就绪率、延迟、失败/过期和采用回执覆盖。节省时间与质量提升若没有带来源的对照指标，会明确显示“尚未形成证据”。
 
-## GET-only API
+## 根任务 Dashboard GET-only API
 
 - `GET /healthz`
 - `GET /api/v1/summary?date=YYYY-MM-DD&subject=all|math|cs408|english`
@@ -259,7 +275,11 @@ v3 要求数学、408、英语三个学科、三个 Dispatcher 和全局 Sol 写
 - `GET /api/v1/items?date=YYYY-MM-DD&subject=all|math|cs408|english&status=...`
 - `GET /api/v1/items/{capture_id}?date=YYYY-MM-DD&subject=...`
 
-所有非 GET 方法返回 `405`。服务校验 Host，发送 CSP、no-store、no-CORS、防嵌入和同源隔离响应头，静态文件采用固定路由而不是用户可控文件路径。
+上述根任务 Dashboard API 的所有非 GET 方法返回 `405`。隔离的
+`/api/v1/validation-console/*` namespace 另有受保护的 fixture 控制路径，
+但生产实例继续拒绝授权、campaign、preflight、handoff 与 promotion 操作。
+服务校验 Host，发送 CSP、no-store、no-CORS、防嵌入和同源隔离响应头，
+静态文件采用固定路由而不是用户可控文件路径。
 
 并发验收投影与日常队列投影分离。当前 v2 入口按科目异步发布首条 canary 状态，不要求三科 barrier，也不要求三科同时产生 capture。每科证据从 HMAC terminal index、terminal receipt、task-supervisor identity/exit、processing receipt、MCP grounding 和内容寻址产物重新打开；mutable telemetry 只在独立重算半开执行区间和峰值之后作为非权威交叉核对。只有真实执行区间重叠时才展示 overlap，不从 dispatcher 就绪状态推导并发。
 

@@ -62,13 +62,57 @@ function setText(id, value) {
   if (node) node.textContent = String(value ?? "—");
 }
 
+function setWriteActionsDisabled(disabled) {
+  document.querySelector('[data-action="authorize-terra"]').disabled = disabled;
+  document.querySelector('[data-action="authorize-luna"]').disabled = disabled;
+  document.querySelector('[data-action="export-handoff"]').disabled = disabled;
+  $("#preflight-button").disabled = disabled;
+  $("#lock-button").disabled = disabled;
+}
+
+function renderUnavailable(error) {
+  state.value = null;
+  for (const id of [
+    "release-value",
+    "execution-value",
+    "gate-value",
+    "authorization-value",
+    "production-value",
+    "formal-value",
+  ]) setText(id, "状态不可用");
+  for (const subject of ["math", "cs408", "english"]) {
+    const row = document.querySelector(`[data-subject-row="${subject}"]`);
+    $("[data-skill-state]", row).replaceChildren(pill("unknown"));
+    $("[data-mcp-state]", row).replaceChildren(pill("unknown"));
+  }
+  for (const name of ["terra", "luna", "sol"]) {
+    const chip = document.querySelector(`[data-stage-state="${name}"]`);
+    chip.textContent = "状态不可用";
+    document.querySelector(`[data-stage-node="${name}"]`).dataset.state = "locked";
+  }
+  for (const name of ["planned", "waiting", "running", "terminal"]) {
+    const node = document.querySelector(`[data-branch="${name}"]`);
+    if (node) node.textContent = "—";
+  }
+  setWriteActionsDisabled(true);
+  $("#audit-button").disabled = true;
+  setText("lock-button", "离线控制台已锁定");
+  $(".remaining-panel").dataset.complete = "false";
+  setText("remaining-icon", "!");
+  setText("remaining-heading", "无法读取离线验收快照");
+  setText("remaining-copy", "这是真实的控制台状态读取错误；生产运行状态请另行查看任务 Dashboard 和 /healthz。");
+  const message = String(error?.message ?? error ?? "未知错误");
+  setText("error-copy", `读取失败：${message}`);
+  $("#error-panel").hidden = false;
+  setText("updated-at", "状态不可用");
+}
+
 function render(value) {
-  state.value = value;
   setText("release-value", value.current_release);
   setText("execution-value", value.execution_mode);
   setText("gate-value", value.live_gate);
   setText("authorization-value", value.authorization);
-  setText("production-value", String(value.production_accepted).toUpperCase());
+  setText("production-value", value.production_accepted ? "异常：是" : "否");
   setText("formal-value", value.formal_write_count);
   setText("updated-at", `revision ${value.revision} · 刚刚刷新`);
 
@@ -92,22 +136,33 @@ function render(value) {
     const node = document.querySelector(`[data-branch="${name}"]`);
     if (node) node.textContent = String(count);
   }
-  document.querySelector('[data-action="authorize-terra"]').disabled = !value.terra.action_enabled;
-  document.querySelector('[data-action="authorize-luna"]').disabled = !value.luna.action_enabled;
-  document.querySelector('[data-action="export-handoff"]').disabled = !value.sol_handoff.action_enabled;
+  document.querySelector('[data-action="authorize-terra"]').disabled = value.mode !== "fixture" || !value.terra.action_enabled;
+  document.querySelector('[data-action="authorize-luna"]').disabled = value.mode !== "fixture" || !value.luna.action_enabled;
+  document.querySelector('[data-action="export-handoff"]').disabled = value.mode !== "fixture" || !value.sol_handoff.action_enabled;
   $("#preflight-button").disabled = value.mode !== "fixture";
   $("#audit-button").disabled = !value.audit_package?.available;
+  const lockButton = $("#lock-button");
+  lockButton.disabled = value.mode !== "fixture" || value.emergency_locked === true;
+  lockButton.textContent = value.mode !== "fixture" ? "离线控制台已锁定" : value.emergency_locked ? "已锁定" : "紧急锁定";
 
   const remaining = $(".remaining-panel");
-  remaining.dataset.complete = String(value.only_real_model_capture_validation_remains);
-  if (value.only_real_model_capture_validation_remains) {
+  const productionOffline = value.mode === "production" && value.execution_mode === "OFFLINE";
+  remaining.dataset.complete = String(!productionOffline && value.only_real_model_capture_validation_remains);
+  if (productionOffline) {
+    setText("remaining-icon", "i");
+    setText("remaining-heading", "离线验收快照尚未发布");
+    setText("remaining-copy", "PENDING 仅表示本页离线技术验收快照尚未发布，不代表生产 Dispatcher、MCP 或 Capture 路由失败。生产运行以任务 Dashboard 和 /healthz 为准。");
+  } else if (value.only_real_model_capture_validation_remains) {
+    setText("remaining-icon", "1");
     setText("remaining-heading", "只剩真实模型 Capture 验收");
     setText("remaining-copy", "所有非 Live 技术门已通过；真实 Terra/Luna、全新 Capture 和 promotion 仍等待未来显式授权。");
   } else {
+    setText("remaining-icon", "i");
     setText("remaining-heading", "等待本轮技术复验");
     setText("remaining-copy", "真实模型 Capture 验收仍被明确锁定；技术状态完成后这里会只保留这一项。");
   }
   $("#error-panel").hidden = true;
+  state.value = value;
 }
 
 async function loadState() {
@@ -116,9 +171,7 @@ async function loadState() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     render(await response.json());
   } catch (error) {
-    $("#error-copy").textContent = `读取失败：${error.message}`;
-    $("#error-panel").hidden = false;
-    setText("updated-at", "状态不可用");
+    renderUnavailable(error);
   }
 }
 

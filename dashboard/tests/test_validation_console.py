@@ -190,6 +190,14 @@ class ValidationConsoleStoreTests(unittest.TestCase):
             lambda: production.issue_authorization(
                 "terra", payload(), **headers
             ),
+            lambda: production.issue_authorization(
+                "luna",
+                {
+                    **payload(),
+                    "verified_terra_plan_sha256": sha("production-terra-plan"),
+                },
+                **headers,
+            ),
             lambda: production.create_campaign(
                 {"captures": [payload()]}, **headers
             ),
@@ -211,8 +219,17 @@ class ValidationConsoleStoreTests(unittest.TestCase):
         )
         public = reopened.public_state()
         self.assertEqual(public["authorization"], "ABSENT")
+        self.assertEqual(public["execution_mode"], "OFFLINE")
         self.assertEqual(public["live_gate"], "LOCKED")
         self.assertFalse(public["production_accepted"])
+        self.assertEqual(public["formal_write_count"], 0)
+        self.assertTrue(public["emergency_locked"])
+        self.assertFalse(public["terra"]["action_enabled"])
+        self.assertFalse(public["luna"]["action_enabled"])
+        self.assertFalse(public["sol_handoff"]["action_enabled"])
+        self.assertEqual(set(public["skills"].values()), {"pending"})
+        self.assertEqual(set(public["mcp_preflight"].values()), {"pending"})
+        self.assertEqual(set(public["engineering"].values()), {"pending"})
         raw = json.loads(reopened.state_path.read_text(encoding="utf-8"))
         self.assertEqual(raw["production_promotion_attempt_count"], 0)
 
@@ -306,9 +323,14 @@ class ValidationConsoleHTTPTests(unittest.TestCase):
         return response.status, payload, response_headers
 
     def test_static_console_and_state_endpoint_are_available(self) -> None:
+        status, body, _headers = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Study Intake Dashboard", body)
+        self.assertNotIn("本页不参与真实 Capture".encode("utf-8"), body)
         status, body, _headers = self.request("GET", "/validation-console/")
         self.assertEqual(status, 200)
-        self.assertIn("上线前验收控制台".encode("utf-8"), body)
+        self.assertIn("离线验收控制台".encode("utf-8"), body)
+        self.assertIn("本页不参与真实 Capture 的授权或消费".encode("utf-8"), body)
         status, body, _headers = self.request(
             "GET", "/api/v1/validation-console/state"
         )
@@ -318,6 +340,14 @@ class ValidationConsoleHTTPTests(unittest.TestCase):
         self.assertEqual(value["live_gate"], "LOCKED")
         self.assertEqual(value["authorization"], "ABSENT")
         self.assertFalse(value["production_accepted"])
+        self.assertEqual(value["formal_write_count"], 0)
+        self.assertTrue(value["emergency_locked"])
+        self.assertFalse(value["terra"]["action_enabled"])
+        self.assertFalse(value["luna"]["action_enabled"])
+        self.assertFalse(value["sol_handoff"]["action_enabled"])
+        self.assertEqual(set(value["skills"].values()), {"pending"})
+        self.assertEqual(set(value["mcp_preflight"].values()), {"pending"})
+        self.assertEqual(set(value["engineering"].values()), {"pending"})
 
     def test_production_authorize_and_preflight_posts_are_locked(self) -> None:
         state = self.validation.public_state()
@@ -334,6 +364,27 @@ class ValidationConsoleHTTPTests(unittest.TestCase):
         )
         self.assertEqual(status, 423)
         self.assertEqual(json.loads(body)["error"], "offline_locked")
+        headers["X-Study-Nonce"] = "nonce-http-luna-locked-0001"
+        status, body, _headers = self.request(
+            "POST",
+            "/api/v1/validation-console/authorize/luna",
+            body={
+                **payload(),
+                "verified_terra_plan_sha256": sha("http-terra-plan"),
+            },
+            headers=headers,
+        )
+        self.assertEqual(status, 423)
+        self.assertEqual(json.loads(body)["error"], "offline_locked")
+        headers["X-Study-Nonce"] = "nonce-http-sol-locked-0001"
+        status, body, _headers = self.request(
+            "POST",
+            "/api/v1/validation-console/handoff/export",
+            body={"quality_outcome": "accepted"},
+            headers=headers,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"], "handoff_not_ready")
         headers["X-Study-Nonce"] = "nonce-http-preflight-fixture-0001"
         status, body, _headers = self.request(
             "POST",
