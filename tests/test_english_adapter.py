@@ -24,12 +24,14 @@ sys.path.insert(0, str(ROOT / "bin"))
 from concurrent_dispatch import (  # noqa: E402
     ConcurrentDispatcher,
     DispatchError,
+    FrozenTask,
     LeaseStore,
 )
 from core_dispatch_bridge import (  # noqa: E402
     CoreCandidateSubprocessRunner,
     producer_authority_binding,
     scan_eligible_candidates,
+    task_authorization_capture_manifest,
 )
 
 from preprocessor_core import (  # noqa: E402
@@ -856,6 +858,104 @@ print(json.dumps({
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].input_binding["batch_trigger"], "capture_threshold")
         self.assertEqual(rows[0].input_binding["capture_count"], 5)
+
+    def test_ordinary_microbatch_authorization_manifest_reopens_every_receipt(
+        self,
+    ) -> None:
+        events = [self.write_sentence(index) for index in range(1, 6)]
+        expected_receipts: list[str] = []
+        for event in events:
+            event_path = (
+                self.state
+                / "events"
+                / self.study_date
+                / f"{event['event_id']}.json"
+            )
+            receipt_path = (
+                self.state
+                / "receipts"
+                / "capture"
+                / self.study_date
+                / f"CAPTURE-{event['event_id'][4:]}.json"
+            )
+            identity = {
+                "schema_version": "english_capture_receipt_v2",
+                "receipt_id": f"CAPTURE-{event['event_id'][4:]}",
+                "capture_id": event["event_id"],
+                "event_path": str(event_path),
+                "event_sha256": sha256_value(event),
+                "request_sha256": event["request_sha256"],
+                "formal_write_count": 0,
+                "formal_writeback": "none",
+                "supersedes_event_id": event.get("supersedes_event_id"),
+                "stages": {
+                    "event_written": True,
+                    "schema_validated": True,
+                    "dispatcher_accepted": False,
+                    "package_visible": False,
+                },
+            }
+            atomic_write_json(
+                receipt_path,
+                {
+                    **identity,
+                    "status": "created",
+                    "receipt_path": str(receipt_path),
+                    "original_status": "created",
+                    "replayed": False,
+                },
+            )
+            expected_receipts.append(sha256_value(identity))
+
+        candidate = self.adapter().candidates(
+            self.adapter().status(self.study_date)
+        )[0]
+        payload = copy.deepcopy(
+            dict(FrozenTask.from_candidate(candidate).frozen_payload)
+        )
+        payload["input_binding"]["producer_binding_attestation_bundle"] = {
+            "schema_version": "producer_binding_attestation_bundle_v1",
+            "subject": "english",
+            "capture_id": candidate.capture_id,
+            "attestation_sha256s": [
+                f"{index:x}" * 64 for index in range(1, 6)
+            ],
+            "descriptor_sha256": "f" * 64,
+            "formal_write_count": 0,
+        }
+        frozen = FrozenTask(payload)
+
+        capture_manifest = task_authorization_capture_manifest(
+            self.config, frozen
+        )
+
+        self.assertEqual(
+            [row["capture_id"] for row in capture_manifest],
+            [event["event_id"] for event in events],
+        )
+        self.assertEqual(
+            [row["source_receipt_sha256"] for row in capture_manifest],
+            expected_receipts,
+        )
+        self.assertEqual(
+            [row["producer_attestation_sha256"] for row in capture_manifest],
+            [f"{index:x}" * 64 for index in range(1, 6)],
+        )
+
+        receipt_path = (
+            self.state
+            / "receipts"
+            / "capture"
+            / self.study_date
+            / f"CAPTURE-{events[2]['event_id'][4:]}.json"
+        )
+        receipt_path.write_text("{}\n", encoding="utf-8")
+        with self.assertRaises(DispatchError) as caught:
+            task_authorization_capture_manifest(self.config, frozen)
+        self.assertEqual(
+            caught.exception.code,
+            "task_authorization_source_receipt_invalid",
+        )
 
     def test_malformed_event_envelope_roles_and_source_kind_fail_closed(self) -> None:
         event = self.write_sentence(777)
