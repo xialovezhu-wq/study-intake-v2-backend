@@ -25,6 +25,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from zoneinfo import ZoneInfo
 
 from concurrent_dispatch import (
     DispatchCancelled,
@@ -92,6 +93,271 @@ _RELEASE_SUBJECT_CONTRACT_CACHE: dict[
 
 PRODUCER_AUTHORITY_SCHEMA = "study-intake-producer-authority-v1"
 PRODUCER_DISPATCH_INPUT_SCHEMA = "study-intake-producer-dispatch-input-v2"
+
+
+def _authorization_sha256(value: Any, code: str) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+    ):
+        raise DispatchError(code)
+    return value
+
+
+def _english_capture_receipt_identity(
+    *,
+    state_dir: Path,
+    event: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    event_id = event.get("event_id")
+    occurred_at = event.get("occurred_at")
+    if not isinstance(event_id, str) or not isinstance(occurred_at, str):
+        raise DispatchError("task_authorization_source_receipt_invalid")
+    try:
+        parsed = dt.datetime.fromisoformat(
+            occurred_at[:-1] + "+00:00"
+            if occurred_at.endswith("Z")
+            else occurred_at
+        )
+    except ValueError as exc:
+        raise DispatchError(
+            "task_authorization_source_receipt_invalid"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise DispatchError("task_authorization_source_receipt_invalid")
+    study_date = parsed.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    receipt_path = (
+        state_dir
+        / "receipts"
+        / "capture"
+        / study_date
+        / f"CAPTURE-{event_id[4:]}.json"
+    )
+    event_path = state_dir / "events" / study_date / f"{event_id}.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DispatchError(
+            "task_authorization_source_receipt_invalid"
+        ) from exc
+    if not isinstance(receipt, Mapping):
+        raise DispatchError("task_authorization_source_receipt_invalid")
+    identity = {
+        "schema_version": receipt.get("schema_version"),
+        "receipt_id": receipt.get("receipt_id"),
+        "capture_id": receipt.get("capture_id"),
+        "event_path": receipt.get("event_path"),
+        "event_sha256": receipt.get("event_sha256"),
+        "request_sha256": receipt.get("request_sha256"),
+        "formal_write_count": receipt.get("formal_write_count"),
+        "formal_writeback": receipt.get("formal_writeback"),
+        "supersedes_event_id": receipt.get("supersedes_event_id"),
+        "stages": copy.deepcopy(receipt.get("stages")),
+    }
+    stages = identity["stages"]
+    if (
+        identity["schema_version"] != "english_capture_receipt_v2"
+        or identity["receipt_id"] != f"CAPTURE-{event_id[4:]}"
+        or identity["capture_id"] != event_id
+        or not isinstance(identity["event_path"], str)
+        or Path(identity["event_path"]).resolve()
+        != event_path.resolve()
+        or identity["event_sha256"] != sha256_value(event)
+        or identity["request_sha256"] != event.get("request_sha256")
+        or identity["formal_write_count"] != 0
+        or identity["formal_writeback"] != "none"
+        or identity["supersedes_event_id"]
+        != event.get("supersedes_event_id")
+        or not isinstance(stages, Mapping)
+        or stages.get("event_written") is not True
+        or stages.get("schema_validated") is not True
+        or not isinstance(receipt.get("receipt_path"), str)
+        or Path(str(receipt["receipt_path"])).resolve()
+        != receipt_path.resolve()
+    ):
+        raise DispatchError("task_authorization_source_receipt_invalid")
+    return identity, sha256_value(identity)
+
+
+def task_authorization_capture_manifest(
+    config: Mapping[str, Any], task: FrozenTask
+) -> list[dict[str, str]]:
+    """Build a capability-only manifest without changing FrozenTask identity."""
+
+    frozen = task.frozen_payload
+    subject = frozen.get("subject")
+    raw_members = frozen.get("content_group_members")
+    members = (
+        raw_members
+        if isinstance(raw_members, list) and raw_members
+        else [frozen]
+    )
+    result: list[dict[str, str]] = []
+    if subject == "english":
+        adapters = config.get("adapters")
+        adapter = (
+            adapters.get("english")
+            if isinstance(adapters, Mapping)
+            else None
+        )
+        raw_state_dir = (
+            adapter.get("state_dir")
+            if isinstance(adapter, Mapping)
+            else None
+        )
+        if not isinstance(raw_state_dir, str):
+            raise DispatchError("task_authorization_source_receipt_invalid")
+        state_dir = Path(raw_state_dir).expanduser().resolve()
+        for member in members:
+            if not isinstance(member, Mapping):
+                raise DispatchError("task_authorization_capture_manifest_invalid")
+            model_input = member.get("model_input")
+            input_binding = member.get("input_binding")
+            events = (
+                model_input.get("batch_events")
+                if isinstance(model_input, Mapping)
+                else None
+            )
+            event_ids = (
+                input_binding.get("capture_event_ids")
+                if isinstance(input_binding, Mapping)
+                else None
+            )
+            event_hashes = (
+                input_binding.get("capture_event_sha256")
+                if isinstance(input_binding, Mapping)
+                else None
+            )
+            bundle = (
+                input_binding.get("producer_binding_attestation_bundle")
+                if isinstance(input_binding, Mapping)
+                else None
+            )
+            attestation_sha256s = (
+                bundle.get("attestation_sha256s")
+                if isinstance(bundle, Mapping)
+                else None
+            )
+            if (
+                not isinstance(events, list)
+                or not events
+                or not isinstance(event_ids, list)
+                or not isinstance(event_hashes, Mapping)
+                or not isinstance(attestation_sha256s, list)
+                or len(events) != len(event_ids)
+                or len(events) != len(attestation_sha256s)
+                or [event.get("event_id") for event in events]
+                != event_ids
+            ):
+                raise DispatchError(
+                    "task_authorization_capture_manifest_invalid"
+                )
+            for event, attestation_sha256 in zip(
+                events, attestation_sha256s, strict=True
+            ):
+                if not isinstance(event, Mapping):
+                    raise DispatchError(
+                        "task_authorization_capture_manifest_invalid"
+                    )
+                event_id = str(event.get("event_id") or "")
+                content_sha256 = _authorization_sha256(
+                    event_hashes.get(event_id),
+                    "task_authorization_capture_manifest_invalid",
+                )
+                if content_sha256 != sha256_value(event):
+                    raise DispatchError(
+                        "task_authorization_capture_manifest_invalid"
+                    )
+                _identity, source_receipt_sha256 = (
+                    _english_capture_receipt_identity(
+                        state_dir=state_dir,
+                        event=event,
+                    )
+                )
+                result.append(
+                    {
+                        "capture_id": event_id,
+                        "capture_content_sha256": content_sha256,
+                        "source_receipt_sha256": source_receipt_sha256,
+                        "producer_attestation_sha256": (
+                            _authorization_sha256(
+                                attestation_sha256,
+                                "task_authorization_capture_manifest_invalid",
+                            )
+                        ),
+                    }
+                )
+        return result
+
+    for member in members:
+        if not isinstance(member, Mapping):
+            raise DispatchError("task_authorization_capture_manifest_invalid")
+        capture_id = member.get("capture_id")
+        input_binding = member.get("input_binding")
+        if not isinstance(capture_id, str) or not isinstance(
+            input_binding, Mapping
+        ):
+            raise DispatchError("task_authorization_capture_manifest_invalid")
+        bundle = input_binding.get("producer_binding_attestation_bundle")
+        attestation_sha256s = (
+            bundle.get("attestation_sha256s")
+            if isinstance(bundle, Mapping)
+            else None
+        )
+        if not isinstance(attestation_sha256s, list) or len(attestation_sha256s) != 1:
+            raise DispatchError("task_authorization_capture_manifest_invalid")
+        content_sha256 = (
+            input_binding.get("original_content_hash")
+            if subject == "math"
+            else input_binding.get("payload_sha256")
+        )
+        producer_contract = frozen.get("dispatch_contract")
+        producer_input = (
+            producer_contract.get("producer_input_contract")
+            if isinstance(producer_contract, Mapping)
+            else None
+        )
+        source_events = (
+            producer_input.get("source_events")
+            if isinstance(producer_input, Mapping)
+            else None
+        )
+        source_event = (
+            next(
+                (
+                    row
+                    for row in source_events
+                    if isinstance(row, Mapping)
+                    and row.get("event_id") == capture_id
+                ),
+                None,
+            )
+            if isinstance(source_events, list)
+            else None
+        )
+        source_receipt_sha256 = input_binding.get("capture_receipt_sha256")
+        if source_receipt_sha256 is None and isinstance(source_event, Mapping):
+            # Math's append-only foreground event is its durable success
+            # receipt in Release 1; no parallel receipt schema is invented.
+            source_receipt_sha256 = source_event.get("source_sha256")
+        result.append(
+            {
+                "capture_id": capture_id,
+                "capture_content_sha256": _authorization_sha256(
+                    content_sha256,
+                    "task_authorization_capture_manifest_invalid",
+                ),
+                "source_receipt_sha256": _authorization_sha256(
+                    source_receipt_sha256,
+                    "task_authorization_source_receipt_invalid",
+                ),
+                "producer_attestation_sha256": _authorization_sha256(
+                    attestation_sha256s[0],
+                    "task_authorization_capture_manifest_invalid",
+                ),
+            }
+        )
+    return result
 
 
 def _subject_processing_contract(
@@ -2343,6 +2609,7 @@ __all__ = [
     "EligibleFrozenCandidate",
     "content_processing_identity",
     "scan_eligible_candidates",
+    "task_authorization_capture_manifest",
     "validate_concurrent_cs408_candidate",
     "validate_fixed_model_contract",
 ]

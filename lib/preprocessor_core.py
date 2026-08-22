@@ -1579,6 +1579,18 @@ def load_config(path: Path) -> dict[str, Any]:
         or dispatch.get("infrastructure_recovery_attempts") != 1
     ):
         raise PreprocessorError("config_dispatch_contract_invalid")
+    task_authorization = dispatch.get("task_execution_authorization_v2")
+    if task_authorization is not None and (
+        not isinstance(task_authorization, Mapping)
+        or set(task_authorization)
+        != {"enabled", "compatibility_layer", "ttl_seconds"}
+        or task_authorization.get("enabled") is not True
+        or task_authorization.get("compatibility_layer") != "release_1"
+        or task_authorization.get("ttl_seconds") != 120
+    ):
+        raise PreprocessorError(
+            "config_task_execution_authorization_v2_invalid"
+        )
     if config["model"].get("model") != "gpt-5.6-luna":
         raise PreprocessorError("config_model_must_be_luna")
     if config["model"].get("reasoning_effort") != "max":
@@ -18472,6 +18484,22 @@ class CodexRunner:
                 gate_config,
                 purpose=gate_purpose,
                 command=command,
+                task_identity=(
+                    self.config.get("_task_execution_identity")
+                    if isinstance(
+                        self.config.get("_task_execution_identity"),
+                        Mapping,
+                    )
+                    else None
+                ),
+                authorization=(
+                    self.config.get("_task_execution_authorization")
+                    if isinstance(
+                        self.config.get("_task_execution_authorization"),
+                        Mapping,
+                    )
+                    else None
+                ),
             )
         except LiveExecutionDenied as exc:
             raise PreprocessorError(exc.code) from exc

@@ -607,6 +607,51 @@ def run_request(
     }
     candidate = _candidate_from_task(task)
     validate_concurrent_cs408_candidate(candidate)
+    lease = Lease(task.unit_sha256, owner_id, fence)
+    lease_store = LeaseStore(Path(str(config["runtime_root"])))
+    dispatch_config = config.get("dispatch")
+    task_authorization_config = (
+        dispatch_config.get("task_execution_authorization_v2")
+        if isinstance(dispatch_config, Mapping)
+        else None
+    )
+    if (
+        isinstance(task_authorization_config, Mapping)
+        and task_authorization_config.get("enabled") is True
+    ):
+        authorization = (
+            lease_store.verify_claimed_task_execution_authorization(
+                task, lease
+            )
+        )
+        authorization_evidence = (
+            lease_store.task_execution_authorization_status(
+                str(authorization["authorization_sha256"])
+            )
+        )
+        if authorization_evidence.get("status") != "claimed":
+            raise DispatchError(
+                "task_execution_authorization_claim_invalid"
+            )
+        config["_task_execution_authorization"] = authorization
+        config["_task_execution_identity"] = {
+            "subject": candidate.subject,
+            "unit_sha256": task.unit_sha256,
+            "frozen_payload_sha256": task.frozen_payload_sha256,
+            "capture_manifest_sha256": authorization[
+                "capture_manifest_sha256"
+            ],
+            "release_id": authorization["release_id"],
+            "activation_id": authorization["activation_id"],
+            "authorization_claimed": True,
+            "authorization_claimed_at": authorization_evidence[
+                "claimed_at"
+            ],
+            "authorization_claim_receipt_sha256": (
+                authorization_evidence["claim_receipt_sha256"]
+            ),
+            "lease_fence": fence,
+        }
     worker = Worker(config)
     contract = task.frozen_payload.get("dispatch_contract")
     if (
@@ -632,8 +677,6 @@ def run_request(
         or request.get("reason") != frozen_reason
     ):
         raise DispatchError("task_process_reason_binding_mismatch")
-    lease = Lease(task.unit_sha256, owner_id, fence)
-    lease_store = LeaseStore(Path(str(config["runtime_root"])))
     supervisor_launch_nonce = os.environ.get(
         "STUDY_PREPROCESS_PROCESS_LAUNCH_NONCE"
     )

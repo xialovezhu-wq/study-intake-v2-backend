@@ -133,6 +133,11 @@
     "heartbeat_interval_seconds": 15,
     "lease_ttl_seconds": 120,
     "infrastructure_recovery_attempts": 1,
+    "task_execution_authorization_v2": {
+      "enabled": true,
+      "compatibility_layer": "release_1",
+      "ttl_seconds": 120
+    },
     "production_canary": {
       "enabled": true,
       "status": "production_canary_active",

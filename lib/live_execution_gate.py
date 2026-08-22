@@ -9,6 +9,7 @@ accepted only for legacy in-process unit tests that do not opt into this gate.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -247,6 +248,69 @@ def assert_external_launch_allowed(
         raise LiveExecutionDenied("live_mode_fake_launch_forbidden", evidence=evidence)
     if not isinstance(task_identity, Mapping) or not isinstance(authorization, Mapping):
         raise LiveExecutionDenied("manual_live_authorization_missing", evidence=evidence)
+    schema_version = authorization.get("schema_version")
+    if schema_version == "study-intake-task-execution-authorization-v2":
+        from manual_capture_admission import (
+            ManualAdmissionError,
+            validate_task_execution_authorization_v2,
+        )
+
+        plugin = config.get("processing_plugin")
+        raw_key_path = (
+            plugin.get("authority_key_path")
+            if isinstance(plugin, Mapping)
+            else None
+        )
+        key_path = Path(str(raw_key_path or ""))
+        try:
+            info = key_path.lstat()
+            key = key_path.read_bytes()
+        except OSError as exc:
+            raise LiveExecutionDenied(
+                "task_execution_authorization_key_unreadable",
+                evidence=evidence,
+            ) from exc
+        if (
+            not key_path.is_absolute()
+            or key_path.is_symlink()
+            or not key_path.is_file()
+            or (info.st_mode & 0o777) != 0o600
+            or len(key) != 32
+            or task_identity.get("authorization_claimed") is not True
+        ):
+            raise LiveExecutionDenied(
+                "task_execution_authorization_claim_invalid",
+                evidence=evidence,
+            )
+        try:
+            claimed_at = task_identity.get("authorization_claimed_at")
+            if not isinstance(claimed_at, str):
+                raise ValueError("claimed_at missing")
+            claimed_time = dt.datetime.fromisoformat(
+                claimed_at[:-1] + "+00:00"
+                if claimed_at.endswith("Z")
+                else claimed_at
+            )
+            if claimed_time.tzinfo is None:
+                raise ValueError("claimed_at timezone missing")
+            validate_task_execution_authorization_v2(
+                authorization,
+                task_identity=task_identity,
+                authority_key=key,
+                now=claimed_time,
+            )
+        except (ManualAdmissionError, ValueError) as exc:
+            code = (
+                exc.code
+                if isinstance(exc, ManualAdmissionError)
+                else "task_execution_authorization_claim_invalid"
+            )
+            raise LiveExecutionDenied(code, evidence=evidence) from exc
+        return {
+            **evidence,
+            "allowed": True,
+            "reason": "task_execution_authorization_v2_claimed",
+        }
     from manual_capture_admission import validate_authorization_for_task
 
     validate_authorization_for_task(authorization, task_identity=task_identity)

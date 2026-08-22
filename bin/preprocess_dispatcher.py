@@ -36,6 +36,7 @@ from core_dispatch_bridge import (  # noqa: E402
     CoreCandidateSubprocessRunner,
     producer_authority_binding,
     scan_eligible_candidates,
+    task_authorization_capture_manifest,
     validate_fixed_model_contract,
 )
 from preprocessor_core import (  # noqa: E402
@@ -45,6 +46,7 @@ from preprocessor_core import (  # noqa: E402
     current_date,
     load_config,
     release_identity,
+    sha256_value,
 )
 from processing_plugin import (  # noqa: E402
     ProcessingPluginError,
@@ -800,6 +802,17 @@ class ProductionDispatchRuntime:
         self.config_path = config_path.resolve()
         self.runtime_root = Path(str(config["runtime_root"]))
         self.production_canary = _production_canary_enabled(config)
+        dispatch_config = config.get("dispatch")
+        task_authorization = (
+            dispatch_config.get("task_execution_authorization_v2")
+            if isinstance(dispatch_config, Mapping)
+            else None
+        )
+        self.task_execution_authorization_v2_enabled = bool(
+            isinstance(task_authorization, Mapping)
+            and task_authorization.get("enabled") is True
+            and task_authorization.get("compatibility_layer") == "release_1"
+        )
         self.continuous_concurrency_limit = (
             int(config["dispatch"]["production_canary"][
                 "continuous_concurrency_limit"
@@ -870,6 +883,10 @@ class ProductionDispatchRuntime:
                 ]
             ),
             production_canary=self.production_canary,
+            task_execution_authorization_required=(
+                self.production_canary
+                and self.task_execution_authorization_v2_enabled
+            ),
         )
 
     def activate_production_canary(
@@ -2407,6 +2424,54 @@ class ProductionDispatchRuntime:
             "sol_enabled": False,
         }
 
+    def _issue_task_execution_authorization(
+        self, task: FrozenTask
+    ) -> dict[str, Any] | None:
+        if not self.task_execution_authorization_v2_enabled:
+            return None
+        canary = self.dispatcher.lease_store.production_canary_status(
+            self.subject
+        )
+        contract = task.frozen_payload.get("dispatch_contract")
+        if not isinstance(canary, Mapping) or not isinstance(
+            contract, Mapping
+        ):
+            raise DispatchError("task_execution_authorization_context_missing")
+        release_id = str(contract.get("release_id") or "")
+        activation_id = str(canary.get("activation_id") or "")
+        capture_manifest = task_authorization_capture_manifest(
+            self.config, task
+        )
+        issuer_source = {
+            "schema_version": (
+                "study-intake-task-authorization-source-receipt-v1"
+            ),
+            "subject": self.subject,
+            "unit_sha256": task.unit_sha256,
+            "frozen_payload_sha256": task.frozen_payload_sha256,
+            "capture_manifest_sha256": sha256_value(capture_manifest),
+            "source_receipt_sha256s": [
+                row["source_receipt_sha256"] for row in capture_manifest
+            ],
+            "producer_attestation_sha256s": [
+                row["producer_attestation_sha256"]
+                for row in capture_manifest
+            ],
+            "release_id": release_id,
+            "activation_id": activation_id,
+            "formal_write_count": 0,
+        }
+        issued = self.dispatcher.lease_store.issue_task_execution_capability(
+            task,
+            capture_manifest=capture_manifest,
+            release_id=release_id,
+            activation_id=activation_id,
+            issuer_authorization_receipt_sha256=sha256_value(
+                issuer_source
+            ),
+        )
+        return copy.deepcopy(dict(issued["authorization"]))
+
     def _runner_factory(self, task, _context):
         contract = task.frozen_payload.get("dispatch_contract")
         if (
@@ -3423,10 +3488,21 @@ class ProductionDispatchRuntime:
         )
         for task in tasks:
             try:
+                task_execution_authorization = (
+                    self._issue_task_execution_authorization(task)
+                )
+                submit = (
+                    lambda frozen_task, authorization=(
+                        task_execution_authorization
+                    ): self.dispatcher.submit(
+                        frozen_task,
+                        task_execution_authorization=authorization,
+                    )
+                )
                 handles.append(
                     self.subject_sol.submit_luna_under_generation_fence(
                         self.subject,
-                        self.dispatcher.submit,
+                        submit,
                         task,
                     )
                 )

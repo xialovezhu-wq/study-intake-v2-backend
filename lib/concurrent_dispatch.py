@@ -1482,6 +1482,32 @@ class LeaseStore:
             / "stale-claim-quarantine"
             / "receipts"
         )
+        # Release 1 compatibility layer: these are immutable capability
+        # artifacts only.  Lease, fence, heartbeat, terminal, and recovery
+        # lifecycle remain exclusively in the existing LeaseStore files.
+        self.task_execution_authorization_root = (
+            self.runtime_root
+            / "dispatch"
+            / "task-execution-authorization-v2"
+        )
+        self.task_execution_authorization_object_root = (
+            self.task_execution_authorization_root / "authorizations"
+        )
+        self.task_execution_authorization_issuer_receipt_root = (
+            self.task_execution_authorization_root / "issuer-receipts"
+        )
+        self.task_execution_authorization_claim_root = (
+            self.task_execution_authorization_root / "claims"
+        )
+        self.task_execution_authorization_terminal_root = (
+            self.task_execution_authorization_root / "terminals"
+        )
+        self.task_execution_authorization_rejection_root = (
+            self.task_execution_authorization_root / "rejections"
+        )
+        self.task_execution_authorization_quarantine_root = (
+            self.task_execution_authorization_root / "quarantined"
+        )
         self.english_preserved_review_repair_receipt_root = (
             self.runtime_root
             / "dispatch"
@@ -2059,6 +2085,611 @@ class LeaseStore:
             purpose=purpose,
             key=self._read_authority_key(),
         )
+
+    @staticmethod
+    def _task_authorization_object_path(root: Path, digest: str) -> Path:
+        checked = _validate_unit_sha256(digest)
+        return root / "sha256" / checked[:2] / f"{checked}.json"
+
+    def _task_authorization_artifacts_locked(
+        self,
+        root: Path,
+        *,
+        authorization_sha256: str,
+        purpose: str,
+    ) -> list[dict[str, Any]]:
+        checked = _validate_unit_sha256(authorization_sha256)
+        rows: list[dict[str, Any]] = []
+        for path in sorted(root.glob("sha256/*/*.json")):
+            value = self._read_object(path)
+            if value is None or value.get("authorization_sha256") != checked:
+                continue
+            self._verify_seal(value, purpose=purpose)
+            rows.append(value)
+        return rows
+
+    def _validate_task_execution_authorization_for_claim(
+        self,
+        authorization: Mapping[str, Any],
+        *,
+        task: FrozenTask,
+        subject: str,
+        activation_id: str,
+        now: str,
+    ) -> dict[str, Any]:
+        from manual_capture_admission import (
+            ManualAdmissionError,
+            validate_task_execution_authorization_v2,
+        )
+
+        contract = task.frozen_payload.get("dispatch_contract")
+        release_id = (
+            contract.get("release_id")
+            if isinstance(contract, Mapping)
+            else None
+        )
+        try:
+            return validate_task_execution_authorization_v2(
+                authorization,
+                task_identity={
+                    "subject": subject,
+                    "unit_sha256": task.unit_sha256,
+                    "frozen_payload_sha256": task.frozen_payload_sha256,
+                    "capture_manifest_sha256": authorization.get(
+                        "capture_manifest_sha256"
+                    ),
+                    "release_id": release_id,
+                    "activation_id": activation_id,
+                },
+                authority_key=self._authority_key(),
+                now=_parse_utc(now),
+            )
+        except ManualAdmissionError as exc:
+            raise DispatchError(
+                "task_execution_authorization_binding_rejected"
+            ) from exc
+
+    def issue_task_execution_capability(
+        self,
+        task: FrozenTask,
+        *,
+        capture_manifest: Sequence[Mapping[str, Any]],
+        release_id: str,
+        activation_id: str,
+        issuer_authorization_receipt_sha256: str,
+        now: dt.datetime | None = None,
+    ) -> dict[str, Any]:
+        """Release 1 seam: issue one immutable, exact task capability."""
+
+        from manual_capture_admission import (
+            build_task_execution_authorization_v2,
+        )
+
+        subject = str(task.frozen_payload.get("subject") or "")
+        contract = task.frozen_payload.get("dispatch_contract")
+        if (
+            not isinstance(contract, Mapping)
+            or contract.get("release_id") != release_id
+        ):
+            raise DispatchError("task_execution_authorization_binding_rejected")
+        with _ExclusiveFileLock(self.lock_path):
+            authorization = build_task_execution_authorization_v2(
+                subject=subject,
+                unit_sha256=task.unit_sha256,
+                frozen_payload_sha256=task.frozen_payload_sha256,
+                capture_manifest=capture_manifest,
+                release_id=release_id,
+                activation_id=activation_id,
+                issuer_authorization_receipt_sha256=(
+                    issuer_authorization_receipt_sha256
+                ),
+                authority_key=self._authority_key(),
+                now=now,
+            )
+            authorization_sha256, authorization_path = (
+                _publish_content_addressed(
+                    self.task_execution_authorization_object_root,
+                    authorization,
+                )
+            )
+            issuer_receipt = self._seal(
+                {
+                    "schema_version": (
+                        "study-intake-task-execution-authorization-issuer-receipt-v1"
+                    ),
+                    "authorization_sha256": authorization_sha256,
+                    "unit_sha256": task.unit_sha256,
+                    "frozen_payload_sha256": task.frozen_payload_sha256,
+                    "capture_manifest_sha256": authorization[
+                        "capture_manifest_sha256"
+                    ],
+                    "source_authorization_receipt_sha256": (
+                        issuer_authorization_receipt_sha256
+                    ),
+                    "issued_at": authorization["not_before"],
+                    "formal_write_count": 0,
+                },
+                purpose="dispatch-task-authorization-issuer",
+            )
+            issuer_sha256, issuer_path = _publish_content_addressed(
+                self.task_execution_authorization_issuer_receipt_root,
+                issuer_receipt,
+            )
+            return {
+                "authorization": authorization,
+                "authorization_sha256": authorization[
+                    "authorization_sha256"
+                ],
+                "authorization_object_sha256": authorization_sha256,
+                "authorization_path": str(authorization_path),
+                "issuer_receipt_sha256": issuer_sha256,
+                "issuer_receipt_path": str(issuer_path),
+            }
+
+    def _publish_task_authorization_rejection_locked(
+        self,
+        *,
+        authorization_sha256: str,
+        unit_sha256: str,
+        error_code: str,
+        rejected_at: str,
+    ) -> None:
+        rejection = self._seal(
+            {
+                "schema_version": (
+                    "study-intake-task-execution-authorization-rejection-v1"
+                ),
+                "authorization_sha256": _validate_unit_sha256(
+                    authorization_sha256
+                ),
+                "unit_sha256": _validate_unit_sha256(unit_sha256),
+                "error_code": error_code,
+                "rejected_at": rejected_at,
+                "formal_write_count": 0,
+            },
+            purpose="dispatch-task-authorization-rejection",
+        )
+        _publish_content_addressed(
+            self.task_execution_authorization_rejection_root,
+            rejection,
+        )
+
+    def _claim_task_execution_capability_locked(
+        self,
+        authorization: Mapping[str, Any],
+        *,
+        task: FrozenTask,
+        owner_id: str,
+        fence: int,
+        claimed_at: str,
+    ) -> dict[str, str]:
+        """Bind one immutable capability claim; the lease remains the state."""
+
+        authorization_sha256 = _validate_unit_sha256(
+            str(authorization.get("authorization_sha256") or "")
+        )
+        existing_claims = self._task_authorization_artifacts_locked(
+            self.task_execution_authorization_claim_root,
+            authorization_sha256=authorization_sha256,
+            purpose="dispatch-task-authorization-claim",
+        )
+        if existing_claims:
+            self._publish_task_authorization_rejection_locked(
+                authorization_sha256=authorization_sha256,
+                unit_sha256=task.unit_sha256,
+                error_code="task_execution_authorization_double_claim",
+                rejected_at=claimed_at,
+            )
+            raise DispatchError("task_execution_authorization_double_claim")
+        authorization_object_sha256, authorization_path = (
+            _publish_content_addressed(
+                self.task_execution_authorization_object_root,
+                authorization,
+            )
+        )
+        issuer_receipt = self._seal(
+            {
+                "schema_version": (
+                    "study-intake-task-execution-authorization-issuer-receipt-v1"
+                ),
+                "authorization_sha256": authorization_sha256,
+                "unit_sha256": task.unit_sha256,
+                "frozen_payload_sha256": task.frozen_payload_sha256,
+                "capture_manifest_sha256": authorization[
+                    "capture_manifest_sha256"
+                ],
+                "source_authorization_receipt_sha256": authorization[
+                    "issuer_authorization_receipt_sha256"
+                ],
+                "issued_at": authorization["not_before"],
+                "formal_write_count": 0,
+            },
+            purpose="dispatch-task-authorization-issuer",
+        )
+        issuer_sha256, issuer_path = _publish_content_addressed(
+            self.task_execution_authorization_issuer_receipt_root,
+            issuer_receipt,
+        )
+        claim_receipt = self._seal(
+            {
+                "schema_version": (
+                    "study-intake-task-execution-authorization-claim-receipt-v1"
+                ),
+                "authorization_sha256": authorization_sha256,
+                "unit_sha256": task.unit_sha256,
+                "frozen_payload_sha256": task.frozen_payload_sha256,
+                "owner_id": owner_id,
+                "lease_fence": fence,
+                "claimed_at": claimed_at,
+                "maximum_tasks": 1,
+                "formal_write_count": 0,
+            },
+            purpose="dispatch-task-authorization-claim",
+        )
+        claim_sha256, claim_path = _publish_content_addressed(
+            self.task_execution_authorization_claim_root,
+            claim_receipt,
+        )
+        return {
+            "authorization_sha256": authorization_sha256,
+            "authorization_object_sha256": authorization_object_sha256,
+            "authorization_path": str(authorization_path),
+            "issuer_receipt_sha256": issuer_sha256,
+            "issuer_receipt_path": str(issuer_path),
+            "claim_receipt_sha256": claim_sha256,
+            "claim_receipt_path": str(claim_path),
+        }
+
+    def _bind_task_execution_terminal_consumption_locked(
+        self,
+        *,
+        lease_state: Mapping[str, Any],
+        outcome: str,
+        terminal_receipt_sha256: str,
+        finished_at: str,
+    ) -> dict[str, Any] | None:
+        authorization_sha256 = lease_state.get(
+            "task_execution_authorization_sha256"
+        )
+        if authorization_sha256 is None:
+            return None
+        authorization_sha256 = _validate_unit_sha256(
+            str(authorization_sha256)
+        )
+        status_by_outcome = {
+            "succeeded": "consumed_succeeded",
+            "failed": "consumed_failed",
+            "cancelled": "consumed_cancelled",
+            "timed_out": "consumed_timed_out",
+            "stalled": "consumed_stalled",
+            "needs_rework": "consumed_failed",
+        }
+        status = status_by_outcome.get(outcome)
+        if status is None:
+            raise DispatchError("task_execution_authorization_terminal_invalid")
+        claims = self._task_authorization_artifacts_locked(
+            self.task_execution_authorization_claim_root,
+            authorization_sha256=authorization_sha256,
+            purpose="dispatch-task-authorization-claim",
+        )
+        if len(claims) != 1:
+            raise DispatchError("task_execution_authorization_claim_missing")
+        claim = claims[0]
+        if (
+            claim.get("unit_sha256") != lease_state.get("unit_sha256")
+            or claim.get("owner_id") != lease_state.get("owner_id")
+            or claim.get("lease_fence") != lease_state.get("fence")
+        ):
+            raise DispatchError("task_execution_authorization_claim_mismatch")
+        terminal = self._seal(
+            {
+                "schema_version": (
+                    "study-intake-task-execution-authorization-terminal-v1"
+                ),
+                "authorization_sha256": authorization_sha256,
+                "unit_sha256": lease_state["unit_sha256"],
+                "owner_id": lease_state["owner_id"],
+                "lease_fence": lease_state["fence"],
+                "outcome": outcome,
+                "status": status,
+                "terminal_receipt_sha256": _validate_unit_sha256(
+                    terminal_receipt_sha256
+                ),
+                "finished_at": finished_at,
+                "formal_write_count": 0,
+            },
+            purpose="dispatch-task-authorization-terminal",
+        )
+        existing = self._task_authorization_artifacts_locked(
+            self.task_execution_authorization_terminal_root,
+            authorization_sha256=authorization_sha256,
+            purpose="dispatch-task-authorization-terminal",
+        )
+        if existing:
+            if len(existing) != 1 or existing[0] != terminal:
+                raise DispatchError(
+                    "task_execution_authorization_terminal_conflict"
+                )
+            terminal_sha256 = _sha256_bytes(
+                _canonical_bytes(existing[0]) + b"\n"
+            )
+            return {
+                "terminal": existing[0],
+                "authorization_terminal_receipt_sha256": terminal_sha256,
+                "idempotent": True,
+            }
+        terminal_sha256, terminal_path = _publish_content_addressed(
+            self.task_execution_authorization_terminal_root,
+            terminal,
+        )
+        return {
+            "terminal": terminal,
+            "authorization_terminal_receipt_sha256": terminal_sha256,
+            "authorization_terminal_receipt_path": str(terminal_path),
+            "idempotent": False,
+        }
+
+    def bind_task_execution_terminal_consumption(
+        self,
+        lease: Lease,
+        *,
+        completion: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Stable terminal seam and idempotent crash reconciliation."""
+
+        with _ExclusiveFileLock(self.lock_path):
+            lease_path = self._lease_path(lease.unit_sha256)
+            lease_state = self._read_object(lease_path)
+            if (
+                lease_state is None
+                or lease_state.get("unit_sha256") != lease.unit_sha256
+                or lease_state.get("owner_id") != lease.owner_id
+                or lease_state.get("fence") != lease.fence
+                or lease_state.get("status") not in {"claimed", "completed"}
+            ):
+                raise DispatchError("stale_lease_fence")
+            checked_completion = (
+                copy.deepcopy(dict(completion))
+                if isinstance(completion, Mapping)
+                else self._read_object(
+                    self._completion_path(lease.unit_sha256)
+                )
+            )
+            if checked_completion is None:
+                raise DispatchError("completion_missing")
+            self._verify_seal(
+                checked_completion, purpose="dispatch-completion"
+            )
+            if (
+                checked_completion.get("unit_sha256") != lease.unit_sha256
+                or checked_completion.get("lease_fence") != lease.fence
+                or checked_completion.get(
+                    "task_execution_authorization_sha256"
+                )
+                != lease_state.get("task_execution_authorization_sha256")
+            ):
+                raise DispatchError(
+                    "task_execution_authorization_terminal_binding_invalid"
+                )
+            bound = self._bind_task_execution_terminal_consumption_locked(
+                lease_state=lease_state,
+                outcome=str(checked_completion.get("outcome") or ""),
+                terminal_receipt_sha256=str(
+                    checked_completion.get("receipt_sha256") or ""
+                ),
+                finished_at=str(
+                    checked_completion.get("finished_at") or ""
+                ),
+            )
+            if lease_state.get("status") == "claimed":
+                updated = dict(lease_state)
+                updated.update(
+                    {
+                        "status": "completed",
+                        "completed_at": checked_completion.get(
+                            "finished_at"
+                        ),
+                        "outcome": checked_completion.get("outcome"),
+                        "receipt_sha256": checked_completion.get(
+                            "receipt_sha256"
+                        ),
+                        **(
+                            {
+                                "task_execution_authorization_terminal_receipt_sha256": (
+                                    bound[
+                                        "authorization_terminal_receipt_sha256"
+                                    ]
+                                )
+                            }
+                            if bound is not None
+                            else {}
+                        ),
+                    }
+                )
+                _atomic_replace_json(lease_path, updated)
+            return bound
+
+    def verify_claimed_task_execution_authorization(
+        self, task: FrozenTask, lease: Lease
+    ) -> dict[str, Any]:
+        """Stable validation seam; no caller reads capability directories."""
+
+        with _ExclusiveFileLock(self.lock_path):
+            lease_state = self._read_object(self._lease_path(lease.unit_sha256))
+            if not self._matches(lease_state, lease, status="claimed"):
+                raise DispatchError("stale_lease_fence")
+            assert lease_state is not None
+            authorization_sha256 = _validate_unit_sha256(
+                str(
+                    lease_state.get(
+                        "task_execution_authorization_sha256"
+                    )
+                    or ""
+                )
+            )
+            authorization_path = Path(
+                str(
+                    lease_state.get(
+                        "task_execution_authorization_path"
+                    )
+                    or ""
+                )
+            )
+            authorization = self._read_object(authorization_path)
+            if authorization is None:
+                raise DispatchError(
+                    "task_execution_authorization_object_missing"
+                )
+            claims = self._task_authorization_artifacts_locked(
+                self.task_execution_authorization_claim_root,
+                authorization_sha256=authorization_sha256,
+                purpose="dispatch-task-authorization-claim",
+            )
+            if len(claims) != 1:
+                raise DispatchError(
+                    "task_execution_authorization_claim_missing"
+                )
+            claim = claims[0]
+            if (
+                claim.get("unit_sha256") != task.unit_sha256
+                or claim.get("frozen_payload_sha256")
+                != task.frozen_payload_sha256
+                or claim.get("owner_id") != lease.owner_id
+                or claim.get("lease_fence") != lease.fence
+            ):
+                raise DispatchError(
+                    "task_execution_authorization_claim_mismatch"
+                )
+            subject = str(task.frozen_payload.get("subject") or "")
+            contract = task.frozen_payload.get("dispatch_contract")
+            activation_id = (
+                contract.get("activation_id")
+                if isinstance(contract, Mapping)
+                else None
+            )
+            if not isinstance(activation_id, str):
+                canary = self._read_canary_state_locked(subject)
+                activation_id = (
+                    canary.get("activation_id")
+                    if isinstance(canary, Mapping)
+                    else None
+                )
+            return self._validate_task_execution_authorization_for_claim(
+                authorization,
+                task=task,
+                subject=subject,
+                activation_id=str(activation_id or ""),
+                now=str(claim["claimed_at"]),
+            )
+
+    def task_execution_authorization_status(
+        self, authorization_sha256: str
+    ) -> dict[str, Any]:
+        """Derive observability from immutable artifacts and existing lease."""
+
+        checked = _validate_unit_sha256(authorization_sha256)
+        with _ExclusiveFileLock(self.lock_path):
+            authorizations = [
+                value
+                for path in sorted(
+                    self.task_execution_authorization_object_root.glob(
+                        "sha256/*/*.json"
+                    )
+                )
+                if (value := self._read_object(path)) is not None
+                and value.get("authorization_sha256") == checked
+            ]
+            if len(authorizations) != 1:
+                raise DispatchError("task_execution_authorization_object_missing")
+            claims = self._task_authorization_artifacts_locked(
+                self.task_execution_authorization_claim_root,
+                authorization_sha256=checked,
+                purpose="dispatch-task-authorization-claim",
+            )
+            terminals = self._task_authorization_artifacts_locked(
+                self.task_execution_authorization_terminal_root,
+                authorization_sha256=checked,
+                purpose="dispatch-task-authorization-terminal",
+            )
+            if len(terminals) > 1 or len(claims) > 1:
+                raise DispatchError(
+                    "task_execution_authorization_artifact_conflict"
+                )
+            if terminals:
+                return copy.deepcopy(terminals[0])
+            if not claims:
+                return {
+                    "schema_version": (
+                        "study-intake-task-execution-authorization-evidence-v1"
+                    ),
+                    "authorization_sha256": checked,
+                    "status": "issued",
+                    "formal_write_count": 0,
+                }
+            claim = claims[0]
+            unit_sha256 = str(claim["unit_sha256"])
+            lease = self._read_object(self._lease_path(unit_sha256))
+            completion = self._read_object(self._completion_path(unit_sha256))
+            status = (
+                "terminal_reconcile_required"
+                if completion is not None
+                else "claimed"
+                if lease is not None
+                and lease.get("task_execution_authorization_sha256") == checked
+                else "orphaned_claim"
+            )
+            return {
+                "schema_version": (
+                    "study-intake-task-execution-authorization-evidence-v1"
+                ),
+                "authorization_sha256": checked,
+                "unit_sha256": unit_sha256,
+                "status": status,
+                "claimed_at": claim.get("claimed_at"),
+                "claim_receipt_sha256": _sha256_bytes(
+                    _canonical_bytes(claim) + b"\n"
+                ),
+                "formal_write_count": 0,
+            }
+
+    def task_execution_authorization_metrics(self) -> dict[str, int]:
+        def count(root: Path) -> int:
+            return sum(
+                1 for path in root.glob("sha256/*/*.json") if path.is_file()
+            )
+
+        double_claims = 0
+        binding_rejections = 0
+        for path in self.task_execution_authorization_rejection_root.glob(
+            "sha256/*/*.json"
+        ):
+            value = self._read_object(path)
+            if value is None:
+                continue
+            if value.get("error_code") == (
+                "task_execution_authorization_double_claim"
+            ):
+                double_claims += 1
+            else:
+                binding_rejections += 1
+        return {
+            "authorization_issued_count": count(
+                self.task_execution_authorization_object_root
+            ),
+            "authorization_claimed_count": count(
+                self.task_execution_authorization_claim_root
+            ),
+            "authorization_terminal_count": count(
+                self.task_execution_authorization_terminal_root
+            ),
+            "authorization_expired_count": 0,
+            "authorization_quarantined_count": count(
+                self.task_execution_authorization_quarantine_root
+            ),
+            "authorization_reconcile_count": 0,
+            "authorization_double_claim_rejected_count": double_claims,
+            "authorization_binding_rejected_count": binding_rejections,
+        }
 
     def _production_canary_state_path(self, subject: str) -> Path:
         return self.production_canary_state_root / f"{_safe_component(subject)}.json"
@@ -10448,11 +11079,19 @@ class LeaseStore:
         task: FrozenTask | None = None,
         controlled_replay_authority: Mapping[str, Any] | None = None,
         production_canary: bool = False,
+        task_execution_authorization_required: bool = False,
+        task_execution_authorization: Mapping[str, Any] | None = None,
+        require_task_execution_authorization: bool = False,
         now: str | None = None,
     ) -> ClaimDecision:
         timestamp = now or _utc_now()
         current_time = _parse_utc(timestamp)
         with _ExclusiveFileLock(self.lock_path):
+            if (
+                require_task_execution_authorization
+                and task_execution_authorization is None
+            ):
+                raise DispatchError("task_execution_authorization_missing")
             if production_canary and controlled_replay_authority is not None:
                 raise DispatchError("production_canary_controlled_replay_forbidden")
             if controlled_replay_authority is not None:
@@ -10477,6 +11116,16 @@ class LeaseStore:
                     raise DispatchError("production_canary_task_replay")
                 state = self._read_canary_state_locked(str(subject))
                 assert state is not None
+                if task_execution_authorization is not None:
+                    task_execution_authorization = (
+                        self._validate_task_execution_authorization_for_claim(
+                            task_execution_authorization,
+                            task=task,
+                            subject=str(subject),
+                            activation_id=str(state.get("activation_id") or ""),
+                            now=timestamp,
+                        )
+                    )
                 self._admit_production_canary_task_locked(
                     task,
                     state,
@@ -10486,6 +11135,26 @@ class LeaseStore:
                 )
             elif subject is not None and self._drain_path(subject).exists():
                 raise DispatchError("subject_draining")
+            elif task_execution_authorization is not None:
+                if task is None or task.unit_sha256 != unit_sha256:
+                    raise DispatchError(
+                        "task_execution_authorization_binding_rejected"
+                    )
+                contract = task.frozen_payload.get("dispatch_contract")
+                activation_id = (
+                    contract.get("activation_id")
+                    if isinstance(contract, Mapping)
+                    else None
+                )
+                task_execution_authorization = (
+                    self._validate_task_execution_authorization_for_claim(
+                        task_execution_authorization,
+                        task=task,
+                        subject=str(subject or ""),
+                        activation_id=str(activation_id or ""),
+                        now=timestamp,
+                    )
+                )
             completion = self._read_object(self._completion_path(unit_sha256))
             if completion is not None:
                 return ClaimDecision("completed", completion=completion)
@@ -10517,8 +11186,36 @@ class LeaseStore:
                     heartbeat = _parse_utc(previous.get("heartbeat_at"))
                     age = (current_time - heartbeat).total_seconds()
                     if age < LEASE_TTL_SECONDS:
+                        if task_execution_authorization is not None:
+                            self._publish_task_authorization_rejection_locked(
+                                authorization_sha256=str(
+                                    task_execution_authorization[
+                                        "authorization_sha256"
+                                    ]
+                                ),
+                                unit_sha256=unit_sha256,
+                                error_code=(
+                                    "task_execution_authorization_double_claim"
+                                ),
+                                rejected_at=timestamp,
+                            )
                         return ClaimDecision("active")
             fence = previous_fence + 1
+            authorization_refs: dict[str, str] = {}
+            if task_execution_authorization is not None:
+                if task is None:
+                    raise DispatchError(
+                        "task_execution_authorization_binding_rejected"
+                    )
+                authorization_refs = (
+                    self._claim_task_execution_capability_locked(
+                        task_execution_authorization,
+                        task=task,
+                        owner_id=owner_id,
+                        fence=fence,
+                        claimed_at=timestamp,
+                    )
+                )
             lease_value = {
                 "schema_version": LEASE_SCHEMA,
                 "unit_sha256": unit_sha256,
@@ -10534,6 +11231,32 @@ class LeaseStore:
                 "retry_wait_count": retry_wait_count,
                 "resume_from_analysis_checkpoint": (
                     resume_from_analysis_checkpoint
+                ),
+                **(
+                    {
+                        "task_execution_authorization_sha256": (
+                            authorization_refs["authorization_sha256"]
+                        ),
+                        "task_execution_authorization_path": (
+                            authorization_refs["authorization_path"]
+                        ),
+                        "task_execution_authorization_object_sha256": (
+                            authorization_refs[
+                                "authorization_object_sha256"
+                            ]
+                        ),
+                        "task_execution_authorization_issuer_receipt_sha256": (
+                            authorization_refs["issuer_receipt_sha256"]
+                        ),
+                        "task_execution_authorization_claim_receipt_sha256": (
+                            authorization_refs["claim_receipt_sha256"]
+                        ),
+                        "task_execution_authorization_claim_receipt_path": (
+                            authorization_refs["claim_receipt_path"]
+                        ),
+                    }
+                    if authorization_refs
+                    else {}
                 ),
             }
             _atomic_replace_json(path, lease_value)
@@ -14946,6 +15669,20 @@ class LeaseStore:
                     _stage_runtime(critical_review) if critical_review else None
                 ),
             }
+            task_authorization_sha256 = current.get(
+                "task_execution_authorization_sha256"
+            )
+            task_authorization_binding = (
+                {
+                    "task_execution_authorization_sha256": (
+                        _validate_unit_sha256(
+                            str(task_authorization_sha256)
+                        )
+                    )
+                }
+                if task_authorization_sha256 is not None
+                else {}
+            )
             receipt_core = {
                 "schema_version": RECEIPT_SCHEMA,
                 "unit_sha256": lease.unit_sha256,
@@ -14976,6 +15713,7 @@ class LeaseStore:
                 "report_markdown_ref": report_markdown_ref,
                 "report_markdown_sha256": report_markdown_sha256,
                 "formal_write_count": 0,
+                **task_authorization_binding,
             }
             receipt = self._seal(receipt_core, purpose="dispatch-receipt")
             receipt_sha256, receipt_path = _publish_content_addressed(
@@ -15000,6 +15738,7 @@ class LeaseStore:
                     "reasoning_effort": REQUIRED_REASONING_EFFORT,
                     "recorded_at": finished_at,
                     "formal_write_count": 0,
+                    **task_authorization_binding,
                 },
                 purpose="dispatch-authority-ledger",
             )
@@ -15033,12 +15772,21 @@ class LeaseStore:
                 "model": REQUIRED_MODEL,
                 "reasoning_effort": REQUIRED_REASONING_EFFORT,
                 "finished_at": finished_at,
+                **task_authorization_binding,
             }
             completion = self._seal(
                 completion_core, purpose="dispatch-completion"
             )
             _publish_named_immutable(completion_path, completion)
             completion_sha256 = _sha256_bytes(completion_path.read_bytes())
+            authorization_terminal = (
+                self._bind_task_execution_terminal_consumption_locked(
+                    lease_state=current,
+                    outcome=published_outcome,
+                    terminal_receipt_sha256=receipt_sha256,
+                    finished_at=finished_at,
+                )
+            )
             if subject and capture_id:
                 group_processing_key = (
                     dispatch_contract.get("math_group_processing_key")
@@ -15116,6 +15864,17 @@ class LeaseStore:
                     "completed_at": finished_at,
                     "outcome": published_outcome,
                     "receipt_sha256": receipt_sha256,
+                    **(
+                        {
+                            "task_execution_authorization_terminal_receipt_sha256": (
+                                authorization_terminal[
+                                    "authorization_terminal_receipt_sha256"
+                                ]
+                            )
+                        }
+                        if authorization_terminal is not None
+                        else {}
+                    ),
                 }
             )
             _atomic_replace_json(lease_path, terminal_lease)
@@ -18356,6 +19115,9 @@ class ConcurrentDispatcher:
         if production_canary and controlled_replay_authority is not None:
             raise DispatchError("production_canary_controlled_replay_forbidden")
         self.production_canary = bool(production_canary)
+        self.task_execution_authorization_required = bool(
+            task_execution_authorization_required
+        )
         self._condition = threading.Condition()
         self._active: dict[str, DispatchHandle] = {}
         self._finishing: set[str] = set()
@@ -18371,7 +19133,12 @@ class ConcurrentDispatcher:
         with self._condition:
             return self._draining
 
-    def submit(self, task: FrozenTask) -> DispatchHandle:
+    def submit(
+        self,
+        task: FrozenTask,
+        *,
+        task_execution_authorization: Mapping[str, Any] | None = None,
+    ) -> DispatchHandle:
         unit = task.unit_sha256
         with self._condition:
             if self._draining:
@@ -18388,6 +19155,10 @@ class ConcurrentDispatcher:
                 task=task,
                 controlled_replay_authority=self.controlled_replay_authority,
                 production_canary=self.production_canary,
+                task_execution_authorization=task_execution_authorization,
+                require_task_execution_authorization=(
+                    self.task_execution_authorization_required
+                ),
             )
             self.lease_store.register_content_members(task)
             if decision.status == "completed":

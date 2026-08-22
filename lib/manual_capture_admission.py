@@ -17,6 +17,17 @@ from typing import Any, Mapping
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SUBJECTS = frozenset({"math", "cs408", "english"})
 AUTH_SCHEMA = "study-intake-manual-live-authorization-v1"
+TASK_AUTH_SCHEMA = "study-intake-task-execution-authorization-v2"
+TASK_AUTHORITY_SCHEMA = "study-intake-task-execution-authorization-authority-v1"
+TASK_AUTHORITY_PURPOSE = "task-execution-authorization-v2"
+CAPTURE_MANIFEST_MEMBER_FIELDS = frozenset(
+    {
+        "capture_id",
+        "capture_content_sha256",
+        "source_receipt_sha256",
+        "producer_attestation_sha256",
+    }
+)
 
 
 class ManualAdmissionError(RuntimeError):
@@ -31,6 +42,243 @@ def canonical_bytes(value: Any) -> bytes:
 
 def sha256_value(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _sha256(value: Any, code: str) -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise ManualAdmissionError(code)
+    return value
+
+
+def _capture_manifest(
+    value: Any,
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ManualAdmissionError("task_execution_capture_manifest_invalid")
+    checked: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in value:
+        if not isinstance(row, Mapping) or set(row) != CAPTURE_MANIFEST_MEMBER_FIELDS:
+            raise ManualAdmissionError("task_execution_capture_manifest_invalid")
+        capture_id = row.get("capture_id")
+        if (
+            not isinstance(capture_id, str)
+            or not capture_id
+            or len(capture_id) > 256
+            or "\x00" in capture_id
+            or capture_id in seen
+        ):
+            raise ManualAdmissionError("task_execution_capture_manifest_invalid")
+        seen.add(capture_id)
+        checked.append(
+            {
+                "capture_id": capture_id,
+                "capture_content_sha256": _sha256(
+                    row.get("capture_content_sha256"),
+                    "task_execution_capture_manifest_invalid",
+                ),
+                "source_receipt_sha256": _sha256(
+                    row.get("source_receipt_sha256"),
+                    "task_execution_capture_manifest_invalid",
+                ),
+                "producer_attestation_sha256": _sha256(
+                    row.get("producer_attestation_sha256"),
+                    "task_execution_capture_manifest_invalid",
+                ),
+            }
+        )
+    return checked
+
+
+def capture_manifest_sha256(value: Any) -> str:
+    """Hash one ordered, complete foreground Capture manifest."""
+
+    return sha256_value(_capture_manifest(value))
+
+
+def build_task_execution_authorization_v2(
+    *,
+    subject: str,
+    unit_sha256: str,
+    frozen_payload_sha256: str,
+    capture_manifest: Any,
+    release_id: str,
+    activation_id: str,
+    issuer_authorization_receipt_sha256: str,
+    authority_key: bytes,
+    now: dt.datetime | None = None,
+    ttl: dt.timedelta = dt.timedelta(minutes=2),
+) -> dict[str, Any]:
+    """Build an in-memory JIT capability for one already materialized task."""
+
+    if subject not in SUBJECTS:
+        raise ManualAdmissionError("task_execution_authorization_subject_invalid")
+    if len(authority_key) < 32:
+        raise ManualAdmissionError("task_execution_authorization_key_invalid")
+    if ttl <= dt.timedelta(0) or ttl > dt.timedelta(minutes=15):
+        raise ManualAdmissionError("task_execution_authorization_window_invalid")
+    checked_manifest = _capture_manifest(capture_manifest)
+    issued = (now or dt.datetime.now(dt.timezone.utc)).astimezone(
+        dt.timezone.utc
+    )
+    core = {
+        "schema_version": TASK_AUTH_SCHEMA,
+        "subject": subject,
+        "unit_sha256": _sha256(
+            unit_sha256, "task_execution_authorization_hash_invalid"
+        ),
+        "frozen_payload_sha256": _sha256(
+            frozen_payload_sha256,
+            "task_execution_authorization_hash_invalid",
+        ),
+        "capture_manifest": checked_manifest,
+        "capture_manifest_sha256": sha256_value(checked_manifest),
+        "release_id": _sha256(
+            release_id, "task_execution_authorization_hash_invalid"
+        ),
+        "activation_id": _sha256(
+            activation_id, "task_execution_authorization_hash_invalid"
+        ),
+        "maximum_tasks": 1,
+        "allow_terra": True,
+        "allow_luna": True,
+        "formal_write_allowed": False,
+        "not_before": issued.isoformat(),
+        "expires_at": (issued + ttl).isoformat(),
+        "issuer_authorization_receipt_sha256": _sha256(
+            issuer_authorization_receipt_sha256,
+            "task_execution_authorization_hash_invalid",
+        ),
+    }
+    authority = {
+        "schema_version": TASK_AUTHORITY_SCHEMA,
+        "algorithm": "HMAC-SHA256",
+        "key_id": hashlib.sha256(authority_key).hexdigest(),
+        "purpose": TASK_AUTHORITY_PURPOSE,
+        "hmac_sha256": hmac.new(
+            authority_key,
+            canonical_bytes(
+                {"purpose": TASK_AUTHORITY_PURPOSE, "payload": core}
+            ),
+            hashlib.sha256,
+        ).hexdigest(),
+    }
+    bound = {**core, "authority": authority}
+    return {**bound, "authorization_sha256": sha256_value(bound)}
+
+
+def validate_task_execution_authorization_v2(
+    value: Mapping[str, Any],
+    *,
+    task_identity: Mapping[str, Any],
+    authority_key: bytes,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Pure validation for a v2 task capability; never writes state."""
+
+    expected = {
+        "schema_version",
+        "subject",
+        "unit_sha256",
+        "frozen_payload_sha256",
+        "capture_manifest",
+        "capture_manifest_sha256",
+        "release_id",
+        "activation_id",
+        "maximum_tasks",
+        "allow_terra",
+        "allow_luna",
+        "formal_write_allowed",
+        "not_before",
+        "expires_at",
+        "issuer_authorization_receipt_sha256",
+        "authority",
+        "authorization_sha256",
+    }
+    if set(value) != expected or value.get("schema_version") != TASK_AUTH_SCHEMA:
+        raise ManualAdmissionError("task_execution_authorization_shape_invalid")
+    if value.get("subject") not in SUBJECTS:
+        raise ManualAdmissionError("task_execution_authorization_subject_invalid")
+    for key in (
+        "unit_sha256",
+        "frozen_payload_sha256",
+        "capture_manifest_sha256",
+        "release_id",
+        "activation_id",
+        "issuer_authorization_receipt_sha256",
+        "authorization_sha256",
+    ):
+        _sha256(value.get(key), "task_execution_authorization_hash_invalid")
+    checked_manifest = _capture_manifest(value.get("capture_manifest"))
+    if sha256_value(checked_manifest) != value.get("capture_manifest_sha256"):
+        raise ManualAdmissionError("task_execution_capture_manifest_digest_invalid")
+    if (
+        value.get("maximum_tasks") != 1
+        or value.get("allow_terra") is not True
+        or value.get("allow_luna") is not True
+        or value.get("formal_write_allowed") is not False
+        or len(authority_key) < 32
+    ):
+        raise ManualAdmissionError("task_execution_authorization_policy_invalid")
+    core = {
+        key: copy.deepcopy(value[key])
+        for key in expected - {"authority", "authorization_sha256"}
+    }
+    authority = value.get("authority")
+    expected_hmac = hmac.new(
+        authority_key,
+        canonical_bytes(
+            {"purpose": TASK_AUTHORITY_PURPOSE, "payload": core}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    if (
+        not isinstance(authority, Mapping)
+        or set(authority)
+        != {
+            "schema_version",
+            "algorithm",
+            "key_id",
+            "purpose",
+            "hmac_sha256",
+        }
+        or authority.get("schema_version") != TASK_AUTHORITY_SCHEMA
+        or authority.get("algorithm") != "HMAC-SHA256"
+        or authority.get("key_id") != hashlib.sha256(authority_key).hexdigest()
+        or authority.get("purpose") != TASK_AUTHORITY_PURPOSE
+        or not hmac.compare_digest(
+            str(authority.get("hmac_sha256") or ""), expected_hmac
+        )
+    ):
+        raise ManualAdmissionError("task_execution_authorization_hmac_invalid")
+    bound = {**core, "authority": copy.deepcopy(dict(authority))}
+    if sha256_value(bound) != value.get("authorization_sha256"):
+        raise ManualAdmissionError("task_execution_authorization_digest_invalid")
+    not_before = _time(value.get("not_before"), "authorization_not_before")
+    expires_at = _time(value.get("expires_at"), "authorization_expires_at")
+    observed = (now or dt.datetime.now(dt.timezone.utc)).astimezone(
+        dt.timezone.utc
+    )
+    if expires_at <= not_before or expires_at - not_before > dt.timedelta(minutes=15):
+        raise ManualAdmissionError("task_execution_authorization_window_invalid")
+    if observed < not_before:
+        raise ManualAdmissionError("task_execution_authorization_not_started")
+    if observed >= expires_at:
+        raise ManualAdmissionError("task_execution_authorization_expired")
+    expected_identity = {
+        "subject": value["subject"],
+        "unit_sha256": value["unit_sha256"],
+        "frozen_payload_sha256": value["frozen_payload_sha256"],
+        "capture_manifest_sha256": value["capture_manifest_sha256"],
+        "release_id": value["release_id"],
+        "activation_id": value["activation_id"],
+    }
+    if any(
+        task_identity.get(key) != expected_value
+        for key, expected_value in expected_identity.items()
+    ):
+        raise ManualAdmissionError("task_execution_authorization_task_mismatch")
+    return copy.deepcopy(dict(value))
 
 
 def _time(value: Any, label: str) -> dt.datetime:
