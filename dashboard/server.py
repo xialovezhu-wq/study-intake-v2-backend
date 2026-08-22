@@ -1482,6 +1482,30 @@ V5_REQUIRED_ITEM_FIELDS = V4_REQUIRED_ITEM_FIELDS | frozenset(
     {"report_available", "formal_write_eligible"}
 )
 
+ITEM_LOCAL_DISPATCH_STATUSES = frozenset({
+    "pending", "pending_evidence", "pending_consumer_paused", "claimed",
+    "running", "retrying", "terminal", "cancelled", "stalled",
+})
+ITEM_MODEL_STAGES = frozenset({
+    "not_started", "analysis", "critical_review", "quality_closed",
+    "failed", "cancelled",
+})
+ITEM_TERMINAL_STATUSES = frozenset({
+    "ready", "succeeded", "needs_rework", "failed", "stale",
+    "evidence_pending", "workflow_complete", "workflow_complete_with_warnings",
+    "workflow_partial", "execution_failed", "cancelled", "stalled",
+})
+ITEM_AXIS_CONTRACT = {
+    "evidence_access_status": frozenset({"unverified", "ready", "missing", "quarantined"}),
+    "analysis_execution_status": frozenset({"not_started", "running", "completed", "failed", "cancelled", "stalled"}),
+    "review_execution_status": frozenset({"not_started", "running", "completed", "failed", "cancelled", "stalled"}),
+    "analysis_report_status": frozenset({"not_started", "available", "available_with_warnings", "normalization_failed", "quarantined"}),
+    "review_report_status": frozenset({"not_started", "available", "available_with_warnings", "normalization_failed", "quarantined"}),
+    "sol_review_status": frozenset({"not_eligible", "not_required", "pending", "reviewing", "adopted", "modified", "rejected"}),
+    "formal_write_status": frozenset({"not_authorized", "pending", "committed", "failed"}),
+    "stall_probe_status": frozenset({"not_applicable", "healthy", "stall_suspected", "probing", "stalled", "cancelled"}),
+}
+
 V4_NULLABLE_SHA256_ITEM_FIELDS = frozenset(
     {
         "authority_snapshot_sha256",
@@ -2164,6 +2188,157 @@ def _concurrency_contract_error(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _item_needs_diagnostic_placeholder(
+    item: Any,
+    *,
+    subject: str,
+    release_id: str | None,
+    schema_version: str,
+) -> bool:
+    """Keep malformed task rows local while root/topology stay strict."""
+
+    if not isinstance(item, Mapping):
+        return True
+    if set(item) - ITEM_V3_FIELDS:
+        return True
+    if (
+        item.get("subject", subject) != subject
+        or _text(item.get("capture_id"), limit=160) is None
+        or SAFE_ID.fullmatch(str(item.get("capture_id") or "")) is None
+        or item.get("queue_state") not in QUEUE_STATES
+    ):
+        return True
+    if any(
+        not isinstance(item.get(key), str)
+        or SHA256.fullmatch(str(item.get(key))) is None
+        for key in ("unit_sha256", "frozen_payload_sha256", "release_id")
+    ):
+        return True
+    if release_id is not None and item.get("release_id") != release_id:
+        return True
+    if (
+        item.get("local_dispatch_status")
+        not in {None, *ITEM_LOCAL_DISPATCH_STATUSES}
+        or item.get("model_stage") not in {None, *ITEM_MODEL_STAGES}
+        or item.get("terminal_status")
+        not in {None, *ITEM_TERMINAL_STATUSES}
+    ):
+        return True
+    generation = item.get("generation")
+    attempt = item.get("attempt")
+    fence = item.get("fence")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or ((attempt is None) is not (fence is None))
+        or attempt is not None
+        and (
+            isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+            or isinstance(fence, bool)
+            or not isinstance(fence, int)
+            or fence < 1
+            or generation != attempt
+        )
+    ):
+        return True
+    if not _text(item.get("input_fingerprint"), limit=320) or not _text(
+        item.get("rule_version"), limit=160
+    ):
+        return True
+    if schema_version in MODERN_SCHEMA_VERSIONS:
+        if not V4_REQUIRED_ITEM_FIELDS.issubset(item):
+            return True
+        if schema_version == SCHEMA_VERSION and (
+            not V5_REQUIRED_ITEM_FIELDS.issubset(item)
+            or not isinstance(item.get("report_available"), bool)
+            or item.get("formal_write_eligible") is not False
+        ):
+            return True
+        warning_codes = item.get("warning_codes")
+        if (
+            any(
+                item.get(key) not in allowed
+                for key, allowed in ITEM_AXIS_CONTRACT.items()
+            )
+            or not isinstance(warning_codes, list)
+            or warning_codes != sorted(set(warning_codes))
+            or any(
+                not isinstance(code, str) or SAFE_ID.fullmatch(code) is None
+                for code in warning_codes
+            )
+            or not isinstance(item.get("soft_timeout_warning"), bool)
+            or not _nullable_non_negative_integer(
+                item.get("elapsed_runtime_seconds")
+            )
+            or any(
+                not _nullable_sha256(item.get(field))
+                for field in V4_NULLABLE_SHA256_ITEM_FIELDS
+            )
+        ):
+            return True
+        exact_error = item.get("exact_error_code")
+        if exact_error is not None and (
+            not isinstance(exact_error, str)
+            or SAFE_ID.fullmatch(exact_error) is None
+        ):
+            return True
+        queue_status = item.get("server_queue_status")
+        queue_confirmation = item.get("server_queue_confirmation")
+        if (
+            queue_status == "unknown"
+            and queue_confirmation != "unconfirmed"
+            or queue_status == "confirmed_rate_limited"
+            and queue_confirmation
+            not in {"confirmed_event", "provider_receipt_verified"}
+            or queue_status == "clear"
+            and queue_confirmation != "provider_receipt_verified"
+        ):
+            return True
+    shared_axes = {
+        "execution_status",
+        "quality_status",
+        "report_disposition",
+        "production_accepted",
+    }
+    if shared_axes.intersection(item):
+        if not shared_axes.issubset(item) or item.get("production_accepted") is not False:
+            return True
+        execution_status = item.get("execution_status")
+        quality_status = item.get("quality_status")
+        disposition = item.get("report_disposition")
+        terminal_error = item.get("terminal_error_code")
+        if execution_status == "succeeded":
+            return bool(
+                terminal_error is not None
+                or item.get("report_available") is not True
+                or quality_status == "passed"
+                and (
+                    disposition != "accepted"
+                    or item.get("sol_review_status") != "not_required"
+                )
+                or quality_status == "issues_found"
+                and (
+                    disposition != "needs_sol_review"
+                    or item.get("sol_review_status") != "pending"
+                )
+                or quality_status not in {"passed", "issues_found"}
+            )
+        if execution_status == "failed":
+            return bool(
+                quality_status != "unchecked"
+                or disposition not in {"technical_failure", "quarantined"}
+                or not isinstance(terminal_error, str)
+                or SAFE_ID.fullmatch(terminal_error) is None
+                or item.get("sol_review_status") != "not_eligible"
+            )
+        if execution_status != "running" or quality_status != "unchecked":
+            return True
+    return False
+
+
 def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
     """Return the first v3 closure violation without trusting producer aggregates."""
 
@@ -2332,7 +2507,22 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
         ):
             return "projection_v3_counts_not_closed"
         recomputed = _v3_counts(items)
-        if any(recomputed[key] != values[key] for key in V3_COUNT_KEYS):
+        malformed_item_present = any(
+            _item_needs_diagnostic_placeholder(
+                item,
+                subject=subject,
+                release_id=release_id,
+                schema_version=str(schema_version),
+            )
+            for item in items
+        )
+        if (
+            not malformed_item_present
+            and any(
+                recomputed[key] != values[key]
+                for key in V3_COUNT_KEYS
+            )
+        ):
             return "projection_v3_counts_not_reproducible"
         if payload.get("schema_version") in MODERN_SCHEMA_VERSIONS:
             partition = section.get("batch_partition")
@@ -2397,51 +2587,31 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
                 ):
                     return "projection_v4_blocking_batch_invalid"
         for item in items:
+            if _item_needs_diagnostic_placeholder(
+                item,
+                subject=subject,
+                release_id=(
+                    str(release_id) if isinstance(release_id, str) else None
+                ),
+                schema_version=str(schema_version),
+            ):
+                continue
             if (
                 not isinstance(item, Mapping)
                 or item.get("queue_state") not in QUEUE_STATES
                 or (
                     "local_dispatch_status" in item
-                    and item.get("local_dispatch_status") not in {
-                    "pending",
-                    "pending_evidence",
-                    "pending_consumer_paused",
-                    "claimed",
-                    "running",
-                    "retrying",
-                    "terminal",
-                    "cancelled",
-                    "stalled",
-                    }
+                    and item.get("local_dispatch_status")
+                    not in ITEM_LOCAL_DISPATCH_STATUSES
                 )
                 or (
                     "model_stage" in item
-                    and item.get("model_stage") not in {
-                    "not_started",
-                    "analysis",
-                    "critical_review",
-                    "quality_closed",
-                    "failed",
-                    "cancelled",
-                    }
+                    and item.get("model_stage") not in ITEM_MODEL_STAGES
                 )
                 or (
                     "terminal_status" in item
-                    and item.get("terminal_status") not in {
-                    None,
-                    "ready",
-                    "succeeded",
-                    "needs_rework",
-                    "failed",
-                    "stale",
-                    "evidence_pending",
-                    "workflow_complete",
-                    "workflow_complete_with_warnings",
-                    "workflow_partial",
-                    "execution_failed",
-                    "cancelled",
-                    "stalled",
-                    }
+                    and item.get("terminal_status")
+                    not in {None, *ITEM_TERMINAL_STATUSES}
                 )
             ):
                 return "projection_v3_queue_state_invalid"
@@ -2504,39 +2674,10 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
                     or "formal_write_eligible" in item
                 ):
                     return "projection_v4_task_unknown_field"
-                axis_contract = {
-                    "evidence_access_status": {
-                        "unverified", "ready", "missing", "quarantined",
-                    },
-                    "analysis_execution_status": {
-                        "not_started", "running", "completed", "failed",
-                        "cancelled", "stalled",
-                    },
-                    "review_execution_status": {
-                        "not_started", "running", "completed", "failed",
-                        "cancelled", "stalled",
-                    },
-                    "analysis_report_status": {
-                        "not_started", "available", "available_with_warnings",
-                        "normalization_failed", "quarantined",
-                    },
-                    "review_report_status": {
-                        "not_started", "available", "available_with_warnings",
-                        "normalization_failed", "quarantined",
-                    },
-                    "sol_review_status": {
-                        "not_eligible", "pending", "reviewing", "adopted",
-                        "modified", "rejected",
-                    },
-                    "formal_write_status": {
-                        "not_authorized", "pending", "committed", "failed",
-                    },
-                    "stall_probe_status": {
-                        "not_applicable", "healthy", "stall_suspected",
-                        "probing", "stalled", "cancelled",
-                    },
-                }
-                if any(item.get(key) not in allowed for key, allowed in axis_contract.items()):
+                if any(
+                    item.get(key) not in allowed
+                    for key, allowed in ITEM_AXIS_CONTRACT.items()
+                ):
                     return "projection_v4_task_axes_invalid"
                 warning_codes = item.get("warning_codes")
                 if (
@@ -2664,52 +2805,6 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
                 for key in ("sol_reviewed", "sol_committed")
             ):
                 return "projection_v3_task_quality_invalid"
-            shared_axes = {
-                "execution_status",
-                "quality_status",
-                "report_disposition",
-                "production_accepted",
-            }
-            if shared_axes.intersection(item):
-                if not shared_axes.issubset(item):
-                    return "projection_v5_shared_status_invalid"
-                execution_status = item.get("execution_status")
-                quality_status = item.get("quality_status")
-                disposition = item.get("report_disposition")
-                terminal_error = item.get("terminal_error_code")
-                if item.get("production_accepted") is not False:
-                    return "projection_v5_shared_status_invalid"
-                if execution_status == "succeeded":
-                    if (
-                        terminal_error is not None
-                        or item.get("report_available") is not True
-                        or quality_status == "passed"
-                        and (
-                            disposition != "accepted"
-                            or item.get("sol_review_status") != "not_required"
-                        )
-                        or quality_status == "issues_found"
-                        and (
-                            disposition != "needs_sol_review"
-                            or item.get("sol_review_status") != "pending"
-                        )
-                        or quality_status not in {"passed", "issues_found"}
-                    ):
-                        return "projection_v5_shared_status_invalid"
-                elif execution_status == "failed":
-                    if (
-                        quality_status != "unchecked"
-                        or disposition not in {
-                            "technical_failure",
-                            "quarantined",
-                        }
-                        or not isinstance(terminal_error, str)
-                        or SAFE_ID.fullmatch(terminal_error) is None
-                        or item.get("sol_review_status") != "not_eligible"
-                    ):
-                        return "projection_v5_shared_status_invalid"
-                elif execution_status != "running" or quality_status != "unchecked":
-                    return "projection_v5_shared_status_invalid"
             if subject == "english":
                 authority_required = {
                     *ENGLISH_CAPTURE_AUTHORITY_BOOLEAN_FIELDS,
@@ -4096,7 +4191,105 @@ def _normalize_item_coverage(result: dict[str, Any], prefix: str) -> None:
     result[percentage_key] = round((covered / claims) * 100, 1)
 
 
-def _public_item(item: Mapping[str, Any], subject_hint: str) -> dict[str, Any] | None:
+def _diagnostic_item_placeholder(
+    item: Mapping[str, Any], subject_hint: str, *, ordinal: int | None = None
+) -> dict[str, Any]:
+    subject = _text(item.get("subject"), limit=16) or subject_hint
+    if subject not in {"math", "cs408", "english"}:
+        subject = subject_hint if subject_hint in SUBJECT_NAMES else "math"
+    capture_id = _text(item.get("capture_id"), limit=160)
+    if capture_id is None or SAFE_ID.fullmatch(capture_id) is None:
+        digest = hashlib.sha256(
+            json.dumps(
+                dict(item),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+            + f"\n{subject}\n{ordinal}".encode("utf-8")
+        ).hexdigest()[:20].upper()
+        capture_id = f"DASHBOARD-ITEM-{digest}"
+    result: dict[str, Any] = {
+        "capture_id": capture_id,
+        "subject": subject,
+        "target_label": capture_id,
+        "queue_state": "failed",
+        "local_dispatch_status": "terminal",
+        "model_stage": "failed",
+        "terminal_status": "failed",
+        "execution_status": "failed",
+        "quality_status": "unchecked",
+        "report_disposition": "technical_failure",
+        "sol_review_status": "not_eligible",
+        "formal_write_status": "not_authorized",
+        "formal_write_eligible": False,
+        "production_accepted": False,
+        "diagnostic_placeholder": True,
+        "error_code": "dashboard_item_contract_invalid",
+        "terminal_error_code": "dashboard_item_contract_invalid",
+        "warning_codes": ["dashboard_item_contract_invalid"],
+    }
+    study_date = _text(item.get("study_date"), limit=10)
+    if study_date is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", study_date):
+        result["study_date"] = study_date
+    for key in ("unit_sha256", "frozen_payload_sha256"):
+        value = _text(item.get(key), limit=64)
+        if value is not None and SHA256.fullmatch(value):
+            result[key] = value
+    raw_present = any(
+        isinstance(item.get(key), str)
+        and SHA256.fullmatch(str(item.get(key))) is not None
+        for key in (
+            "analysis_raw_output_sha256",
+            "critical_review_raw_output_sha256",
+        )
+    )
+    report_present = bool(
+        any(
+            isinstance(item.get(key), str)
+            and SHA256.fullmatch(str(item.get(key))) is not None
+            for key in (
+                "analysis_report_sha256",
+                "critical_review_report_sha256",
+                "package_sha256",
+            )
+        )
+    )
+    result["raw_output_present"] = raw_present
+    result["report_available"] = report_present
+    return result
+
+
+def _public_item(
+    item: Mapping[str, Any],
+    subject_hint: str,
+    *,
+    expected_release_id: str | None = None,
+    schema_version: str | None = None,
+    ordinal: int | None = None,
+) -> dict[str, Any] | None:
+    raw_capture_id = _text(item.get("capture_id"), limit=160)
+    raw_subject = _text(item.get("subject"), limit=16) or subject_hint
+    if (
+        (
+            expected_release_id is not None
+            and _item_needs_diagnostic_placeholder(
+                item,
+                subject=subject_hint,
+                release_id=expected_release_id,
+                schema_version=str(schema_version or SCHEMA_VERSION),
+            )
+        )
+        or
+        set(item) - ITEM_V3_FIELDS
+        or raw_capture_id is None
+        or SAFE_ID.fullmatch(raw_capture_id) is None
+        or raw_subject not in {"math", "cs408", "english"}
+    ):
+        return _diagnostic_item_placeholder(
+            item, subject_hint, ordinal=ordinal
+        )
     capture_id = _text(item.get("capture_id"), limit=160)
     if capture_id is None or SAFE_ID.fullmatch(capture_id) is None:
         return None
@@ -4315,14 +4508,42 @@ def _public_item(item: Mapping[str, Any], subject_hint: str) -> dict[str, Any] |
 
 def _all_public_items(projection: Mapping[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    dispatchers = projection.get("dispatchers")
+    schema_version = str(projection.get("schema_version") or "")
     for subject, section in _subject_sections(projection).items():
         raw_items = section.get("items")
         if not isinstance(raw_items, list):
             continue
-        for raw_item in raw_items:
+        dispatcher = (
+            dispatchers.get(subject)
+            if isinstance(dispatchers, Mapping)
+            else None
+        )
+        expected_release_id = (
+            str(dispatcher.get("release_id"))
+            if isinstance(dispatcher, Mapping)
+            and isinstance(dispatcher.get("release_id"), str)
+            else None
+        )
+        for ordinal, raw_item in enumerate(raw_items):
             if not isinstance(raw_item, Mapping):
+                items.append(
+                    _diagnostic_item_placeholder(
+                        {
+                            "study_date": projection.get("study_date")
+                        },
+                        subject,
+                        ordinal=ordinal,
+                    )
+                )
                 continue
-            item = _public_item(raw_item, subject)
+            item = _public_item(
+                raw_item,
+                subject,
+                expected_release_id=expected_release_id,
+                schema_version=schema_version,
+                ordinal=ordinal,
+            )
             if item is not None:
                 items.append(item)
     return items
@@ -6322,10 +6543,13 @@ def _filtered_items(
     return sorted(result, key=_item_sort_key, reverse=True)
 
 
-def _v3_counts(items: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+def _v3_counts(items: Iterable[Any]) -> dict[str, int]:
     result = {key: 0 for key in V3_COUNT_KEYS}
     for item in items:
         result["selected"] += 1
+        if not isinstance(item, Mapping):
+            result["failed"] += 1
+            continue
         queue_state = str(item.get("queue_state") or "")
         stage = str(item.get("current_stage") or "")
         if queue_state == "evidence_pending":
@@ -8196,8 +8420,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         if found is not None:
             raw_item, subject_hint = found
-            item = _public_item(raw_item, subject_hint)
+            raw_dispatchers = result.projection.get("dispatchers")
+            raw_dispatcher = (
+                raw_dispatchers.get(subject_hint)
+                if isinstance(raw_dispatchers, Mapping)
+                else None
+            )
+            expected_release_id = (
+                str(raw_dispatcher.get("release_id"))
+                if isinstance(raw_dispatcher, Mapping)
+                and isinstance(raw_dispatcher.get("release_id"), str)
+                else None
+            )
+            item = _public_item(
+                raw_item,
+                subject_hint,
+                expected_release_id=expected_release_id,
+                schema_version=str(
+                    result.projection.get("schema_version") or ""
+                ),
+            )
             if item is not None:
+                if item.get("diagnostic_placeholder") is True:
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            "available": True,
+                            "projection_identity": identity,
+                            "item": item,
+                            **_dashboard_request_counters(),
+                        },
+                    )
+                    return
                 if supplied_task_preconditions and (
                     self._one(query, "task_generation")
                     != str(item.get("generation"))

@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 if __package__:
     from .concurrent_dispatch import DispatchError, FrozenTask, LeaseStore
+    from .execution_quality_contract import decide_execution_quality
     from .subject_sol_contract import (
         SubjectSolContractError,
         SubjectSolRuntimeStore,
@@ -36,6 +37,9 @@ else:
         DispatchError,
         FrozenTask,
         LeaseStore,
+    )
+    from execution_quality_contract import (  # type: ignore[no-redef]
+        decide_execution_quality,
     )
     from subject_sol_contract import (  # type: ignore[no-redef]
         SubjectSolContractError,
@@ -4235,6 +4239,42 @@ def _apply_batch_task_state(item: dict[str, Any], task: Mapping[str, Any]) -> No
         # A v2 terminal task always carries a terminal receipt.  It therefore
         # outranks stale current-fence events; nonterminal batch state may only
         # fill gaps or move the item forward.
+        shared_decision = None
+        if state in {
+            "workflow_complete",
+            "workflow_complete_with_warnings",
+        }:
+            shared_decision = decide_execution_quality(
+                model_completed=True,
+                provider_completed=True,
+                mcp_database_query_completed=True,
+                raw_output_reopenable=True,
+                report_reopenable=True,
+                identity_verified=True,
+                quality_findings_present=(
+                    state == "workflow_complete_with_warnings"
+                ),
+            )
+        elif terminal:
+            raw_error_code = task.get("error_code")
+            shared_decision = decide_execution_quality(
+                model_completed=False,
+                provider_completed=False,
+                mcp_database_query_completed=False,
+                raw_output_reopenable=False,
+                report_reopenable=False,
+                identity_verified=False,
+                quality_findings_present=False,
+                technical_error_code=(
+                    str(raw_error_code)
+                    if isinstance(raw_error_code, str) and raw_error_code
+                    else "technical_execution_incomplete"
+                ),
+                quarantined=(
+                    task.get("quality_outcome") == "quarantined"
+                    or task.get("report_disposition") == "quarantined"
+                ),
+            )
         if terminal or batch_rank >= current_rank:
             item.update(
                 {
@@ -4285,33 +4325,27 @@ def _apply_batch_task_state(item: dict[str, Any], task: Mapping[str, Any]) -> No
                     ),
                     "quality_outcome": quality_outcome,
                     "execution_status": (
-                        "succeeded"
-                        if state
-                        in {
-                            "workflow_complete",
-                            "workflow_complete_with_warnings",
-                        }
-                        else "failed"
-                        if terminal
+                        shared_decision.execution_status
+                        if shared_decision is not None
                         else "running"
                     ),
                     "quality_status": (
-                        "passed"
-                        if state == "workflow_complete"
-                        else "issues_found"
-                        if state == "workflow_complete_with_warnings"
+                        shared_decision.quality_status
+                        if shared_decision is not None
                         else "unchecked"
                     ),
                     "report_disposition": (
-                        "accepted"
-                        if state == "workflow_complete"
-                        else "needs_sol_review"
-                        if state == "workflow_complete_with_warnings"
+                        shared_decision.report_disposition
+                        if shared_decision is not None
                         else None
                     ),
                     "production_accepted": False,
                 }
             )
+            if shared_decision is not None:
+                item["sol_review_status"] = (
+                    shared_decision.sol_review_status
+                )
         analysis_execution_ready = all(
             _safe_hash(task.get(field)) is not None
             for field in (
@@ -4376,15 +4410,16 @@ def _apply_batch_task_state(item: dict[str, Any], task: Mapping[str, Any]) -> No
             if review_execution_ready and terminal and warnings
             else "not_started"
         )
-        item["sol_review_status"] = (
-            "pending"
-            if state in SUBJECT_BATCH_V2_CANDIDATE_STATES
-            or state == "workflow_partial"
-            and (
-                analysis_report_ready or review_report_ready
+        if shared_decision is None:
+            item["sol_review_status"] = (
+                "pending"
+                if state in SUBJECT_BATCH_V2_CANDIDATE_STATES
+                or state == "workflow_partial"
+                and (
+                    analysis_report_ready or review_report_ready
+                )
+                else "not_eligible"
             )
-            else "not_eligible"
-        )
         item["formal_write_status"] = "not_authorized"
         item["report_available"] = bool(
             analysis_report_ready or review_report_ready
