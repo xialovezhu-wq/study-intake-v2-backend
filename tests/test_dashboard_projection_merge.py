@@ -171,6 +171,48 @@ class SemanticReuseProjectionTests(unittest.TestCase):
                     {"needs_rework", "failed", "retrying", "rejected"},
                 )
 
+    def test_three_subject_technical_failures_use_shared_terminal_contract(self):
+        for subject in ("math", "english", "cs408"):
+            with self.subTest(subject=subject):
+                task = {
+                    "status": "execution_failed",
+                    "analysis_execution_receipt_sha256": None,
+                    "analysis_raw_output_sha256": None,
+                    "analysis_normalization_receipt_sha256": None,
+                    "analysis_report_sha256": None,
+                    "critical_review_execution_receipt_sha256": None,
+                    "critical_review_raw_output_sha256": None,
+                    "critical_review_normalization_receipt_sha256": None,
+                    "critical_review_report_sha256": None,
+                    "package_sha256": None,
+                    "sol_handoff_envelope_sha256": None,
+                    "terminal_receipt_sha256": "a" * 64,
+                    "warning_codes": [],
+                    "error_code": "manual_live_authorization_missing",
+                }
+                item = {
+                    "queue_state": "running",
+                    "current_stage": "analysis",
+                    "luna_status": "processing",
+                }
+
+                _apply_batch_task_state(item, task)
+
+                self.assertEqual(item["terminal_status"], "failed")
+                self.assertEqual(item["execution_status"], "failed")
+                self.assertEqual(item["quality_status"], "unchecked")
+                self.assertEqual(
+                    item["report_disposition"], "technical_failure"
+                )
+                self.assertEqual(
+                    item["terminal_error_code"],
+                    "manual_live_authorization_missing",
+                )
+                self.assertEqual(item["sol_review_status"], "not_eligible")
+                self.assertFalse(item["report_available"])
+                self.assertFalse(item["formal_write_eligible"])
+                self.assertFalse(item["production_accepted"])
+
     def test_semantic_reuse_stays_published_without_running_state(self):
         self.assertEqual(
             ("ready", "quality_ready", "two_pass_ready"),

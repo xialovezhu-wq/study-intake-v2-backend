@@ -153,6 +153,7 @@ class AnalysisPackageV1Tests(unittest.TestCase):
                 result["report"] = {
                     "summary": "durable but structurally incomplete",
                     "evidence_refs": result["report"]["evidence_refs"],
+                    "unexpected_advisory": {"ignored": True},
                 }
             elif stage == "luna_analysis":
                 result["report"]["proposals"] = "malformed"
@@ -178,6 +179,10 @@ class AnalysisPackageV1Tests(unittest.TestCase):
             self.assertEqual(package["stages"][0]["normalization_status"], "incomplete")
             self.assertTrue(package["stages"][0]["raw_output_ref"])
             self.assertTrue(package["stages"][0]["execution_receipt_ref"])
+            self.assertIn(
+                "analysis_normalization_unknown_fields_dropped",
+                package["warnings"],
+            )
 
     def test_missing_raw_output_binding_is_retryable_technical_failure(self) -> None:
         def missing_raw(stage: str, model: str, stage_input: dict) -> dict:

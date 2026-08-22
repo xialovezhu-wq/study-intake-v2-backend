@@ -149,6 +149,17 @@ class BackendSuccessorContractTests(unittest.TestCase):
         output_path.write_bytes(exact_raw)
         order: list[str] = []
         original_raw = store.publish_model_stage_raw_output
+        original_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            stat = os.fstat(fd)
+            spool_stat = output_path.stat()
+            if (stat.st_dev, stat.st_ino) == (
+                spool_stat.st_dev,
+                spool_stat.st_ino,
+            ):
+                order.append("spool_fsync")
+            original_fsync(fd)
 
         def publish_raw(*args: object, **kwargs: object) -> dict:
             order.append("raw")
@@ -171,6 +182,7 @@ class BackendSuccessorContractTests(unittest.TestCase):
             mock.patch.object(
                 store, "publish_provider_process_exit", side_effect=publish_exit
             ),
+            mock.patch("preprocessor_core.os.fsync", side_effect=fsync),
         ):
             completed = runner._invoke_subprocess(
                 [
@@ -186,7 +198,7 @@ class BackendSuccessorContractTests(unittest.TestCase):
                 provider_schema_sha256="b" * 64,
             )
         self.assertEqual(completed.returncode, 0)
-        self.assertEqual(order, ["raw", "exit"])
+        self.assertEqual(order, ["spool_fsync", "raw", "exit"])
         raw_paths = list(store.model_stage_raw_output_root.rglob("*.json"))
         self.assertEqual(len(raw_paths), 1)
         raw = json.loads(raw_paths[0].read_text(encoding="utf-8"))
@@ -274,6 +286,56 @@ class BackendSuccessorContractTests(unittest.TestCase):
         self.assertEqual(
             list(store.provider_process_exit_root.rglob("*.json")), []
         )
+
+    def test_raw_spool_fsync_failure_cannot_publish_empty_raw_or_exit(self) -> None:
+        runner, store, frozen = self._bound_codex_runner()
+        context_root = (
+            self.runtime / "dispatch/contexts" / frozen.unit_sha256 / "fence-1"
+        )
+        context_root.mkdir(parents=True, exist_ok=True)
+        output_path = self.runtime / "provider-fsync-failure.json"
+        exact_raw = b'{"must_not_be_lost":true}\n'
+        output_path.write_bytes(exact_raw)
+        original_fsync = os.fsync
+
+        def fail_only_spool(fd: int) -> None:
+            current = os.fstat(fd)
+            spool = output_path.stat()
+            if (current.st_dev, current.st_ino) == (spool.st_dev, spool.st_ino):
+                raise OSError("synthetic spool fsync failure")
+            original_fsync(fd)
+
+        with (
+            mock.patch("preprocessor_core.os.fsync", side_effect=fail_only_spool),
+            mock.patch.object(
+                store,
+                "publish_model_stage_raw_output",
+                wraps=store.publish_model_stage_raw_output,
+            ) as publish_raw,
+            mock.patch.object(
+                store,
+                "publish_provider_process_exit",
+                wraps=store.publish_provider_process_exit,
+            ) as publish_exit,
+        ):
+            with self.assertRaisesRegex(
+                PreprocessorError, "model_stage_raw_spool_fsync_failed"
+            ):
+                runner._invoke_subprocess(
+                    [sys.executable, "-c", "pass"],
+                    input=b"",
+                    timeout=0,
+                    cwd=context_root,
+                    stage_name="math_analysis",
+                    raw_output_path=output_path,
+                    provider_schema_sha256="d" * 64,
+                )
+        publish_raw.assert_not_called()
+        publish_exit.assert_not_called()
+        self.assertEqual(
+            list(store.model_stage_raw_output_root.rglob("*.json")), []
+        )
+        self.assertEqual(output_path.read_bytes(), exact_raw)
 
     def test_first_chunk_survives_real_host_sigkill_without_false_final(self) -> None:
         _runner, store, frozen = self._bound_codex_runner()

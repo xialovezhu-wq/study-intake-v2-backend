@@ -56,25 +56,34 @@ class DashboardProjectionV4ContractTests(unittest.TestCase):
     def test_complete_v4_projection_is_accepted(self) -> None:
         self.assertIsNone(dashboard._projection_contract_error(v4_projection()))
 
-    def test_missing_required_task_axis_fails_closed(self) -> None:
-        value = v4_projection()
-        value["subjects"]["math"]["items"][0].pop(
-            "authority_snapshot_sha256"
-        )
-        self.assertEqual(
-            dashboard._projection_contract_error(value),
-            "projection_v4_task_shape_invalid",
-        )
-
-    def test_unknown_server_queue_cannot_claim_confirmation(self) -> None:
+    def test_missing_required_task_axis_is_item_local_placeholder(self) -> None:
         value = v4_projection()
         item = value["subjects"]["math"]["items"][0]
+        capture_id = item["capture_id"]
+        item.pop(
+            "authority_snapshot_sha256"
+        )
+        self.assertIsNone(dashboard._projection_contract_error(value))
+        public = next(
+            row
+            for row in dashboard._all_public_items(value)
+            if row["capture_id"] == capture_id
+        )
+        self.assertTrue(public["diagnostic_placeholder"])
+
+    def test_unknown_server_queue_conflict_is_item_local_placeholder(self) -> None:
+        value = v4_projection()
+        item = value["subjects"]["math"]["items"][0]
+        capture_id = item["capture_id"]
         item["server_queue_status"] = "unknown"
         item["server_queue_confirmation"] = "confirmed_event"
-        self.assertEqual(
-            dashboard._projection_contract_error(value),
-            "projection_v4_server_queue_confirmation_invalid",
+        self.assertIsNone(dashboard._projection_contract_error(value))
+        public = next(
+            row
+            for row in dashboard._all_public_items(value)
+            if row["capture_id"] == capture_id
         )
+        self.assertTrue(public["diagnostic_placeholder"])
 
     def test_initial_canary_capacity_cannot_silently_be_three(self) -> None:
         value = v4_projection()

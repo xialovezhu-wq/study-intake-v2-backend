@@ -1239,21 +1239,33 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(summary["error"], "projection_v3_canary_identity_invalid")
 
-    def test_item_release_must_match_subject_dispatcher_release(self) -> None:
+    def test_item_release_mismatch_isolated_as_diagnostic_placeholder(self) -> None:
         payload = json.loads(self.projection_path.read_text(encoding="utf-8"))
         payload["subjects"]["math"]["items"][0]["release_id"] = "2" * 64
         self.projection_path.write_text(json.dumps(payload), encoding="utf-8")
 
-        for path in (
-            "/api/v1/summary?date=2026-08-04&subject=math",
-            "/api/v1/items?date=2026-08-04&subject=math",
+        status, _, summary = self.json_request(
+            "GET", "/api/v1/summary?date=2026-08-04&subject=math"
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(summary["available"])
+        status, _, listing = self.json_request(
+            "GET", "/api/v1/items?date=2026-08-04&subject=math"
+        )
+        self.assertEqual(status, 200)
+        placeholder = next(
+            row
+            for row in listing["items"]
+            if row["capture_id"] == "MFI-20260804-001"
+        )
+        self.assertTrue(placeholder["diagnostic_placeholder"])
+        status, _, detail = self.json_request(
+            "GET",
             "/api/v1/items/MFI-20260804-001?date=2026-08-04&subject=math",
-        ):
-            status, _, response = self.json_request("GET", path)
-            self.assertEqual(status, 503)
-            self.assertEqual(
-                response["error"], "projection_v3_task_release_mismatch"
-            )
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(detail["item"]["diagnostic_placeholder"])
+        self.assertNotIn("task_detail", detail["item"])
 
     def test_live_v2_missing_requested_service_tier_fails_closed(self) -> None:
         self.install_production_canary_gates()
@@ -1963,6 +1975,87 @@ class DashboardServerTest(unittest.TestCase):
         self.assertIn('item.execution_status === "succeeded"', source)
         self.assertIn('item.quality_status === "issues_found"', source)
         self.assertIn("等待 Sol 质量复核", source)
+
+    def test_malformed_item_is_placeholder_without_hiding_siblings_or_healthz(self) -> None:
+        baseline_health_status, _, baseline_health = self.json_request(
+            "GET", "/healthz"
+        )
+        payload = json.loads(self.projection_path.read_text(encoding="utf-8"))
+        malformed = payload["subjects"]["math"]["items"][0]
+        malformed_capture_id = malformed["capture_id"]
+        malformed["unexpected_backend_field"] = {"unsafe": "ignored"}
+        sibling_capture_ids = {
+            item["capture_id"]
+            for subject in payload["subjects"].values()
+            for item in subject["items"]
+            if item["capture_id"] != malformed_capture_id
+        }
+        self.projection_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        status, _, listing = self.json_request(
+            "GET", "/api/v1/items?date=2026-08-04&subject=all"
+        )
+        self.assertEqual(status, 200)
+        public_by_id = {
+            item["capture_id"]: item for item in listing["items"]
+        }
+        self.assertTrue(sibling_capture_ids.issubset(public_by_id))
+        placeholder = public_by_id[malformed_capture_id]
+        self.assertEqual(placeholder["subject"], "math")
+        self.assertEqual(placeholder["execution_status"], "failed")
+        self.assertEqual(placeholder["quality_status"], "unchecked")
+        self.assertEqual(
+            placeholder["report_disposition"], "technical_failure"
+        )
+        self.assertEqual(
+            placeholder["error_code"], "dashboard_item_contract_invalid"
+        )
+        self.assertTrue(placeholder["diagnostic_placeholder"])
+        self.assertFalse(placeholder["formal_write_eligible"])
+        self.assertFalse(placeholder["production_accepted"])
+
+        detail_status, _, detail = self.json_request(
+            "GET",
+            f"/api/v1/items/{malformed_capture_id}?date=2026-08-04&subject=math",
+        )
+        self.assertEqual(detail_status, 200)
+        self.assertTrue(detail["item"]["diagnostic_placeholder"])
+        self.assertNotIn("task_detail", detail["item"])
+
+        health_status, _, health = self.json_request("GET", "/healthz")
+        self.assertEqual(health_status, baseline_health_status, health)
+        self.assertEqual(health["status"], baseline_health["status"])
+        self.assertEqual(health.get("error"), baseline_health.get("error"))
+
+    def test_non_mapping_item_is_placeholder_and_does_not_break_projection(self) -> None:
+        baseline_health_status, _, baseline_health = self.json_request(
+            "GET", "/healthz"
+        )
+        payload = json.loads(self.projection_path.read_text(encoding="utf-8"))
+        sibling_ids = {
+            item["capture_id"]
+            for subject in payload["subjects"].values()
+            for item in subject["items"]
+        }
+        payload["subjects"]["math"]["items"].append([])
+        self.projection_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        status, _, listing = self.json_request(
+            "GET", "/api/v1/items?date=2026-08-04&subject=all"
+        )
+        self.assertEqual(status, 200)
+        public_ids = {item["capture_id"] for item in listing["items"]}
+        self.assertTrue(sibling_ids.issubset(public_ids))
+        placeholders = [
+            item
+            for item in listing["items"]
+            if item.get("diagnostic_placeholder") is True
+        ]
+        self.assertEqual(len(placeholders), 1)
+        self.assertEqual(placeholders[0]["subject"], "math")
+        health_status, _, health = self.json_request("GET", "/healthz")
+        self.assertEqual(health_status, baseline_health_status)
+        self.assertEqual(health.get("error"), baseline_health.get("error"))
 
     def test_english_empty_state_is_a_real_enabled_subject(self) -> None:
         status, _, summary = self.json_request(
@@ -2960,9 +3053,6 @@ class DashboardServerTest(unittest.TestCase):
                 "unexpected", True
             ),
             "subject": lambda payload: payload["subjects"]["math"].__setitem__(
-                "unexpected", True
-            ),
-            "item": lambda payload: payload["subjects"]["math"]["items"][0].__setitem__(
                 "unexpected", True
             ),
         }
