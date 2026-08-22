@@ -794,12 +794,17 @@ class ProductionDispatchRuntime:
         config_path: Path,
         *,
         scan_worker_factory: Callable[[Mapping[str, Any]], Any] | None = None,
+        ordinary_local_capture: bool = False,
     ) -> None:
         self.config = dict(config)
         self.subject = subject
         self.config_path = config_path.resolve()
         self.runtime_root = Path(str(config["runtime_root"]))
-        self.production_canary = _production_canary_enabled(config)
+        self.ordinary_local_capture = bool(ordinary_local_capture)
+        self.production_canary = bool(
+            _production_canary_enabled(config)
+            and not self.ordinary_local_capture
+        )
         self.continuous_concurrency_limit = (
             int(config["dispatch"]["production_canary"][
                 "continuous_concurrency_limit"
@@ -871,6 +876,38 @@ class ProductionDispatchRuntime:
             ),
             production_canary=self.production_canary,
         )
+
+    def _local_capture_recorded_after(self) -> str:
+        """Reuse the frozen deployment high-water without canary admission."""
+
+        if not getattr(self, "ordinary_local_capture", False):
+            raise DispatchError("local_capture_cutoff_not_configured")
+        configured_release_id, _ = release_identity(self.config)
+        state = self.dispatcher.lease_store.production_canary_status_read_only(
+            self.subject,
+            expected_release_id=configured_release_id,
+        )
+        high_watermark = (
+            state.get("producer_high_watermark")
+            if isinstance(state, Mapping)
+            else None
+        )
+        recorded_after = (
+            high_watermark.get("recorded_at")
+            if isinstance(high_watermark, Mapping)
+            else None
+        )
+        if not isinstance(recorded_after, str):
+            recorded_after = (
+                state.get("activated_at")
+                if isinstance(state, Mapping)
+                else None
+            )
+        if not isinstance(recorded_after, str):
+            raise DispatchError("local_capture_cutoff_missing")
+        if state.get("release_id") != configured_release_id:
+            raise DispatchError("local_capture_cutoff_release_mismatch")
+        return recorded_after
 
     def activate_production_canary(
         self,
@@ -3036,6 +3073,10 @@ class ProductionDispatchRuntime:
             scan_worker_factory = getattr(self, "_scan_worker_factory", None)
             if scan_worker_factory is not None:
                 scan_kwargs["worker_factory"] = scan_worker_factory
+            if getattr(self, "ordinary_local_capture", False):
+                scan_kwargs["producer_recorded_after"] = (
+                    self._local_capture_recorded_after()
+                )
             if self.production_canary and self.subject == "math":
                 canary = (
                     self.dispatcher.lease_store.production_canary_status_read_only(
@@ -3319,6 +3360,11 @@ class ProductionDispatchRuntime:
                 )
         else:
             tasks = [unit.task for unit in frozen]
+            if getattr(self, "ordinary_local_capture", False):
+                for unit in frozen:
+                    self._direct_controlled_candidates[
+                        unit.task.unit_sha256
+                    ] = (unit.candidate, unit.reason)
         handles: list[Any] = []
         if not tasks:
             _write_subject_projections(
@@ -3331,31 +3377,34 @@ class ProductionDispatchRuntime:
                 ),
             )
             return [], decisions
-        try:
-            admission = self.subject_sol.luna_admission(self.subject)
-        except Exception as exc:
-            if not self.production_canary:
-                raise
-            error_code = self._canary_failure_code(
-                exc, "production_canary_consumer_admission_failed"
-            )
-            self._record_canary_preclaim_failure(
-                tasks[0],
-                failure_stage="consumer_admission",
-                error_code=error_code,
-                decisions=decisions,
-            )
-            _write_subject_projections(
-                self.config,
-                self.subject,
-                daemon_status="running",
-                decisions=decisions,
-                lease_status=self.dispatcher.lease_store.subject_status(
-                    self.subject
-                ),
-                error_code=error_code,
-            )
-            return [], decisions
+        if getattr(self, "ordinary_local_capture", False):
+            admission = {"read_session_allowed": True, "reason": None}
+        else:
+            try:
+                admission = self.subject_sol.luna_admission(self.subject)
+            except Exception as exc:
+                if not self.production_canary:
+                    raise
+                error_code = self._canary_failure_code(
+                    exc, "production_canary_consumer_admission_failed"
+                )
+                self._record_canary_preclaim_failure(
+                    tasks[0],
+                    failure_stage="consumer_admission",
+                    error_code=error_code,
+                    decisions=decisions,
+                )
+                _write_subject_projections(
+                    self.config,
+                    self.subject,
+                    daemon_status="running",
+                    decisions=decisions,
+                    lease_status=self.dispatcher.lease_store.subject_status(
+                        self.subject
+                    ),
+                    error_code=error_code,
+                )
+                return [], decisions
         if admission["read_session_allowed"] is not True:
             if self.production_canary:
                 self._record_canary_preclaim_failure(
@@ -3387,31 +3436,32 @@ class ProductionDispatchRuntime:
                 error_code=str(admission["reason"]),
             )
             return [], decisions
-        try:
-            self._prepare_batch_before_submit(tasks)
-        except Exception as exc:
-            if not self.production_canary:
-                raise
-            error_code = self._canary_failure_code(
-                exc, "production_canary_pre_claim_failed"
-            )
-            self._record_canary_preclaim_failure(
-                tasks[0],
-                failure_stage="pre_claim",
-                error_code=error_code,
-                decisions=decisions,
-            )
-            _write_subject_projections(
-                self.config,
-                self.subject,
-                daemon_status="running",
-                decisions=decisions,
-                lease_status=self.dispatcher.lease_store.subject_status(
-                    self.subject
-                ),
-                error_code=error_code,
-            )
-            return [], decisions
+        if not getattr(self, "ordinary_local_capture", False):
+            try:
+                self._prepare_batch_before_submit(tasks)
+            except Exception as exc:
+                if not self.production_canary:
+                    raise
+                error_code = self._canary_failure_code(
+                    exc, "production_canary_pre_claim_failed"
+                )
+                self._record_canary_preclaim_failure(
+                    tasks[0],
+                    failure_stage="pre_claim",
+                    error_code=error_code,
+                    decisions=decisions,
+                )
+                _write_subject_projections(
+                    self.config,
+                    self.subject,
+                    daemon_status="running",
+                    decisions=decisions,
+                    lease_status=self.dispatcher.lease_store.subject_status(
+                        self.subject
+                    ),
+                    error_code=error_code,
+                )
+                return [], decisions
         _write_subject_projections(
             self.config,
             self.subject,
@@ -3424,7 +3474,9 @@ class ProductionDispatchRuntime:
         for task in tasks:
             try:
                 handles.append(
-                    self.subject_sol.submit_luna_under_generation_fence(
+                    self.dispatcher.submit(task)
+                    if getattr(self, "ordinary_local_capture", False)
+                    else self.subject_sol.submit_luna_under_generation_fence(
                         self.subject,
                         self.dispatcher.submit,
                         task,
@@ -3793,6 +3845,24 @@ class ProductionDispatchRuntime:
                     expected_unit_sha256=result.unit_sha256,
                 )
             )
+            if getattr(self, "ordinary_local_capture", False):
+                projected.append(
+                    {
+                        "subject": self.subject,
+                        "capture_id": capture_id,
+                        "unit_sha256": result.unit_sha256,
+                        "outcome": completion.get("outcome"),
+                        "package_ref": completion.get("package_ref"),
+                        "report_json_ref": completion.get(
+                            "report_json_ref"
+                        ),
+                        "report_markdown_ref": completion.get(
+                            "report_markdown_ref"
+                        ),
+                        "formal_write_count": 0,
+                    }
+                )
+                continue
             runtime = self.subject_sol.record_verified_luna_completion(
                 self.subject, verified
             )
@@ -3901,7 +3971,9 @@ def _run_once(
 ) -> dict[str, Any]:
     if config.get("execution_mode") == "offline":
         raise DispatchError("offline_run_once_forbidden")
-    runtime = ProductionDispatchRuntime(config, subject, config_path)
+    runtime = ProductionDispatchRuntime(
+        config, subject, config_path, ordinary_local_capture=True
+    )
     runtime.dispatcher.lease_store.clear_subject_drain(subject)
     handles, decisions = runtime.scan_and_submit()
     runtime.dispatcher.drain()
@@ -4079,7 +4151,9 @@ def _audit(config: Mapping[str, Any], subject: str) -> dict[str, Any]:
 def _run_daemon(
     config: Mapping[str, Any], subject: str, config_path: Path
 ) -> int:
-    runtime = ProductionDispatchRuntime(config, subject, config_path)
+    runtime = ProductionDispatchRuntime(
+        config, subject, config_path, ordinary_local_capture=True
+    )
     stop = threading.Event()
     heartbeat_stop = threading.Event()
     heartbeat_failures: list[Exception] = []

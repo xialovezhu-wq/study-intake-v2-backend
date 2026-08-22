@@ -3156,6 +3156,7 @@ class BaseAdapter:
         if not isinstance(raw_python, str) or not Path(raw_python).is_absolute():
             raise PreprocessorError("adapter_python_path_invalid")
         self.python_path = Path(raw_python).resolve()
+        self.candidate_normalization_warnings: dict[str, list[str]] = {}
         if self.enabled and (
             not self.python_path.is_file()
             or not os.access(self.python_path, os.X_OK)
@@ -3488,11 +3489,13 @@ class EnglishAdapter(BaseAdapter):
             "candidates", "supersedes_event_id", "correction_reason", "completion",
             "producer", "formal_write_count", "formal_writeback",
             "observed_signals", "source_signal_ids", "capture_coverage",
+            "parent_raw_capture_id",
         }
         event_id = event.get("event_id")
         event_type = event.get("event_type")
         idempotency_key = event.get("idempotency_key")
         producer = event.get("producer")
+        unknown_event_fields = set(event) - allowed_event_fields
         if (
             event.get("schema_version")
             not in {"english_capture_event_v1", "english_capture_event_v2"}
@@ -3512,9 +3515,26 @@ class EnglishAdapter(BaseAdapter):
             or not str(producer.get("name")).strip()
             or not isinstance(producer.get("version"), str)
             or not str(producer.get("version")).strip()
-            or set(event) - allowed_event_fields
+            or (
+                event.get("parent_raw_capture_id") is not None
+                and (
+                    not isinstance(event.get("parent_raw_capture_id"), str)
+                    or SAFE_ID_RE.fullmatch(
+                        str(event.get("parent_raw_capture_id"))
+                    )
+                    is None
+                )
+            )
         ):
             raise PreprocessorError("english_event_envelope_invalid")
+        if unknown_event_fields:
+            warnings = getattr(
+                self, "_event_normalization_warnings", None
+            )
+            if isinstance(warnings, dict):
+                warnings[str(event_id)] = [
+                    "producer_unknown_fields_ignored"
+                ]
         self._event_study_date(event)
         article = event.get("article")
         if (
@@ -3823,6 +3843,7 @@ class EnglishAdapter(BaseAdapter):
         if len(paths) > self.max_events_per_scan:
             raise PreprocessorError("english_event_scan_limit_exceeded")
         events: list[dict[str, Any]] = []
+        self._event_normalization_warnings: dict[str, list[str]] = {}
         seen: set[str] = set()
         migrations = self._load_event_migrations()
         for path in paths:
@@ -3831,6 +3852,12 @@ class EnglishAdapter(BaseAdapter):
                 if path.stat().st_size > self.max_event_bytes:
                     raise PreprocessorError("english_event_too_large")
                 raw_event = load_json(path)
+                if raw_event.get("event_type") == "english_raw_dialogue_turn_v1":
+                    # Raw dialogue turns are immutable foreground provenance,
+                    # not candidate work items.  Sentence Captures bind them
+                    # by parent ID; retain their files and ignore their extra
+                    # dialogue-only fields at the Backend task boundary.
+                    continue
                 try:
                     event = self._validate_event(raw_event)
                 except PreprocessorError:
@@ -4560,6 +4587,13 @@ class EnglishAdapter(BaseAdapter):
         candidate_document_id = (
             f"EN-CAND-{study_date.replace('-', '')}-{batch_identity[:16].upper()}"
         )
+        event_warnings = getattr(
+            self, "_event_normalization_warnings", {}
+        )
+        if any(event_id in event_warnings for event_id in event_ids):
+            self.candidate_normalization_warnings[capture_id] = [
+                "producer_unknown_fields_ignored"
+            ]
         sentence_ids = [str(event["source"]["sentence_id"]) for event in sentence_events]
         batch = {
             "schema_version": "english_luna_microbatch_v1",
@@ -4696,6 +4730,7 @@ class EnglishAdapter(BaseAdapter):
         controlled_replay: bool = False,
     ) -> list[Candidate]:
         self.candidate_errors = {}
+        self.candidate_normalization_warnings = {}
         consumed = set() if controlled_replay else set(self._candidate_ids_by_event)
         selected_date = status.get("study_date")
         now = dt.datetime.now(dt.timezone.utc)
@@ -7003,6 +7038,18 @@ class MathAdapter(BaseAdapter):
         capture_allowlist: frozenset[str] | None = None,
         controlled_replay: bool = False,
     ) -> list[Candidate]:
+        self.candidate_normalization_warnings = {}
+        known_pending_fields = {
+            "event_id", "capture_schema_version", "study_date", "recorded_at",
+            "formal_id", "source_locator", "source_hash_before",
+            "identity_state", "source_bundle", "capture_authorization",
+            "episode_evidence", "episode_evidence_hash", "requested_action",
+            "score_ref", "original_content_hash", "amendment_count",
+            "amendment_event_ids", "effective_evidence_hash",
+            "effective_target_hash", "evidence", "active_freeze_ids",
+            "capture_type", "historical_replay", "processing_scope",
+            "replay_kind",
+        }
         result: list[Candidate] = []
         eligible = [
             raw_item
@@ -7065,6 +7112,11 @@ class MathAdapter(BaseAdapter):
                 self._target_group_by_capture[capture_id] = group_context
         for raw_item in eligible:
             capture_id = raw_item.get("event_id")
+            unknown_fields = set(raw_item) - known_pending_fields
+            if unknown_fields:
+                self.candidate_normalization_warnings[str(capture_id)] = [
+                    "producer_unknown_fields_ignored"
+                ]
             study_date = raw_item.get("study_date")
             formal_card = self._formal_card(raw_item)
             source_bundle, images = self._source_bundle(raw_item, formal_card)
@@ -9441,21 +9493,44 @@ def _validate_background_handoff_resolution_receipt(
 
     completion_kind = handoff.get("completion_kind")
     if completion_kind == "first_turn_complete":
-        required = {
-            "schema",
-            "status",
-            "completion_kind",
-            "context_id",
-            "session_id",
-            "item_id",
-            "capture_id",
-            "capture_receipt_sha256",
-            "evidence_manifest_sha256",
-            "interaction_trace_sha256",
-            "event_time",
-            "advance_allowed",
-            "formal_write_count",
-        }
+        first_turn_freeze_receipt = bool(
+            isinstance(receipt, Mapping)
+            and receipt.get("status") == "morning_capture_frozen"
+        )
+        required = (
+            {
+                "schema",
+                "status",
+                "attestation_schema",
+                "context_id",
+                "session_id",
+                "item_id",
+                "capture_id",
+                "capture_receipt_sha256",
+                "evidence_manifest_sha256",
+                "buffer_freeze_receipt_sha256",
+                "interaction_trace_sha256",
+                "event_time",
+                "advance_allowed",
+                "formal_write_count",
+            }
+            if first_turn_freeze_receipt
+            else {
+                "schema",
+                "status",
+                "completion_kind",
+                "context_id",
+                "session_id",
+                "item_id",
+                "capture_id",
+                "capture_receipt_sha256",
+                "evidence_manifest_sha256",
+                "interaction_trace_sha256",
+                "event_time",
+                "advance_allowed",
+                "formal_write_count",
+            }
+        )
     elif completion_kind == "teaching_resolved":
         required = {
             "schema",
@@ -9503,14 +9578,24 @@ def _validate_background_handoff_resolution_receipt(
     ):
         raise PreprocessorError("background_handoff_resolution_receipt_invalid")
     if completion_kind == "first_turn_complete":
-        if (
-            row.get("status") != "background_handoff_attested"
-            or row.get("completion_kind") != "first_turn_complete"
-            or row.get("interaction_trace_sha256")
-            != handoff.get("interaction_trace_sha256")
-            or parse_time(row.get("event_time")) is None
-            or row.get("advance_allowed") is not False
-        ):
+        first_turn_contract_valid = bool(
+            row.get("interaction_trace_sha256")
+            == handoff.get("interaction_trace_sha256")
+            and parse_time(row.get("event_time")) is not None
+            and row.get("advance_allowed") is False
+            and (
+                row.get("status") == "background_handoff_attested"
+                and row.get("completion_kind") == "first_turn_complete"
+                or row.get("status") == "morning_capture_frozen"
+                and row.get("attestation_schema")
+                == "morning-capture-freeze-attestation-v1"
+                and SHA256_RE.fullmatch(
+                    str(row.get("buffer_freeze_receipt_sha256") or "")
+                )
+                is not None
+            )
+        )
+        if not first_turn_contract_valid:
             raise PreprocessorError(
                 "background_handoff_resolution_receipt_invalid"
             )
@@ -10281,16 +10366,17 @@ class Cs408Adapter(BaseAdapter):
                 }
                 for row in trace["events"]
             ]
+            # The foreground handoff intentionally binds the normalized
+            # public event projection, including ``observed_at: null``.  The
+            # bundle's v2 full-trace digest binds the original trace object and
+            # has a different role; treating it as the handoff digest rejects
+            # a valid managed current-turn Capture.
             expected_trace_sha256 = (
-                trace.get("full_trace_sha256")
-                if trace.get("schema") == INTERACTION_TRACE_SCHEMA_V2
-                else (
-                    hashlib.sha256(
-                        canonical_bytes(trace_events) + b"\n"
-                    ).hexdigest()
-                    if trace_events
-                    else None
-                )
+                hashlib.sha256(
+                    canonical_bytes(trace_events) + b"\n"
+                ).hexdigest()
+                if trace_events
+                else None
             )
             if handoff.get("interaction_trace_sha256") != expected_trace_sha256:
                 raise PreprocessorError("background_handoff_first_turn_trace_mismatch")
@@ -10703,6 +10789,12 @@ class Cs408Adapter(BaseAdapter):
         self.candidate_errors = {}
         self.candidate_diagnostics = {}
         self.candidate_error_context = {}
+        self.candidate_normalization_warnings = {}
+        known_capture_state_fields = {
+            "capture_id", "study_date", "recorded_at", "payload_sha256",
+            "quality_status", "current_batch_id", "formal_id", "last_error",
+            "formalization_authorized", "capture",
+        }
         for capture_id, raw_item in status.get("captures", {}).items():
             if (
                 capture_allowlist is not None
@@ -10713,6 +10805,10 @@ class Cs408Adapter(BaseAdapter):
                 continue
             if not SAFE_ID_RE.fullmatch(capture_id):
                 continue
+            if set(raw_item) - known_capture_state_fields:
+                self.candidate_normalization_warnings[capture_id] = [
+                    "producer_unknown_fields_ignored"
+                ]
             if raw_item.get("quality_status") != "awaiting_daily_curation":
                 continue
             if raw_item.get("formalization_authorized") is not True:
@@ -18468,10 +18564,35 @@ class CodexRunner:
             fixture["allowed_executable_roots"] = sorted(set(roots))
             gate_purpose = "fake_agent_worker"
         try:
+            local_task_identity = None
+            lifecycle = self._dispatch_process_lifecycle
+            if isinstance(lifecycle, Mapping):
+                task = lifecycle.get("task")
+                lease = lifecycle.get("lease")
+                frozen_payload = getattr(task, "frozen_payload", None)
+                context_root = lifecycle.get("context_root")
+                if (
+                    isinstance(frozen_payload, Mapping)
+                    and context_root is not None
+                ):
+                    local_task_identity = {
+                        "local_trusted": True,
+                        "runtime_root": str(self.runtime_root),
+                        "context_root": str(context_root),
+                        "unit_sha256": getattr(task, "unit_sha256", None),
+                        "frozen_payload_sha256": getattr(
+                            task, "frozen_payload_sha256", None
+                        ),
+                        "subject": frozen_payload.get("subject"),
+                        "capture_id": frozen_payload.get("capture_id"),
+                        "lease_owner_id": getattr(lease, "owner_id", None),
+                        "lease_fence": getattr(lease, "fence", None),
+                    }
             assert_external_launch_allowed(
                 gate_config,
                 purpose=gate_purpose,
                 command=command,
+                task_identity=local_task_identity,
             )
         except LiveExecutionDenied as exc:
             raise PreprocessorError(exc.code) from exc
@@ -18789,9 +18910,22 @@ class CodexRunner:
                             "provider_schema_raw_binding_invalid"
                         )
                     try:
-                        stage_raw_output = raw_output_path.read_bytes()
-                    except OSError:
+                        with raw_output_path.open("rb+") as spool:
+                            # The Provider process has exited and closed its
+                            # descriptor.  Reopen the exact task spool, flush
+                            # the Host handle, and force the bytes to durable
+                            # storage before any content-addressed publication
+                            # or JSON/schema normalization can observe them.
+                            spool.flush()
+                            os.fsync(spool.fileno())
+                            spool.seek(0)
+                            stage_raw_output = spool.read()
+                    except FileNotFoundError:
                         stage_raw_output = b""
+                    except OSError as exc:
+                        raise PreprocessorError(
+                            "model_stage_raw_spool_fsync_failed"
+                        ) from exc
                     final_checkpoint_sha256 = hashlib.sha256(
                         stage_raw_output
                     ).hexdigest()
@@ -26521,6 +26655,15 @@ class Worker:
         model_config["authority_generation_id"] = os.environ.get(
             "STUDY_PREPROCESS_UNIT_SHA256"
         )
+        model_config["runtime_root"] = str(self.root)
+        model_config["adapters"] = {
+            subject: {
+                "enabled": bool(adapter.get("enabled")),
+                "repo_root": adapter.get("repo_root"),
+            }
+            for subject, adapter in config.get("adapters", {}).items()
+            if subject in SUBJECTS and isinstance(adapter, Mapping)
+        }
         if isinstance(config.get("processing_plugin"), Mapping):
             model_config["processing_plugin"] = copy.deepcopy(
                 dict(config["processing_plugin"])

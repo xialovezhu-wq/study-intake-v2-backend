@@ -9,7 +9,10 @@ accepted only for legacy in-process unit tests that do not opt into this gate.
 from __future__ import annotations
 
 import copy
+import fcntl
+import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -38,6 +41,14 @@ LIVE_PURPOSES = EXTERNAL_PURPOSES - {
 }
 FAKE_PURPOSES = EXTERNAL_PURPOSES - LIVE_PURPOSES
 MODEL_IDS = frozenset({"gpt-5.6-terra", "gpt-5.6-luna"})
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+LOCAL_TRUSTED_ENV = (
+    "STUDY_PREPROCESS_RUNTIME_ROOT",
+    "STUDY_PREPROCESS_UNIT_SHA256",
+    "STUDY_PREPROCESS_LEASE_FENCE",
+    "STUDY_PREPROCESS_LEASE_OWNER_ID",
+    "STUDY_PREPROCESS_CONTEXT_ROOT",
+)
 
 
 class LiveExecutionDenied(RuntimeError):
@@ -116,6 +127,134 @@ def _looks_like_real_codex(
     # safe only when the exact file resolves inside an explicit fixture root;
     # a normal PATH/global Codex binary remains fail-closed.
     return executable.name == "codex" and not executable_is_fixture
+
+
+def _local_trusted_claim(
+    config: Mapping[str, Any],
+    *,
+    purpose: str,
+    task_identity: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reopen the exact already-claimed local task without issuing authority.
+
+    The dispatcher owns the only claim lifecycle.  This policy merely proves
+    that the Provider launch occurs inside the task context created after that
+    claim.  Absence of the task environment keeps historical/manual callers on
+    the legacy authorization path.
+    """
+
+    if purpose != "provider_model_request":
+        return None
+    raw = {name: os.environ.get(name) for name in LOCAL_TRUSTED_ENV}
+    configured = [value is not None for value in raw.values()]
+    configured_runtime = config.get("runtime_root")
+    if any(configured):
+        if not all(configured):
+            raise LiveExecutionDenied("local_trusted_context_incomplete")
+        runtime_text = str(raw["STUDY_PREPROCESS_RUNTIME_ROOT"])
+        unit_sha256 = str(raw["STUDY_PREPROCESS_UNIT_SHA256"])
+        owner_id = str(raw["STUDY_PREPROCESS_LEASE_OWNER_ID"])
+        fence_text = str(raw["STUDY_PREPROCESS_LEASE_FENCE"])
+        context_text = str(raw["STUDY_PREPROCESS_CONTEXT_ROOT"])
+    elif (
+        isinstance(task_identity, Mapping)
+        and task_identity.get("local_trusted") is True
+    ):
+        runtime_text = str(task_identity.get("runtime_root") or "")
+        unit_sha256 = str(task_identity.get("unit_sha256") or "")
+        owner_id = str(task_identity.get("lease_owner_id") or "")
+        fence_text = str(task_identity.get("lease_fence") or "")
+        context_text = str(task_identity.get("context_root") or "")
+    else:
+        return None
+    try:
+        fence = int(fence_text)
+        runtime_root = Path(runtime_text).resolve(strict=True)
+        context_root = Path(context_text).resolve(strict=True)
+        configured_root = Path(str(configured_runtime)).resolve(strict=True)
+    except (OSError, TypeError, ValueError) as exc:
+        raise LiveExecutionDenied("local_trusted_context_invalid") from exc
+    expected_context = (
+        runtime_root
+        / "dispatch"
+        / "contexts"
+        / unit_sha256
+        / f"fence-{fence}"
+    )
+    if (
+        not isinstance(configured_runtime, str)
+        or runtime_root != configured_root
+        or SHA256_RE.fullmatch(unit_sha256) is None
+        or not owner_id
+        or len(owner_id) > 256
+        or fence < 1
+        or str(fence) != fence_text
+        or context_root != expected_context
+        or not context_root.is_dir()
+    ):
+        raise LiveExecutionDenied("local_trusted_context_invalid")
+
+    state_root = runtime_root / "dispatch" / "state"
+    lock_path = state_root / "dispatch.lock"
+    lease_path = state_root / "leases" / f"{unit_sha256}.json"
+    if (
+        lock_path.is_symlink()
+        or not lock_path.is_file()
+        or lease_path.is_symlink()
+        or not lease_path.is_file()
+        or lease_path.stat().st_size > 64 * 1024
+    ):
+        raise LiveExecutionDenied("local_trusted_claim_missing")
+    try:
+        with lock_path.open("rb") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+            try:
+                lease = json.loads(lease_path.read_text(encoding="utf-8"))
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LiveExecutionDenied("local_trusted_claim_invalid") from exc
+    subject = lease.get("subject") if isinstance(lease, Mapping) else None
+    if (
+        not isinstance(lease, Mapping)
+        or lease.get("schema_version") != "study-intake-dispatch-lease-v1"
+        or lease.get("unit_sha256") != unit_sha256
+        or lease.get("owner_id") != owner_id
+        or lease.get("fence") != fence
+        or lease.get("status") != "claimed"
+        or subject not in {"math", "cs408", "english"}
+    ):
+        raise LiveExecutionDenied("local_trusted_claim_invalid")
+
+    adapters = config.get("adapters")
+    route = adapters.get(subject) if isinstance(adapters, Mapping) else None
+    if not isinstance(route, Mapping) or route.get("enabled") is not True:
+        raise LiveExecutionDenied("local_trusted_subject_route_missing")
+    if task_identity is not None:
+        identity_unit = task_identity.get("unit_sha256")
+        identity_subject = task_identity.get("subject")
+        if (
+            identity_unit not in {None, unit_sha256}
+            or identity_subject not in {None, subject}
+            or task_identity.get("local_trusted") is True
+            and (
+                not isinstance(
+                    task_identity.get("frozen_payload_sha256"), str
+                )
+                or SHA256_RE.fullmatch(
+                    str(task_identity.get("frozen_payload_sha256"))
+                )
+                is None
+                or not isinstance(task_identity.get("capture_id"), str)
+                or not task_identity.get("capture_id")
+            )
+        ):
+            raise LiveExecutionDenied("local_trusted_task_binding_mismatch")
+    return {
+        "subject": subject,
+        "unit_sha256": unit_sha256,
+        "lease_fence": fence,
+    }
 
 
 def assert_external_launch_allowed(
@@ -245,6 +384,18 @@ def assert_external_launch_allowed(
 
     if purpose not in LIVE_PURPOSES:
         raise LiveExecutionDenied("live_mode_fake_launch_forbidden", evidence=evidence)
+    local_claim = _local_trusted_claim(
+        config,
+        purpose=purpose,
+        task_identity=task_identity,
+    )
+    if local_claim is not None:
+        return {
+            **evidence,
+            **local_claim,
+            "allowed": True,
+            "reason": "local_trusted_claimed_capture",
+        }
     if not isinstance(task_identity, Mapping) or not isinstance(authorization, Mapping):
         raise LiveExecutionDenied("manual_live_authorization_missing", evidence=evidence)
     from manual_capture_admission import validate_authorization_for_task

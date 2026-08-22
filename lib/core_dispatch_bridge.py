@@ -53,6 +53,10 @@ from math_exact_smoke import (
 )
 from skill_binding_contract import (
     SkillBindingError,
+    _candidate_units,
+    _descriptor,
+    _time,
+    _validate_attestation,
     bind_candidate_producer_attestations,
 )
 from preprocessor_core import (
@@ -92,6 +96,55 @@ _RELEASE_SUBJECT_CONTRACT_CACHE: dict[
 
 PRODUCER_AUTHORITY_SCHEMA = "study-intake-producer-authority-v1"
 PRODUCER_DISPATCH_INPUT_SCHEMA = "study-intake-producer-dispatch-input-v2"
+
+
+def _required_producer_attestation_missing(
+    config: Mapping[str, Any], candidate: Candidate
+) -> bool:
+    """Distinguish an absent optional sidecar from conflicting sidecar bytes."""
+
+    descriptor_path, descriptor = _descriptor(
+        config, candidate.subject
+    )
+    units = _candidate_units(candidate)
+    threshold = _time(descriptor.get("attestation_required_after"))
+    required_units = [
+        unit for unit in units if _time(unit["recorded_at"]) >= threshold
+    ]
+    if not required_units:
+        return False
+    adapters = config.get("adapters")
+    adapter = (
+        adapters.get(candidate.subject)
+        if isinstance(adapters, Mapping)
+        else None
+    )
+    raw_root = adapter.get("repo_root") if isinstance(adapter, Mapping) else None
+    raw_relative = descriptor.get("attestation_relative_root")
+    relative = Path(str(raw_relative or ""))
+    if (
+        not isinstance(raw_root, str)
+        or not Path(raw_root).is_absolute()
+        or not raw_relative
+        or relative.is_absolute()
+        or ".." in relative.parts
+    ):
+        return False
+    root = Path(raw_root).resolve() / relative
+    missing = False
+    for unit in required_units:
+        path = root / f"{unit['capture_id']}.json"
+        if not path.exists():
+            missing = True
+            continue
+        _validate_attestation(
+            path,
+            subject=candidate.subject,
+            unit=unit,
+            descriptor_path=descriptor_path,
+            descriptor=descriptor,
+        )
+    return missing
 
 
 def _subject_processing_contract(
@@ -1002,34 +1055,36 @@ def scan_eligible_candidates(
     release_id = getattr(scanner, "release_id", None)
     if not isinstance(release_id, str) or not release_id:
         raise DispatchError("scanner_release_id_missing")
+    discovery_floor = None
     if producer_recorded_after is not None:
-        if subject != "math" or controlled_replay:
+        if controlled_replay:
             raise DispatchError("producer_discovery_floor_invalid")
         discovery_floor = parse_time(producer_recorded_after)
         if discovery_floor is None:
             raise DispatchError("producer_discovery_floor_invalid")
-        statuses = scanner.scan_statuses(None, only_subject="math")
-        math_status = statuses.get("math")
-        pending = (
-            math_status.get("pending")
-            if isinstance(math_status, Mapping)
-            else None
-        )
-        if not isinstance(pending, list):
-            raise DispatchError("producer_discovery_floor_status_invalid")
-        discovered = frozenset(
-            str(row["event_id"])
-            for row in pending
-            if isinstance(row, Mapping)
-            and isinstance(row.get("event_id"), str)
-            and parse_time(row.get("recorded_at")) is not None
-            and parse_time(row.get("recorded_at")) > discovery_floor
-        )
-        capture_allowlist = (
-            discovered
-            if capture_allowlist is None
-            else frozenset(capture_allowlist & discovered)
-        )
+        if subject == "math":
+            statuses = scanner.scan_statuses(None, only_subject="math")
+            math_status = statuses.get("math")
+            pending = (
+                math_status.get("pending")
+                if isinstance(math_status, Mapping)
+                else None
+            )
+            if not isinstance(pending, list):
+                raise DispatchError("producer_discovery_floor_status_invalid")
+            discovered = frozenset(
+                str(row["event_id"])
+                for row in pending
+                if isinstance(row, Mapping)
+                and isinstance(row.get("event_id"), str)
+                and parse_time(row.get("recorded_at")) is not None
+                and parse_time(row.get("recorded_at")) > discovery_floor
+            )
+            capture_allowlist = (
+                discovered
+                if capture_allowlist is None
+                else frozenset(capture_allowlist & discovered)
+            )
     study_date = current_date(str(config["timezone"]))
     selector_study_date = study_date
     selector_capture_allowlist = capture_allowlist
@@ -1116,6 +1171,30 @@ def scan_eligible_candidates(
             }
         )
         rows = selector(subject, selector_study_date, **selector_kwargs)
+    cutoff_rejections: list[tuple[Candidate, str, str]] = []
+    if discovery_floor is not None and subject != "math":
+        selected_rows: list[tuple[Candidate, str]] = []
+        for candidate, reason in rows:
+            recorded_at = parse_time(candidate.recorded_at)
+            if recorded_at is None:
+                cutoff_rejections.append(
+                    (
+                        candidate,
+                        "producer_recorded_at_invalid",
+                        "needs_review",
+                    )
+                )
+            elif recorded_at <= discovery_floor:
+                cutoff_rejections.append(
+                    (
+                        candidate,
+                        "pre_cutoff_capture",
+                        "historical_cutoff",
+                    )
+                )
+            else:
+                selected_rows.append((candidate, reason))
+        rows = selected_rows
     if selector_capture_allowlist is not None:
         rows = [
             row
@@ -1137,12 +1216,20 @@ def scan_eligible_candidates(
     raw_diagnostics = getattr(adapter, "candidate_diagnostics", {})
     raw_errors = getattr(adapter, "candidate_errors", {})
     raw_error_context = getattr(adapter, "candidate_error_context", {})
+    raw_normalization_warnings = getattr(
+        adapter, "candidate_normalization_warnings", {}
+    )
     diagnostics = (
         raw_diagnostics if isinstance(raw_diagnostics, Mapping) else {}
     )
     candidate_errors = raw_errors if isinstance(raw_errors, Mapping) else {}
     error_context = (
         raw_error_context if isinstance(raw_error_context, Mapping) else {}
+    )
+    adapter_normalization_warnings = (
+        raw_normalization_warnings
+        if isinstance(raw_normalization_warnings, Mapping)
+        else {}
     )
     readiness_by_capture: dict[str, dict[str, Any]] = {}
     if subject == "cs408" and diagnostics and publish_evidence_readiness:
@@ -1178,13 +1265,47 @@ def scan_eligible_candidates(
     ] = {}
     accepted_rows: list[tuple[Candidate, str]] = []
     reused_capture_ids: set[str] = set()
+    normalization_warnings_by_capture: dict[str, list[str]] = {
+        str(capture_id): sorted(
+            {
+                str(code)
+                for code in warnings
+                if isinstance(code, str) and code
+            }
+        )
+        for capture_id, warnings in adapter_normalization_warnings.items()
+        if isinstance(capture_id, str)
+        and isinstance(warnings, (list, tuple))
+    }
     for candidate, reason in rows:
         try:
             if candidate.subject != subject:
                 raise DispatchError("candidate_subject_mismatch")
-            candidate = bind_candidate_producer_attestations(
-                config, candidate
-            )
+            try:
+                candidate = bind_candidate_producer_attestations(
+                    config, candidate
+                )
+            except SkillBindingError as exc:
+                if (
+                    exc.code == "foreground_skill_binding_mismatch"
+                    and _required_producer_attestation_missing(
+                        config, candidate
+                    )
+                ):
+                    normalization_warnings_by_capture.setdefault(
+                        candidate.capture_id, []
+                    ).append("producer_attestation_missing")
+                    normalization_warnings_by_capture[
+                        candidate.capture_id
+                    ] = sorted(
+                        set(
+                            normalization_warnings_by_capture[
+                                candidate.capture_id
+                            ]
+                        )
+                    )
+                else:
+                    raise
             validate_concurrent_cs408_candidate(candidate)
             processing_contract_sha256 = candidate.input_binding.get(
                 "processing_contract_sha256"
@@ -1257,6 +1378,11 @@ def scan_eligible_candidates(
                         "source_package_sha256": reuse[
                             "source_package_sha256"
                         ],
+                        "normalization_warnings": list(
+                            normalization_warnings_by_capture.get(
+                                candidate.capture_id, ()
+                            )
+                        ),
                         "formal_write_count": 0,
                     }
                 )
@@ -1301,6 +1427,11 @@ def scan_eligible_candidates(
                         "source_release_id"
                     ],
                     "package_sha256": reuse["source_package_sha256"],
+                    "normalization_warnings": list(
+                        normalization_warnings_by_capture.get(
+                            candidate.capture_id, ()
+                        )
+                    ),
                     "formal_write_count": 0,
                 }
             )
@@ -1496,14 +1627,46 @@ def scan_eligible_candidates(
                     "evidence_status": member.input_binding.get(
                         "evidence_status"
                     ),
+                    "normalization_warnings": list(
+                        normalization_warnings_by_capture.get(
+                            member.capture_id, ()
+                        )
+                    ),
                     "legacy_compatibility_receipt_sha256": (
                         member.input_binding.get(
                             "legacy_compatibility_receipt_sha256"
                         )
                     ),
                     "superseded_input_fingerprint": previous_fingerprint,
+                    "formal_write_count": 0,
                 }
             )
+
+    for candidate, rejection_code, rejection_phase in cutoff_rejections:
+        decisions.append(
+            {
+                "subject": subject,
+                "capture_id": candidate.capture_id,
+                "study_date": candidate.study_date,
+                "target_label": candidate.target_label,
+                "input_fingerprint": candidate.input_fingerprint,
+                "eligible": False,
+                "reason": rejection_code,
+                "error_code": (
+                    rejection_code
+                    if rejection_phase == "needs_review"
+                    else None
+                ),
+                "phase": rejection_phase,
+                "model_enqueue_allowed": False,
+                "normalization_warnings": (
+                    [rejection_code]
+                    if rejection_phase == "needs_review"
+                    else []
+                ),
+                "formal_write_count": 0,
+            }
+        )
 
     for candidate, rejection_code in route_rejections:
         rejected_rule_binding = dispatch_rule_binding(
@@ -1565,17 +1728,31 @@ def scan_eligible_candidates(
                         "subject_processing_contract_sha256"
                     ]
                 ),
-                "phase": "frozen_evidence",
+                "phase": (
+                    "needs_review"
+                    if rejection_code
+                    == "foreground_skill_binding_mismatch"
+                    else "frozen_evidence"
+                ),
                 "model": REQUIRED_MODEL,
                 "reasoning_effort": REQUIRED_REASONING_EFFORT,
                 "model_enqueue_allowed": False,
-                "evidence_status": "rejected",
+                "evidence_status": (
+                    "needs_review"
+                    if rejection_code
+                    == "foreground_skill_binding_mismatch"
+                    else "rejected"
+                ),
+                "normalization_warnings": [],
             }
         )
     handled_capture_ids = {
         candidate.capture_id for candidate, _ in rows
     } | {
         candidate.capture_id for candidate, _ in route_rejections
+    } | {
+        candidate.capture_id
+        for candidate, _reason, _phase in cutoff_rejections
     } | reused_capture_ids
     for capture_id, raw_reason in candidate_errors.items():
         if (
@@ -1691,14 +1868,14 @@ def scan_eligible_candidates(
                     "rule_version_sha256"
                 ],
                 "subject_processing_contract_sha256": None,
-                "phase": "frozen_evidence",
+                "phase": "needs_review",
                 "model": REQUIRED_MODEL,
                 "reasoning_effort": REQUIRED_REASONING_EFFORT,
                 "model_enqueue_allowed": False,
                 "evidence_status": (
                     diagnostic.get("status")
                     if isinstance(diagnostic, Mapping)
-                    else None
+                    else "needs_review"
                 ),
                 "evidence_manifest_sha256": (
                     diagnostic.get("evidence_manifest_sha256")
@@ -1719,6 +1896,8 @@ def scan_eligible_candidates(
                     if readiness is not None
                     else None
                 ),
+                "normalization_warnings": [raw_reason],
+                "formal_write_count": 0,
             }
         )
     return frozen, decisions
@@ -1887,10 +2066,22 @@ class CoreCandidateRunner:
                 Mapping,
             )
         )
+        consumer_stage_chain = self.config.get("consumer_stage_chain")
+        analysis_package = self.config.get("analysis_package_v1")
+        self._analysis_package_mode = bool(
+            self.config.get("execution_mode") == "live_authorized"
+            and isinstance(consumer_stage_chain, Mapping)
+            and consumer_stage_chain.get("enabled") is True
+            and isinstance(analysis_package, Mapping)
+            and analysis_package.get("enabled") is True
+        )
         # Direct-MCP live candidates execute both semantic stages inside the
         # core Worker's single publication call.  Ordinary in-process runners
         # keep the dispatcher's normal two-stage/checkpoint machinery.
-        self.executes_full_two_pass_in_analysis = self._record_direct_stage_events
+        self.executes_full_two_pass_in_analysis = bool(
+            self._record_direct_stage_events
+            or self._analysis_package_mode
+        )
         self._analysis_worker: Worker | None = None
         self._model_result: ModelResult | None = None
         self._published: Mapping[str, Any] | None = None
@@ -1899,6 +2090,54 @@ class CoreCandidateRunner:
         self.terminal_quality_error_code: str | None = None
         self.terminal_report_disposition: str | None = None
         self.terminal_review_stage_count = 0
+        self._analysis_package_critical: StageResult | None = None
+
+    @staticmethod
+    def _analysis_package_stage_result(
+        result: ModelResult, stage: str
+    ) -> StageResult:
+        package = result.analysis
+        if (
+            result.pipeline_status != "analysis_package_ready"
+            or not isinstance(package, Mapping)
+            or package.get("schema_version")
+            != "study-intake-analysis-package-v1"
+            or not isinstance(package.get("package_sha256"), str)
+            or not isinstance(package.get("package_ref"), str)
+            or not isinstance(package.get("stages"), list)
+        ):
+            raise DispatchError("analysis_package_result_invalid")
+        package_stage = "terra_analysis" if stage == "analysis" else "terra_final"
+        row = next(
+            (
+                value
+                for value in package["stages"]
+                if isinstance(value, Mapping)
+                and value.get("stage") == package_stage
+            ),
+            None,
+        )
+        if not isinstance(row, Mapping):
+            raise DispatchError("analysis_package_stage_missing")
+        return StageResult(
+            payload={
+                "stage": stage,
+                "analysis_package_id": package.get("package_id"),
+                "analysis_package_sha256": package["package_sha256"],
+                "analysis_package_ref": package["package_ref"],
+                "analysis_report_sha256": row.get("report_sha256"),
+                "analysis_report_ref": row.get("report_ref"),
+                "analysis_raw_output_sha256": row.get("raw_output_sha256"),
+                "analysis_raw_output_ref": row.get("raw_output_ref"),
+                "normalization_status": row.get("normalization_status"),
+                "formal_write_count": 0,
+            },
+            runtime_model=None,
+            runtime_reasoning_effort=None,
+            runtime_metadata_provenance="unavailable",
+            runtime_identity_status="requested_unverified",
+            duration_ms=0,
+        )
 
     def run_analysis(
         self, task: FrozenTask, context: TaskExecutionContext
@@ -1928,6 +2167,57 @@ class CoreCandidateRunner:
                 "candidate_processing_contract_binding_mismatch"
             )
         self._analysis_worker = worker
+        if self._analysis_package_mode:
+            binder = getattr(
+                worker.runner, "bind_dispatch_process_lifecycle", None
+            )
+            if not callable(binder):
+                raise DispatchError(
+                    "analysis_package_dispatch_lifecycle_missing"
+                )
+            binder(
+                task=task,
+                lease=context.lease,
+                lease_store=self.lease_store,
+            )
+            lifecycle = getattr(
+                worker.runner, "_dispatch_process_lifecycle", None
+            )
+            if not isinstance(lifecycle, dict):
+                raise DispatchError(
+                    "analysis_package_dispatch_lifecycle_missing"
+                )
+            lifecycle["context_root"] = str(context.root.resolve())
+            worker.runner.config["task_context_root"] = str(
+                context.root.resolve()
+            )
+            worker.runner.config["task_model_temp_root"] = str(
+                (context.root / "model-output").resolve()
+            )
+            if context.cancel_event.is_set() or not self.lease_store.is_current(
+                context.lease
+            ):
+                raise DispatchCancelled()
+            result = worker.runner.run(self.candidate)
+            if not isinstance(result, ModelResult):
+                raise DispatchError("analysis_package_result_invalid")
+            analysis_stage = self._analysis_package_stage_result(
+                result, "analysis"
+            )
+            self._analysis_package_critical = (
+                self._analysis_package_stage_result(
+                    result, "critical_review"
+                )
+            )
+            self._model_result = result
+            self._published = {
+                "status": "succeeded",
+                "capture_id": self.candidate.capture_id,
+                "package_id": result.analysis.get("package_id"),
+                "package_ref": result.analysis.get("package_ref"),
+                "formal_write_count": 0,
+            }
+            return analysis_stage
         if self._record_direct_stage_events:
             worker.runner._execute_prompt = _DirectStageEventRecorder(
                 worker.runner,
@@ -2112,6 +2402,12 @@ class CoreCandidateRunner:
         context: TaskExecutionContext,
     ) -> StageResult:
         del draft_analysis
+        if self._analysis_package_mode:
+            if self._analysis_package_critical is None:
+                raise DispatchError("analysis_package_critical_stage_missing")
+            if not self.lease_store.is_current(context.lease):
+                raise DispatchError("stale_lease_fence")
+            return self._analysis_package_critical
         result = self._model_result
         published = self._published
         if result is None or published is None:
