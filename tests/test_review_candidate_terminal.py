@@ -47,6 +47,7 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
         subject: str = "math",
         exact_math_first: bool = False,
         restricted_reopen_error: bool = False,
+        review_stage_count: int | None = None,
     ) -> tuple[Path, FrozenTask, object]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -63,6 +64,8 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
         base = canary_task(901, subject=subject, release_id=release_id)
         payload = dict(base.frozen_payload)
         payload["test_report_disposition"] = disposition
+        if review_stage_count is not None:
+            payload["test_review_stage_count"] = review_stage_count
         if exact_math_first:
             payload["math_exact_smoke_binding"] = {
                 "formal_id": "GS-269",
@@ -193,6 +196,15 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
         self.assertEqual(package["sol_review_status"], "pending")
         self.assertFalse(package["formal_write_eligible"])
         self.assertTrue(package["warnings"])
+
+    def test_task_runner_accepts_three_stage_review_terminal(self) -> None:
+        _runtime, _task, result = self._run_terminal(
+            "needs_sol_review",
+            subject="cs408",
+            review_stage_count=3,
+        )
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.outcome, "succeeded")
 
     def _assert_subject_quality_success(self, subject: str) -> None:
         runtime, task, result = self._run_terminal(

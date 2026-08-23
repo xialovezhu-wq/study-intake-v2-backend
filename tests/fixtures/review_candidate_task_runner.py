@@ -207,9 +207,13 @@ error_code = (
 analysis_stage = build_stage(
     "analysis", has_finding=quarantined or finding_stage == "analysis"
 )
+requested_review_stage_count = frozen.get("test_review_stage_count")
 critical_stage = (
     build_stage("critical_review", has_finding=True)
-    if subject == "cs408" and not quarantined
+    if (
+        (subject == "cs408" or requested_review_stage_count == 3)
+        and not quarantined
+    )
     else None
 )
 decision = decide_execution_quality(
@@ -237,7 +241,11 @@ print(
                 error_code if not quarantined else None
             ),
             "terminal_report_disposition": disposition,
-            "terminal_review_stage_count": 2 if critical_stage else 1,
+            "terminal_review_stage_count": (
+                requested_review_stage_count
+                if requested_review_stage_count is not None
+                else 2 if critical_stage else 1
+            ),
             **decision.publication_fields(),
             "formal_write_count": 0,
         }

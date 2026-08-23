@@ -29,6 +29,7 @@ from concurrent_dispatch import (  # noqa: E402
 )
 from execution_quality_contract import decide_execution_quality  # noqa: E402
 from core_dispatch_bridge import (  # noqa: E402
+    CoreCandidateRunner,
     _CapturingRunner,
     _stage_result_from_model,
     content_processing_identity,
@@ -707,6 +708,74 @@ def run_request(
     capturing = _CapturingRunner(worker.runner)
     reuse_runner = _ContentReuseRunner(capturing)
     worker.runner = reuse_runner
+    consumer_stage_chain = config.get("consumer_stage_chain")
+    analysis_package = config.get("analysis_package_v1")
+    analysis_package_mode = bool(
+        execution_mode == "full_two_pass"
+        and config.get("execution_mode") == "live_authorized"
+        and isinstance(consumer_stage_chain, Mapping)
+        and consumer_stage_chain.get("enabled") is True
+        and isinstance(analysis_package, Mapping)
+        and analysis_package.get("enabled") is True
+    )
+    if analysis_package_mode:
+        result = reuse_runner.run(candidate)
+        if not isinstance(result, ModelResult):
+            raise DispatchError("analysis_package_result_invalid")
+        worker._assert_current_candidate_generation(candidate)
+        bridge = CoreCandidateRunner(
+            config,
+            candidate,
+            frozen_reason,
+            lease_store,
+        )
+        analysis_stage = bridge._analysis_package_stage_result(
+            result, "analysis"
+        )
+        critical_stage = bridge._analysis_package_stage_result(
+            result, "critical_review"
+        )
+        authority = analysis_stage.payload.get("analysis_package_authority")
+        if not isinstance(authority, Mapping):
+            raise DispatchError("analysis_package_authority_missing")
+        task_result = {
+            "schema_version": "study-intake-production-task-result-v1",
+            "unit_sha256": task.unit_sha256,
+            "lease_fence": fence,
+            "analysis": dataclasses.asdict(analysis_stage),
+            "critical_review": dataclasses.asdict(critical_stage),
+            "member_publications": [{
+                "status": "succeeded",
+                "capture_id": candidate.capture_id,
+                "package_id": authority["analysis_package_id"],
+                "package_ref": authority["analysis_package_ref"],
+                "formal_write_count": 0,
+            }],
+            "formal_write_count": 0,
+        }
+        if authority.get("quality_status") == "issues_found":
+            decision = decide_execution_quality(
+                model_completed=True,
+                provider_completed=True,
+                mcp_database_query_completed=True,
+                raw_output_reopenable=True,
+                report_reopenable=True,
+                identity_verified=True,
+                quality_findings_present=True,
+            )
+            task_result.update(
+                {
+                    "terminal_outcome": decision.terminal_outcome,
+                    "terminal_error_code": None,
+                    "terminal_quality_error_code": (
+                        "analysis_package_needs_review"
+                    ),
+                    "terminal_report_disposition": "needs_sol_review",
+                    "terminal_review_stage_count": 3,
+                    **decision.publication_fields(),
+                }
+            )
+        return task_result
     published = worker.process_claimed_candidate(
         candidate,
         (

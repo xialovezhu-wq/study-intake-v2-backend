@@ -3451,7 +3451,7 @@ class CoreCandidateSubprocessRunner:
                 disposition not in {"needs_sol_review", "quarantined"}
                 or isinstance(stage_count, bool)
                 or not isinstance(stage_count, int)
-                or stage_count not in {1, 2}
+                or stage_count not in {1, 2, 3}
             ):
                 raise DispatchError("task_process_review_terminal_invalid")
             if (
@@ -3506,7 +3506,10 @@ class CoreCandidateSubprocessRunner:
             if raw_critical is not None
             else None
         )
-        if self.terminal_review_stage_count == 2 and self._critical is None:
+        if (
+            self.terminal_review_stage_count in {2, 3}
+            and self._critical is None
+        ):
             raise DispatchError("task_process_review_stage_missing")
         if self.terminal_review_stage_count == 1 and self._critical is not None:
             raise DispatchError("task_process_review_stage_count_invalid")

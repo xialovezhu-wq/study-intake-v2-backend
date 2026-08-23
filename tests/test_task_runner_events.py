@@ -26,6 +26,7 @@ from preprocess_task_runner import (  # noqa: E402
 )
 from preprocess_dispatcher import _stage_runtime_contract  # noqa: E402
 from preprocessor_core import ModelResult  # noqa: E402
+from tests import test_local_backend_validation_reduction as reduction_tests  # noqa: E402
 
 
 class TaskRunnerEventTests(unittest.TestCase):
@@ -208,6 +209,76 @@ class TaskRunnerEventTests(unittest.TestCase):
             [row["event"] for row in self._events()],
             ["process_started", *("model_submitted" for _ in stage_names)],
         )
+
+    def test_run_request_uses_three_stage_analysis_package_terminal(self) -> None:
+        base_runner = getattr(
+            reduction_tests.AnalysisPackageTerminalBridgeTests,
+            "FakeAnalysisPackageRunner",
+        )
+
+        class Runner(base_runner):
+            def _execute_prompt(inner_self, **_kwargs):
+                raise AssertionError("fake package must not execute a Provider")
+
+            def _write_analysis_checkpoint(inner_self, *_args, **_kwargs):
+                raise AssertionError("analysis package does not use legacy checkpoint")
+
+        class Worker:
+            release_id = self.release_id
+
+            def __init__(inner_self, _config):
+                inner_self.runner = Runner()
+
+            def _assert_current_candidate_generation(
+                inner_self, _candidate
+            ) -> None:
+                return None
+
+            def process_claimed_candidate(
+                inner_self, *_args, **_kwargs
+            ):
+                raise AssertionError("legacy subject publisher must be bypassed")
+
+        config = {
+            "execution_mode": "live_authorized",
+            "runtime_root": str(self.runtime),
+            "model": {
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+            },
+            "consumer_stage_chain": {"enabled": True},
+            "analysis_package_v1": {"enabled": True},
+        }
+        request = {
+            "schema_version": "study-intake-production-task-request-v1",
+            "task": self.task.as_dict(),
+            "reason": "eligible",
+            "unit_sha256": self.task.unit_sha256,
+            "lease_fence": self.lease.fence,
+            "lease_owner_id": self.lease.owner_id,
+        }
+        environment = {
+            "STUDY_PREPROCESS_RUNTIME_ROOT": str(self.runtime.resolve()),
+            "STUDY_PREPROCESS_UNIT_SHA256": self.task.unit_sha256,
+            "STUDY_PREPROCESS_LEASE_FENCE": str(self.lease.fence),
+            "STUDY_PREPROCESS_LEASE_OWNER_ID": self.lease.owner_id,
+            "STUDY_PREPROCESS_CONTEXT_ROOT": str(self.context_root),
+        }
+        with (
+            mock.patch("preprocess_task_runner.load_config", return_value=config),
+            mock.patch("preprocess_task_runner.Worker", Worker),
+            mock.patch.dict(os.environ, environment, clear=False),
+        ):
+            result = run_request(self.runtime / "config.json", request)
+        self.assertEqual(result["terminal_outcome"], "succeeded")
+        self.assertEqual(result["terminal_review_stage_count"], 3)
+        self.assertEqual(
+            result["analysis"]["payload"]["analysis_package_authority"][
+                "stage_order"
+            ],
+            ["terra_analysis", "luna_analysis", "terra_final"],
+        )
+        self.assertIsNotNone(result["critical_review"])
 
     def test_stale_fence_cannot_write_core_analysis_checkpoint(self) -> None:
         calls = []
