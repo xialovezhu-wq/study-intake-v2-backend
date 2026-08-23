@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -57,6 +58,90 @@ def sha256_file(path: Path) -> str:
     if path.is_symlink() or not path.is_file():
         raise AcceptanceError("source_file_invalid")
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def reopen_completion_report_paths(
+    completion: Mapping[str, Any], runtime_root: Path
+) -> dict[str, Any]:
+    """Reopen v2 report refs for the hash-bound legacy acceptance consumer."""
+
+    value = copy.deepcopy(dict(completion))
+    if (
+        value.get("schema_version")
+        != "study-intake-concurrent-completion-v2"
+        or value.get("outcome") != "succeeded"
+    ):
+        return value
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        raise AcceptanceError("completion_report_runtime_root_invalid")
+    root = runtime_root.resolve(strict=True)
+    bindings = {
+        "report_json": (
+            "study-intake-report://sha256/",
+            root / "dispatch/reports/json/sha256",
+            ".json",
+        ),
+        "report_markdown": (
+            "study-intake-report-markdown://sha256/",
+            root / "dispatch/reports/markdown/sha256",
+            ".md",
+        ),
+    }
+    for role, (prefix, object_root, suffix) in bindings.items():
+        digest = value.get(f"{role}_sha256")
+        reference = value.get(f"{role}_ref")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            or reference != prefix + digest
+        ):
+            raise AcceptanceError("completion_report_binding_invalid")
+        path = object_root / digest[:2] / f"{digest}{suffix}"
+        try:
+            resolved_path = path.resolve(strict=True)
+            resolved_path.relative_to(root)
+            node = resolved_path.lstat()
+        except OSError as exc:
+            raise AcceptanceError("completion_report_object_missing") from exc
+        except ValueError as exc:
+            raise AcceptanceError("completion_report_object_invalid") from exc
+        if (
+            resolved_path != path
+            or path.is_symlink()
+            or not stat.S_ISREG(node.st_mode)
+            or sha256_file(resolved_path) != digest
+        ):
+            raise AcceptanceError("completion_report_object_invalid")
+        value[f"{role}_path"] = str(resolved_path)
+    return value
+
+
+class FirstWaitCompletionBridge:
+    """Give the audited legacy driver one path view, then restore v2 refs."""
+
+    def __init__(self, original_wait: Any, runtime_root: Path) -> None:
+        self.original_wait = original_wait
+        self.runtime_root = runtime_root
+        self.consumed_handles: set[int] = set()
+
+    def wait(self, handle: Any, timeout: Any = None):
+        result = self.original_wait(handle, timeout)
+        handle_identity = id(handle)
+        if handle_identity in self.consumed_handles:
+            return result
+        completion = result.completion
+        if not isinstance(completion, Mapping):
+            self.consumed_handles.add(handle_identity)
+            return result
+        compatible = reopen_completion_report_paths(
+            completion,
+            self.runtime_root,
+        )
+        self.consumed_handles.add(handle_identity)
+        if compatible == completion:
+            return result
+        return dataclasses.replace(result, completion=compatible)
 
 
 def _digest_map(root: Path) -> dict[str, str]:
@@ -810,7 +895,27 @@ def run(spec_path: Path) -> dict[str, Any]:
                 self.config_template.setdefault("adapters", {}).setdefault(
                     "cs408", {}
                 )["private_current_question_root"] = adapter_root
-            return super()._real_acceptance(testcase, **kwargs)
+            subject = str(kwargs.get("subject") or "")
+            fixture_root = Path(kwargs["fixture_root"]).resolve(strict=True)
+            trial_root = (
+                fixture_root.parent
+                / f".{fixture_root.name}-phase2-candidate-{subject}"
+            )
+            dispatch_module = importlib.import_module("concurrent_dispatch")
+            original_wait = dispatch_module.DispatchHandle.wait
+            completion_bridge = FirstWaitCompletionBridge(
+                original_wait,
+                trial_root / "runtime",
+            )
+
+            def completion_compatible_wait(handle: Any, timeout: Any = None):
+                return completion_bridge.wait(handle, timeout)
+
+            dispatch_module.DispatchHandle.wait = completion_compatible_wait
+            try:
+                return super()._real_acceptance(testcase, **kwargs)
+            finally:
+                dispatch_module.DispatchHandle.wait = original_wait
 
     harness = SourceAcceptance(
         candidate_release=source_release,
@@ -819,7 +924,29 @@ def run(spec_path: Path) -> dict[str, Any]:
         mcp_python=Path(mcp["python_executable"]),
         canonical_root=Path(str(spec["canonical_repository_root"])),
     )
-    result = harness.run(str(subject))
+    diagnostic_environment = {
+        "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1",
+        "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(
+            source_release
+            / "scripts/run_source_subject_provider_acceptance.py"
+        ),
+        "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": sha256_file(
+            source_release
+            / "scripts/run_source_subject_provider_acceptance.py"
+        ),
+    }
+    prior_diagnostic_environment = {
+        name: os.environ.get(name) for name in diagnostic_environment
+    }
+    os.environ.update(diagnostic_environment)
+    try:
+        result = harness.run(str(subject))
+    finally:
+        for name, previous in prior_diagnostic_environment.items():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
     execution_evidence = collect_execution_evidence(roots["evidence"])
     real_model_call_count = int(result.get("model_call_count") or 0)
     task_runner_pids = execution_evidence["task_runner_pids"]

@@ -16,6 +16,11 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lib"))
+import core_dispatch_bridge  # noqa: E402
+from concurrent_dispatch import DispatchResult  # noqa: E402
+
 SCRIPT = ROOT / "scripts/run_source_subject_provider_acceptance.py"
 SPEC = importlib.util.spec_from_file_location(
     "source_subject_provider_acceptance", SCRIPT
@@ -266,6 +271,522 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
         release_manifest = json.loads((mirror / "release.json").read_text())
         self.assertEqual(release_manifest["source_mode"], True)
         self.assertEqual(release_manifest["component_inventory"], {})
+
+    def test_source_acceptance_preserves_synthetic_task_stderr_diagnostic(
+        self,
+    ) -> None:
+        release_id = "c" * 64
+        runtime_root = self.producer / "diagnostic-trial/runtime"
+        release_root = runtime_root / "releases" / release_id
+        release_root.mkdir(parents=True)
+        (release_root / "release.json").write_bytes(
+            acceptance.canonical_bytes(
+                {
+                    "schema_version": "study-intake-preprocessor-release-v2",
+                    "release_id": release_id,
+                    "component_inventory": {},
+                    "source_mode": True,
+                    "formal_write_count": 0,
+                }
+            )
+        )
+        (runtime_root / "current").symlink_to(
+            Path("releases") / release_id,
+            target_is_directory=True,
+        )
+        context_root = (
+            runtime_root
+            / "dispatch/contexts"
+            / ("a" * 64)
+            / "fence-1"
+        )
+        context_root.mkdir(parents=True)
+        wrapper = ROOT / "scripts/run_source_subject_provider_acceptance.py"
+        stderr = (
+            b'Traceback (most recent call last):\n'
+            b'  File "/isolated/preprocess_task_runner.py", line 1, in main\n'
+            b"KeyError: 'synthetic_field'\n"
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1",
+                "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT": str(self.producer),
+                "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(wrapper),
+                "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": (
+                    hashlib.sha256(wrapper.read_bytes()).hexdigest()
+                ),
+            },
+            clear=False,
+        ):
+            diagnostic_path = (
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=context_root,
+                    subject="math",
+                    unit_sha256="a" * 64,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=stderr,
+                )
+            )
+        self.assertIsNotNone(diagnostic_path)
+        value = json.loads(Path(diagnostic_path).read_text(encoding="utf-8"))
+        self.assertEqual(value["stderr_utf8"], stderr.decode("utf-8"))
+        self.assertEqual(
+            value["stderr_sha256"], hashlib.sha256(stderr).hexdigest()
+        )
+        self.assertEqual(value["formal_write_count"], 0)
+
+    def test_source_acceptance_diagnostic_rejects_unbound_context(self) -> None:
+        context_root = self.runtime / "dispatch/contexts" / ("b" * 64) / "fence-1"
+        context_root.mkdir(parents=True)
+        with mock.patch.dict(
+            os.environ,
+            {"STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1"},
+            clear=False,
+        ):
+            os.environ.pop("STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT", None)
+            diagnostic_path = (
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=context_root,
+                    subject="math",
+                    unit_sha256="b" * 64,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=b"synthetic failure\n",
+                )
+            )
+        self.assertIsNone(diagnostic_path)
+        self.assertFalse(
+            (context_root / "source-acceptance-diagnostics").exists()
+        )
+
+    def test_source_acceptance_diagnostic_security_bindings_fail_closed(
+        self,
+    ) -> None:
+        wrapper = ROOT / "scripts/run_source_subject_provider_acceptance.py"
+
+        def fixture(
+            label: str,
+            *,
+            source_mode: bool = True,
+            current_symlink: bool = True,
+        ):
+            unit = hashlib.sha256(label.encode("utf-8")).hexdigest()
+            producer = self.base / f"producer-{label}"
+            runtime = producer / "trial/runtime"
+            release_id = hashlib.sha256(
+                f"release-{label}".encode("utf-8")
+            ).hexdigest()
+            release = runtime / "releases" / release_id
+            release.mkdir(parents=True)
+            (release / "release.json").write_bytes(
+                acceptance.canonical_bytes(
+                    {
+                        "schema_version": (
+                            "study-intake-preprocessor-release-v2"
+                        ),
+                        "release_id": release_id,
+                        "component_inventory": {},
+                        "source_mode": source_mode,
+                        "formal_write_count": 0,
+                    }
+                )
+            )
+            current = runtime / "current"
+            if current_symlink:
+                current.symlink_to(
+                    Path("releases") / release_id,
+                    target_is_directory=True,
+                )
+            else:
+                current.mkdir()
+            context = (
+                runtime / "dispatch/contexts" / unit / "fence-1"
+            )
+            context.mkdir(parents=True)
+            environment = {
+                "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1",
+                "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT": str(producer),
+                "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(wrapper),
+                "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": hashlib.sha256(
+                    wrapper.read_bytes()
+                ).hexdigest(),
+            }
+            return producer, context, unit, environment
+
+        producer, context, unit, environment = fixture("gate-off")
+        with mock.patch.dict(os.environ, environment, clear=False):
+            os.environ.pop(
+                "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS", None
+            )
+            self.assertIsNone(
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=context,
+                    subject="math",
+                    unit_sha256=unit,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=b"synthetic\n",
+                )
+            )
+        self.assertFalse(
+            (context / "source-acceptance-diagnostics").exists()
+        )
+
+        for label, mutation in (
+            (
+                "wrapper-path",
+                lambda env: env.update(
+                    {"STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(producer)}
+                ),
+            ),
+            (
+                "wrapper-hash",
+                lambda env: env.update(
+                    {"STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": "0" * 64}
+                ),
+            ),
+        ):
+            _producer, bound_context, bound_unit, bound_environment = fixture(
+                label
+            )
+            mutation(bound_environment)
+            with mock.patch.dict(
+                os.environ, bound_environment, clear=False
+            ):
+                self.assertIsNone(
+                    core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                        context_root=bound_context,
+                        subject="math",
+                        unit_sha256=bound_unit,
+                        lease_fence=1,
+                        returncode=1,
+                        stderr=b"synthetic\n",
+                    )
+                )
+
+        for label, options in (
+            ("not-source-mode", {"source_mode": False}),
+            ("current-not-link", {"current_symlink": False}),
+        ):
+            _producer, bound_context, bound_unit, bound_environment = fixture(
+                label, **options
+            )
+            with mock.patch.dict(
+                os.environ, bound_environment, clear=False
+            ):
+                self.assertIsNone(
+                    core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                        context_root=bound_context,
+                        subject="math",
+                        unit_sha256=bound_unit,
+                        lease_fence=1,
+                        returncode=1,
+                        stderr=b"synthetic\n",
+                    )
+                )
+
+        producer_escape, context_escape, unit_escape, environment_escape = (
+            fixture("current-escape")
+        )
+        runtime_escape = context_escape.parents[3]
+        (runtime_escape / "current").unlink()
+        escaped_release = producer_escape / ("e" * 64)
+        escaped_release.mkdir()
+        (escaped_release / "release.json").write_bytes(
+            acceptance.canonical_bytes(
+                {
+                    "schema_version": "study-intake-preprocessor-release-v2",
+                    "release_id": "e" * 64,
+                    "component_inventory": {},
+                    "source_mode": True,
+                    "formal_write_count": 0,
+                }
+            )
+        )
+        (runtime_escape / "current").symlink_to(
+            escaped_release,
+            target_is_directory=True,
+        )
+        with mock.patch.dict(os.environ, environment_escape, clear=False):
+            self.assertIsNone(
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=context_escape,
+                    subject="math",
+                    unit_sha256=unit_escape,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=b"synthetic\n",
+                )
+            )
+
+        _outside_producer, outside_context, outside_unit, _outside_env = fixture(
+            "symlink-outside"
+        )
+        linked_producer = self.base / "producer-symlink-parent"
+        linked_producer.mkdir()
+        (linked_producer / "runtime-link").symlink_to(
+            outside_context.parents[3],
+            target_is_directory=True,
+        )
+        linked_context = (
+            linked_producer
+            / "runtime-link/dispatch/contexts"
+            / outside_unit
+            / "fence-1"
+        )
+        linked_environment = {
+            "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1",
+            "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT": str(linked_producer),
+            "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(wrapper),
+            "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": hashlib.sha256(
+                wrapper.read_bytes()
+            ).hexdigest(),
+        }
+        with mock.patch.dict(os.environ, linked_environment, clear=False):
+            self.assertIsNone(
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=linked_context,
+                    subject="math",
+                    unit_sha256=outside_unit,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=b"synthetic\n",
+                )
+            )
+
+        _producer, bound_context, bound_unit, bound_environment = fixture(
+            "diagnostic-link"
+        )
+        outside = self.base / "diagnostic-outside"
+        outside.mkdir()
+        (bound_context / "source-acceptance-diagnostics").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+        with mock.patch.dict(os.environ, bound_environment, clear=False):
+            self.assertIsNone(
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=bound_context,
+                    subject="math",
+                    unit_sha256=bound_unit,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=b"synthetic\n",
+                )
+            )
+        self.assertEqual(list(outside.iterdir()), [])
+
+        _producer, bound_context, bound_unit, bound_environment = fixture(
+            "stderr-limit"
+        )
+        with mock.patch.dict(os.environ, bound_environment, clear=False):
+            self.assertIsNone(
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=bound_context,
+                    subject="math",
+                    unit_sha256=bound_unit,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=b"x" * (1024 * 1024 + 1),
+                )
+            )
+
+    def test_completion_v2_report_refs_reopen_for_legacy_consumer(self) -> None:
+        runtime_root = self.runtime
+        json_payload = b'{"report":true}\n'
+        markdown_payload = b"report\n"
+        json_sha = hashlib.sha256(json_payload).hexdigest()
+        markdown_sha = hashlib.sha256(markdown_payload).hexdigest()
+        json_path = (
+            runtime_root
+            / "dispatch/reports/json/sha256"
+            / json_sha[:2]
+            / f"{json_sha}.json"
+        )
+        markdown_path = (
+            runtime_root
+            / "dispatch/reports/markdown/sha256"
+            / markdown_sha[:2]
+            / f"{markdown_sha}.md"
+        )
+        json_path.parent.mkdir(parents=True)
+        markdown_path.parent.mkdir(parents=True)
+        json_path.write_bytes(json_payload)
+        markdown_path.write_bytes(markdown_payload)
+        completion = acceptance.reopen_completion_report_paths(
+            {
+                "schema_version": "study-intake-concurrent-completion-v2",
+                "outcome": "succeeded",
+                "report_json_ref": (
+                    "study-intake-report://sha256/" + json_sha
+                ),
+                "report_json_sha256": json_sha,
+                "report_markdown_ref": (
+                    "study-intake-report-markdown://sha256/" + markdown_sha
+                ),
+                "report_markdown_sha256": markdown_sha,
+            },
+            runtime_root,
+        )
+        self.assertEqual(
+            completion["report_json_path"], str(json_path.resolve())
+        )
+        self.assertEqual(
+            completion["report_markdown_path"], str(markdown_path.resolve())
+        )
+
+    def test_completion_report_reopen_rejects_symlink_parent(self) -> None:
+        runtime_root = self.runtime
+        outside = self.base / "outside-reports"
+        json_payload = b'{"outside":true}\n'
+        markdown_payload = b"outside\n"
+        json_sha = hashlib.sha256(json_payload).hexdigest()
+        markdown_sha = hashlib.sha256(markdown_payload).hexdigest()
+        json_path = (
+            outside / "json/sha256" / json_sha[:2] / f"{json_sha}.json"
+        )
+        markdown_path = (
+            outside
+            / "markdown/sha256"
+            / markdown_sha[:2]
+            / f"{markdown_sha}.md"
+        )
+        json_path.parent.mkdir(parents=True)
+        markdown_path.parent.mkdir(parents=True)
+        json_path.write_bytes(json_payload)
+        markdown_path.write_bytes(markdown_payload)
+        reports = runtime_root / "dispatch/reports"
+        reports.parent.mkdir(parents=True, exist_ok=True)
+        reports.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError,
+            "completion_report_object_invalid",
+        ):
+            acceptance.reopen_completion_report_paths(
+                {
+                    "schema_version": "study-intake-concurrent-completion-v2",
+                    "outcome": "succeeded",
+                    "report_json_ref": (
+                        "study-intake-report://sha256/" + json_sha
+                    ),
+                    "report_json_sha256": json_sha,
+                    "report_markdown_ref": (
+                        "study-intake-report-markdown://sha256/"
+                        + markdown_sha
+                    ),
+                    "report_markdown_sha256": markdown_sha,
+                },
+                runtime_root,
+            )
+
+    def test_first_wait_bridge_retries_then_preserves_original_v2_result(
+        self,
+    ) -> None:
+        runtime_root = self.runtime
+        json_payload = b'{"bridge":true}\n'
+        markdown_payload = b"bridge\n"
+        json_sha = hashlib.sha256(json_payload).hexdigest()
+        markdown_sha = hashlib.sha256(markdown_payload).hexdigest()
+        completion = {
+            "schema_version": "study-intake-concurrent-completion-v2",
+            "outcome": "succeeded",
+            "report_json_ref": "study-intake-report://sha256/" + json_sha,
+            "report_json_sha256": json_sha,
+            "report_markdown_ref": (
+                "study-intake-report-markdown://sha256/" + markdown_sha
+            ),
+            "report_markdown_sha256": markdown_sha,
+        }
+        original = DispatchResult(
+            unit_sha256="d" * 64,
+            status="completed",
+            outcome="succeeded",
+            completion=completion,
+        )
+        calls: list[float | None] = []
+
+        def original_wait(_handle, timeout=None):
+            calls.append(timeout)
+            return original
+
+        bridge = acceptance.FirstWaitCompletionBridge(
+            original_wait,
+            runtime_root,
+        )
+        handle = object()
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError,
+            "completion_report_object_missing",
+        ):
+            bridge.wait(handle, 1)
+        json_path = (
+            runtime_root
+            / "dispatch/reports/json/sha256"
+            / json_sha[:2]
+            / f"{json_sha}.json"
+        )
+        markdown_path = (
+            runtime_root
+            / "dispatch/reports/markdown/sha256"
+            / markdown_sha[:2]
+            / f"{markdown_sha}.md"
+        )
+        json_path.parent.mkdir(parents=True)
+        markdown_path.parent.mkdir(parents=True)
+        json_path.write_bytes(json_payload)
+        markdown_path.write_bytes(markdown_payload)
+        compatible = bridge.wait(handle, 2)
+        self.assertIn("report_json_path", compatible.completion)
+        projected = bridge.wait(handle, 0)
+        self.assertNotIn("report_json_path", projected.completion)
+        self.assertIs(projected, original)
+        self.assertEqual(calls, [1, 2, 0])
+
+    def test_completion_report_reopen_rejects_bad_ref_and_hash(self) -> None:
+        runtime_root = self.runtime
+        payload = b'{"hash":true}\n'
+        digest = hashlib.sha256(payload).hexdigest()
+        markdown = b"hash\n"
+        markdown_digest = hashlib.sha256(markdown).hexdigest()
+        base = {
+            "schema_version": "study-intake-concurrent-completion-v2",
+            "outcome": "succeeded",
+            "report_json_ref": "wrong://sha256/" + digest,
+            "report_json_sha256": digest,
+            "report_markdown_ref": (
+                "study-intake-report-markdown://sha256/" + markdown_digest
+            ),
+            "report_markdown_sha256": markdown_digest,
+        }
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError,
+            "completion_report_binding_invalid",
+        ):
+            acceptance.reopen_completion_report_paths(base, runtime_root)
+        base["report_json_ref"] = "study-intake-report://sha256/" + digest
+        json_path = (
+            runtime_root
+            / "dispatch/reports/json/sha256"
+            / digest[:2]
+            / f"{digest}.json"
+        )
+        markdown_path = (
+            runtime_root
+            / "dispatch/reports/markdown/sha256"
+            / markdown_digest[:2]
+            / f"{markdown_digest}.md"
+        )
+        json_path.parent.mkdir(parents=True)
+        markdown_path.parent.mkdir(parents=True)
+        json_path.write_bytes(b"wrong bytes\n")
+        markdown_path.write_bytes(markdown)
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError,
+            "completion_report_object_invalid",
+        ):
+            acceptance.reopen_completion_report_paths(base, runtime_root)
 
     def test_canonical_descriptor_contains_only_canonical_closure_bytes(self) -> None:
         canonical = self.base / "canonical-math"

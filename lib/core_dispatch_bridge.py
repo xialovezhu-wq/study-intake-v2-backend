@@ -17,6 +17,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -3096,6 +3097,201 @@ __all__ = [
 ]
 
 
+def _persist_source_acceptance_task_diagnostic(
+    *,
+    context_root: Path,
+    subject: str,
+    unit_sha256: str,
+    lease_fence: int,
+    returncode: int,
+    stderr: bytes,
+) -> Path | None:
+    """Persist synthetic child stderr only for the isolated source harness."""
+
+    if os.environ.get("STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS") != "1":
+        return None
+    try:
+        producer_raw = os.environ.get(
+            "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT"
+        )
+        wrapper_raw = os.environ.get(
+            "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH"
+        )
+        wrapper_sha256 = os.environ.get(
+            "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256"
+        )
+        if (
+            subject not in {"math", "cs408", "english"}
+            or re.fullmatch(r"[0-9a-f]{64}", unit_sha256) is None
+            or isinstance(lease_fence, bool)
+            or not isinstance(lease_fence, int)
+            or lease_fence < 1
+            or isinstance(returncode, bool)
+            or not isinstance(returncode, int)
+            or returncode == 0
+            or not isinstance(stderr, bytes)
+            or len(stderr) > 1024 * 1024
+            or not isinstance(producer_raw, str)
+            or not producer_raw
+            or not isinstance(wrapper_raw, str)
+            or not wrapper_raw
+            or not isinstance(wrapper_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", wrapper_sha256) is None
+        ):
+            return None
+        producer_path = Path(producer_raw)
+        wrapper_path = Path(wrapper_raw)
+        expected_wrapper = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/run_source_subject_provider_acceptance.py"
+        )
+        if (
+            producer_path.is_symlink()
+            or not producer_path.is_dir()
+            or wrapper_path.is_symlink()
+            or not wrapper_path.is_file()
+            or wrapper_path.resolve(strict=True) != expected_wrapper
+            or hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
+            != wrapper_sha256
+            or context_root.is_symlink()
+            or not context_root.is_dir()
+        ):
+            return None
+        producer_absolute = Path(os.path.abspath(str(producer_path)))
+        context_absolute = Path(os.path.abspath(str(context_root)))
+        try:
+            lexical_context = context_absolute.relative_to(
+                producer_absolute
+            )
+        except ValueError:
+            return None
+        lexical_parent = producer_absolute
+        for part in lexical_context.parts:
+            lexical_parent = lexical_parent / part
+            lexical_node = lexical_parent.lstat()
+            if stat.S_ISLNK(lexical_node.st_mode):
+                return None
+        producer_root = producer_path.resolve(strict=True)
+        root = context_root.resolve(strict=True)
+        try:
+            relative_context = root.relative_to(producer_root)
+        except ValueError:
+            return None
+        if producer_root in {Path("/"), Path.home().resolve()} or root in {
+            Path("/"),
+            Path.home().resolve(),
+        }:
+            return None
+        current_parent = producer_root
+        for part in relative_context.parts:
+            current_parent = current_parent / part
+            node = current_parent.lstat()
+            if stat.S_ISLNK(node.st_mode) or not stat.S_ISDIR(node.st_mode):
+                return None
+        runtime_root = root.parents[3]
+        expected_context = (
+            runtime_root
+            / "dispatch/contexts"
+            / unit_sha256
+            / f"fence-{lease_fence}"
+        )
+        if expected_context != root:
+            return None
+        current = runtime_root / "current"
+        if not stat.S_ISLNK(current.lstat().st_mode):
+            return None
+        release = current.resolve(strict=True)
+        try:
+            relative_release = release.relative_to(
+                (runtime_root / "releases").resolve(strict=True)
+            )
+        except ValueError:
+            return None
+        manifest_path = release / "release.json"
+        manifest_node = manifest_path.lstat()
+        if (
+            len(relative_release.parts) != 1
+            or re.fullmatch(r"[0-9a-f]{64}", relative_release.name) is None
+            or stat.S_ISLNK(manifest_node.st_mode)
+            or not stat.S_ISREG(manifest_node.st_mode)
+        ):
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, Mapping)
+            or manifest.get("release_id") != relative_release.name
+            or manifest.get("source_mode") is not True
+            or not isinstance(manifest.get("component_inventory"), Mapping)
+        ):
+            return None
+        diagnostic_root = root / "source-acceptance-diagnostics"
+        diagnostic_root.mkdir(mode=0o700, exist_ok=True)
+        diagnostic_node = diagnostic_root.lstat()
+        if (
+            stat.S_ISLNK(diagnostic_node.st_mode)
+            or not stat.S_ISDIR(diagnostic_node.st_mode)
+            or diagnostic_root.resolve(strict=True).parent != root
+        ):
+            return None
+        payload = {
+            "schema_version": "study-intake-source-task-diagnostic-v1",
+            "subject": subject,
+            "unit_sha256": unit_sha256,
+            "lease_fence": lease_fence,
+            "returncode": returncode,
+            "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            "stderr_size": len(stderr),
+            "stderr_utf8": stderr.decode("utf-8", errors="replace"),
+            "synthetic_source_acceptance": True,
+            "diagnostic_content_class": "synthetic_task_child_stderr",
+            "formal_write_count": 0,
+        }
+        raw = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        path = diagnostic_root / (
+            f"{subject}-{unit_sha256}-fence-{lease_fence}.json"
+        )
+        try:
+            existing_node = path.lstat()
+        except FileNotFoundError:
+            existing_node = None
+        if existing_node is not None:
+            if (
+                stat.S_ISLNK(existing_node.st_mode)
+                or not stat.S_ISREG(existing_node.st_mode)
+                or path.read_bytes() != raw
+            ):
+                return None
+            return path
+        temporary = diagnostic_root / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return path
+    except Exception:
+        return None
+
+
 class CoreCandidateSubprocessRunner:
     """Run one frozen production Candidate in its own process group."""
 
@@ -3427,6 +3623,19 @@ class CoreCandidateSubprocessRunner:
         if context.cancel_event.is_set():
             raise DispatchCancelled()
         if process.returncode != 0:
+            try:
+                _persist_source_acceptance_task_diagnostic(
+                    context_root=context.root,
+                    subject=str(task.frozen_payload.get("subject") or ""),
+                    unit_sha256=task.unit_sha256,
+                    lease_fence=context.lease.fence,
+                    returncode=int(process.returncode),
+                    stderr=stderr,
+                )
+            except Exception:
+                # Diagnostics are best-effort and must never replace the
+                # canonical task-process error or its sealed exit receipt.
+                pass
             try:
                 failure = json.loads(stderr.decode("utf-8"))
                 code = str(failure.get("error_code") or "task_process_failed")

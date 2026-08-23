@@ -40,6 +40,7 @@ from concurrent_dispatch import (  # noqa: E402
     TaskExecutionContext,
     dispatch_rule_binding,
 )
+import core_dispatch_bridge  # noqa: E402
 from core_dispatch_bridge import (  # noqa: E402
     CoreCandidateRunner,
     CoreCandidateSubprocessRunner,
@@ -3878,6 +3879,180 @@ class ConcurrentDispatchTests(unittest.TestCase):
         self.assertTrue(exit_receipt["pgid_absent"])
         self.assertFalse(exit_receipt["late_result_publish_allowed"])
         self.assertFalse(marker_root.exists())
+
+    def test_source_acceptance_child_failure_persists_diagnostic_without_masking(
+        self,
+    ) -> None:
+        release_id = "f" * 64
+        release_root = self.runtime / "releases" / release_id
+        release_root.mkdir(parents=True)
+        (release_root / "release.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "study-intake-preprocessor-release-v2",
+                    "release_id": release_id,
+                    "component_inventory": {},
+                    "source_mode": True,
+                    "formal_write_count": 0,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (self.runtime / "current").symlink_to(
+            Path("releases") / release_id,
+            target_is_directory=True,
+        )
+        config_path = self.runtime / "source-diagnostic-config.json"
+        config_path.write_text("{}\n", encoding="utf-8")
+        base = frozen_task(200, subject="math")
+        payload = dict(base.frozen_payload)
+        payload["dispatch_contract"] = {
+            "schema_version": "study-intake-dispatch-release-binding-v1",
+            **dispatch_rule_binding(
+                release_id=release_id,
+                subject="math",
+                subject_processing_contract_sha256="b" * 64,
+            ),
+            "dispatch_reason": "eligible",
+        }
+        task = FrozenTask(payload)
+        store = LeaseStore(self.runtime)
+        owner_id = f"dispatcher-{os.getpid()}-{'1' * 32}"
+        decision = store.claim(
+            task.unit_sha256,
+            owner_id,
+            subject="math",
+            task=task,
+        )
+        self.assertIsNotNone(decision.lease)
+        lease = decision.lease
+        assert lease is not None
+        context_root = (
+            self.runtime
+            / "dispatch/contexts"
+            / task.unit_sha256
+            / f"fence-{lease.fence}"
+        )
+        context_root.mkdir(parents=True)
+        context = TaskExecutionContext(task, lease, context_root, 2)
+        stderr = (
+            "Traceback (most recent call last):\n"
+            "  File \"/isolated/task.py\", line 1, in main\n"
+            "KeyError: 'synthetic_field'\n"
+        )
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import sys; sys.stdin.buffer.read(); "
+                f"sys.stderr.write({stderr!r}); raise SystemExit(1)"
+            ),
+        ]
+        runner = CoreCandidateSubprocessRunner(
+            config_path,
+            "eligible",
+            command=command,
+            lease_store=store,
+        )
+        wrapper = ROOT / "scripts/run_source_subject_provider_acceptance.py"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1",
+                "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT": str(
+                    Path(self.temp.name)
+                ),
+                "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(wrapper),
+                "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": hashlib.sha256(
+                    wrapper.read_bytes()
+                ).hexdigest(),
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                DispatchError, "task_process_exit_1"
+            ):
+                runner.run_analysis(task, context)
+        diagnostics = list(
+            (context_root / "source-acceptance-diagnostics").glob("*.json")
+        )
+        self.assertEqual(len(diagnostics), 1)
+        diagnostic = json.loads(diagnostics[0].read_text(encoding="utf-8"))
+        self.assertEqual(diagnostic["stderr_utf8"], stderr)
+        self.assertEqual(diagnostic["returncode"], 1)
+        self.assertEqual(diagnostic["formal_write_count"], 0)
+
+        second_base = frozen_task(201, subject="math")
+        second_payload = dict(second_base.frozen_payload)
+        second_payload["dispatch_contract"] = {
+            "schema_version": "study-intake-dispatch-release-binding-v1",
+            **dispatch_rule_binding(
+                release_id=release_id,
+                subject="math",
+                subject_processing_contract_sha256="b" * 64,
+            ),
+            "dispatch_reason": "eligible",
+        }
+        second_task = FrozenTask(second_payload)
+        second_owner = f"dispatcher-{os.getpid()}-{'2' * 32}"
+        second_decision = store.claim(
+            second_task.unit_sha256,
+            second_owner,
+            subject="math",
+            task=second_task,
+        )
+        self.assertIsNotNone(second_decision.lease)
+        second_lease = second_decision.lease
+        assert second_lease is not None
+        second_context_root = (
+            self.runtime
+            / "dispatch/contexts"
+            / second_task.unit_sha256
+            / f"fence-{second_lease.fence}"
+        )
+        second_context_root.mkdir(parents=True)
+        second_context = TaskExecutionContext(
+            second_task,
+            second_lease,
+            second_context_root,
+            2,
+        )
+        second_runner = CoreCandidateSubprocessRunner(
+            config_path,
+            "eligible",
+            command=command,
+            lease_store=store,
+        )
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "1",
+                    "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT": str(
+                        Path(self.temp.name)
+                    ),
+                    "STUDY_SOURCE_ACCEPTANCE_WRAPPER_PATH": str(wrapper),
+                    "STUDY_SOURCE_ACCEPTANCE_WRAPPER_SHA256": hashlib.sha256(
+                        wrapper.read_bytes()
+                    ).hexdigest(),
+                },
+                clear=False,
+            ),
+            mock.patch.object(
+                core_dispatch_bridge,
+                "_persist_source_acceptance_task_diagnostic",
+                side_effect=OSError("synthetic sidecar failure"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                DispatchError, "task_process_exit_1"
+            ):
+                second_runner.run_analysis(second_task, second_context)
+        self.assertFalse(
+            (second_context_root / "source-acceptance-diagnostics").exists()
+        )
 
     def test_killing_one_production_process_does_not_kill_sibling(self) -> None:
         marker_root = self.runtime / "kill-markers"
