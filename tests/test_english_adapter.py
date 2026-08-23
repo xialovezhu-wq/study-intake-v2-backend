@@ -602,7 +602,7 @@ print(json.dumps({
         )
         artifacts = runner._capture_artifacts(candidate)
         article_artifacts = [
-            row for row in artifacts if row["artifact_kind"] == "source_text"
+            row for row in artifacts if row["artifact_kind"] == "article_text"
         ]
         self.assertEqual(len(article_artifacts), 1)
         self.assertNotIn("path", article_artifacts[0])
