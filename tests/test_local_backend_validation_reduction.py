@@ -1145,6 +1145,7 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                 normalization_digest = digest("analysis-normalization")
                 stage_execution_digest = digest("stage-execution")
                 stage_normalization_digest = digest("stage-normalization")
+                mcp_transcript_digest = digest("mcp-transcript")
                 process_identity_digest = digest("process-identity")
                 process_exit_digest = digest("process-exit")
                 normalization_status = (
@@ -1192,6 +1193,11 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                     "stage_normalization_receipt_ref": (
                         "study-intake-model-stage-normalization://sha256/"
                         + stage_normalization_digest
+                    ),
+                    "mcp_transcript_sha256": mcp_transcript_digest,
+                    "mcp_transcript_ref": (
+                        "study-intake-mcp-stage-transcript://sha256/"
+                        + mcp_transcript_digest
                     ),
                     "normalization_status": normalization_status,
                     "normalization_warning_count": len(warning_rows),
@@ -1531,6 +1537,9 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(row["provider_process_exit_sha256"] for row in stages)
+            )
+            self.assertTrue(
+                all(row["mcp_transcript_sha256"] for row in stages)
             )
             projected, _, _, _ = dashboard_server._dispatch_stage_receipts(
                 receipt

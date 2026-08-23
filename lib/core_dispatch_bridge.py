@@ -2293,6 +2293,12 @@ class CoreCandidateRunner:
                 "stage_normalization_receipt_ref",
                 ("study-intake-model-stage-normalization://sha256/",),
             )
+            mcp_transcript_sha, mcp_transcript_ref = checked_pair(
+                receipt,
+                "mcp_transcript_sha256",
+                "mcp_transcript_ref",
+                ("study-intake-mcp-stage-transcript://sha256/",),
+            )
             process_identity = receipt.get(
                 "provider_process_identity_sha256"
             )
@@ -2436,6 +2442,8 @@ class CoreCandidateRunner:
                     "stage_normalization_receipt_ref": (
                         stage_normalization_ref
                     ),
+                    "mcp_transcript_sha256": mcp_transcript_sha,
+                    "mcp_transcript_ref": mcp_transcript_ref,
                     "normalization_status": raw_row.get(
                         "normalization_status"
                     ),
@@ -2546,6 +2554,8 @@ class CoreCandidateRunner:
             stage_normalization_receipt_ref=row[
                 "stage_normalization_receipt_ref"
             ],
+            review_mcp_transcript_sha256=row["mcp_transcript_sha256"],
+            review_mcp_transcript_ref=row["mcp_transcript_ref"],
             normalization_status=(
                 "normalized_with_warnings"
                 if row["normalization_status"] == "incomplete"
