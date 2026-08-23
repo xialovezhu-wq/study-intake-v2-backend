@@ -1309,6 +1309,91 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                 AnalysisPackageTerminalBridgeTests.FakeAnalysisPackageRunner()
             )
 
+    def test_cached_critical_reuses_existing_provider_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary).resolve() / "runtime"
+            candidate_value = candidate(
+                "math",
+                "MFI-CAP-CACHED-CRITICAL-PROGRESS-001",
+                "2026-08-22T12:45:00+08:00",
+            )
+            rule = dispatch_rule_binding(
+                release_id=RELEASE_ID,
+                subject="math",
+                subject_processing_contract_sha256=PROCESSING_CONTRACT,
+            )
+            payload = dict(
+                FrozenTask.from_candidate(candidate_value).frozen_payload
+            )
+            payload["dispatch_contract"] = {
+                "schema_version": (
+                    "study-intake-dispatch-release-binding-v1"
+                ),
+                **rule,
+                "loaded_core_sha256": "8" * 64,
+                "dispatch_reason": "actual_foreground_capture",
+                "requested_service_tier": None,
+                "fast_mode_requested": False,
+                "fast_mode_effective": "not_requested",
+            }
+            task = FrozenTask(payload)
+            store = LeaseStore(runtime)
+            observed_progress = []
+
+            class CachedCriticalRunner:
+                executes_full_two_pass_in_analysis = True
+
+                def run_analysis(inner_self, task_value, context):
+                    store.publish_stage_progress(
+                        task_value,
+                        context.lease,
+                        stage_name="math_critical_review",
+                        progress_kind="stage_transition",
+                        stdout_bytes=11,
+                        stderr_bytes=7,
+                        mcp_tool_call_count=3,
+                    )
+                    return StageResult(
+                        payload={"stage": "analysis"},
+                        runtime_model="gpt-5.6-luna",
+                        runtime_reasoning_effort="max",
+                        runtime_metadata_provenance=(
+                            "codex_json_attestation_v1"
+                        ),
+                        runtime_identity_status="confirmed",
+                    )
+
+                def run_critical_review(
+                    inner_self, task_value, _draft_analysis, context
+                ):
+                    observed_progress.append(
+                        store.latest_stage_progress(
+                            task_value,
+                            context.lease,
+                            stage_name="math_critical_review",
+                        )
+                    )
+                    return StageResult(
+                        payload={"stage": "critical_review"},
+                        runtime_model="gpt-5.6-luna",
+                        runtime_reasoning_effort="max",
+                        runtime_metadata_provenance=(
+                            "codex_json_attestation_v1"
+                        ),
+                        runtime_identity_status="confirmed",
+                    )
+
+            dispatcher = ConcurrentDispatcher(
+                runtime, lambda _task, _context: CachedCriticalRunner()
+            )
+            result = dispatcher.submit(task).wait(5)
+            self.assertEqual(result.outcome, "succeeded", result.error_code)
+            self.assertEqual(len(observed_progress), 1)
+            progress = observed_progress[0]
+            self.assertEqual(progress["stdout_bytes"], 11)
+            self.assertEqual(progress["stderr_bytes"], 7)
+            self.assertEqual(progress["mcp_tool_call_count"], 3)
+
     def test_analysis_package_ready_reaches_existing_terminal_publisher(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary).resolve() / "runtime"

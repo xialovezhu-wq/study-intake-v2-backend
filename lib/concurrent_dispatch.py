@@ -19399,15 +19399,23 @@ class ConcurrentDispatcher:
         provider_stage = f"{subject}_{stage}"
         production_progress = subject in {"math", "cs408", "english"}
         if production_progress:
-            transition = self.lease_store.publish_stage_progress(
-                task,
-                context.lease,
-                stage_name=provider_stage,
-                progress_kind="stage_transition",
+            existing_progress = self.lease_store.latest_stage_progress(
+                task, context.lease, stage_name=provider_stage
             )
-            last_progress_sha256 = str(
-                transition["progress_receipt_sha256"]
-            )
+            if existing_progress is None:
+                transition = self.lease_store.publish_stage_progress(
+                    task,
+                    context.lease,
+                    stage_name=provider_stage,
+                    progress_kind="stage_transition",
+                )
+                last_progress_sha256 = str(
+                    transition["progress_receipt_sha256"]
+                )
+            else:
+                last_progress_sha256 = str(
+                    existing_progress["progress_receipt_sha256"]
+                )
         soft_warning_emitted = False
         failed_probe_rounds = 0
         stall_probe_attempts = 0
