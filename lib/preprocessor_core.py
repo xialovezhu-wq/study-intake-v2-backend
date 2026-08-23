@@ -15458,6 +15458,10 @@ class StructuredStageResult:
     capture_freeze_receipt_sha256: str | None = None
     mcp_read_session_receipt_sha256: str | None = None
     mcp_calls: tuple[dict[str, Any], ...] = ()
+    provider_process_identity_sha256: str | None = None
+    provider_process_exit_sha256: str | None = None
+    provider_returncode: int | None = None
+    execution_status: str | None = None
 
 
 def processing_publication_fields(
@@ -18639,6 +18643,7 @@ class CodexRunner:
         identity_refs: Mapping[str, Any] | None = None
         exit_refs: Mapping[str, Any] | None = None
         raw_publish_error: BaseException | None = None
+        pre_stdin_binding_error: PreprocessorError | None = None
         stdout = b""
         stderr = b""
         process_start_token: str | None = None
@@ -18739,9 +18744,44 @@ class CodexRunner:
             assert process.stdin is not None
             assert process.stdout is not None
             assert process.stderr is not None
-            try:
+            def send_provider_input() -> None:
                 process.stdin.write(input)
                 process.stdin.flush()
+
+            try:
+                lifecycle = self._dispatch_process_lifecycle
+                if lifecycle is not None:
+                    if identity_refs is None:
+                        raise PreprocessorError(
+                            "provider_process_identity_missing"
+                        )
+                    try:
+                        lifecycle["lease_store"].send_provider_stdin_if_current(
+                            lifecycle["task"],
+                            lifecycle["lease"],
+                            stage_name=stage_name,
+                            provider_process_identity_sha256=str(
+                                identity_refs[
+                                    "provider_process_identity_sha256"
+                                ]
+                            ),
+                            provider_process_identity_path=str(
+                                identity_refs[
+                                    "provider_process_identity_path"
+                                ]
+                            ),
+                            context_root=cwd,
+                            executable_path=Path(str(command[0])),
+                            argv=tuple(argv_evidence["argv"]),
+                            callback=send_provider_input,
+                        )
+                    except ProviderDispatchError as exc:
+                        termination_reason = "launch_failed"
+                        self._terminate_process_group(process)
+                        pre_stdin_binding_error = PreprocessorError(exc.code)
+                        raise pre_stdin_binding_error from exc
+                else:
+                    send_provider_input()
             finally:
                 process.stdin.close()
 
@@ -18986,7 +19026,11 @@ class CodexRunner:
                     raw_publish_error = exc
             if self._cancel_requested.is_set() and termination_reason == "completed":
                 termination_reason = self._cancel_termination_reason()
-            if identity_refs is not None and raw_publish_error is None:
+            if (
+                identity_refs is not None
+                and raw_publish_error is None
+                and pre_stdin_binding_error is None
+            ):
                 lifecycle = self._dispatch_process_lifecycle
                 assert lifecycle is not None
                 finished_at = (
@@ -22187,6 +22231,7 @@ class CodexRunner:
                     requested_reasoning_effort=requested_reasoning_effort,
                 )
             )
+            provider_closure = self._provider_closure.get(stage_name, {})
             stage_result = StructuredStageResult(
                 payload=payload,
                 duration_ms=duration_ms,
@@ -22256,6 +22301,41 @@ class CodexRunner:
                 ),
                 normalization_warning_count=len(raw_boundary_warnings),
                 normalization_warnings=tuple(raw_boundary_warnings),
+                provider_process_identity_sha256=(
+                    str(provider_closure["provider_process_identity_sha256"])
+                    if isinstance(
+                        provider_closure.get(
+                            "provider_process_identity_sha256"
+                        ),
+                        str,
+                    )
+                    else None
+                ),
+                provider_process_exit_sha256=(
+                    str(provider_closure["provider_process_exit_sha256"])
+                    if isinstance(
+                        provider_closure.get(
+                            "provider_process_exit_sha256"
+                        ),
+                        str,
+                    )
+                    else None
+                ),
+                provider_returncode=(
+                    int(provider_closure["returncode"])
+                    if isinstance(provider_closure.get("returncode"), int)
+                    and not isinstance(
+                        provider_closure.get("returncode"), bool
+                    )
+                    else None
+                ),
+                execution_status=(
+                    "completed"
+                    if provider_closure.get("returncode") == 0
+                    else "failed"
+                    if isinstance(provider_closure.get("returncode"), int)
+                    else None
+                ),
             )
             if review_policy_violation is not None:
                 warning = {
@@ -22618,6 +22698,45 @@ class CodexRunner:
                 for row in result.normalization_warnings
             ],
         }
+        process_fields = (
+            result.provider_process_identity_sha256,
+            result.provider_process_exit_sha256,
+            result.provider_returncode,
+            result.execution_status,
+        )
+        if any(value is not None for value in process_fields):
+            if (
+                not all(value is not None for value in process_fields)
+                or not isinstance(
+                    result.provider_process_identity_sha256, str
+                )
+                or SHA256_RE.fullmatch(
+                    result.provider_process_identity_sha256
+                )
+                is None
+                or not isinstance(result.provider_process_exit_sha256, str)
+                or SHA256_RE.fullmatch(result.provider_process_exit_sha256)
+                is None
+                or isinstance(result.provider_returncode, bool)
+                or not isinstance(result.provider_returncode, int)
+                or result.execution_status
+                not in {"completed", "failed", "cancelled", "stalled"}
+            ):
+                raise PreprocessorError(
+                    "stage_process_closure_invalid"
+                )
+            receipt.update(
+                {
+                    "provider_process_identity_sha256": (
+                        result.provider_process_identity_sha256
+                    ),
+                    "provider_process_exit_sha256": (
+                        result.provider_process_exit_sha256
+                    ),
+                    "provider_returncode": result.provider_returncode,
+                    "execution_status": result.execution_status,
+                }
+            )
         if (format_normalization is None) != (format_stage_name is None):
             raise PreprocessorError("math_format_normalization_binding_invalid")
         if format_normalization is not None:

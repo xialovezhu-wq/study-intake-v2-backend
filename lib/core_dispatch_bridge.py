@@ -1056,6 +1056,9 @@ def scan_eligible_candidates(
     if not isinstance(release_id, str) or not release_id:
         raise DispatchError("scanner_release_id_missing")
     discovery_floor = None
+    pre_candidate_cutoff_rejections: list[
+        tuple[dict[str, Any], str, str]
+    ] = []
     if producer_recorded_after is not None:
         if controlled_replay:
             raise DispatchError("producer_discovery_floor_invalid")
@@ -1072,14 +1075,45 @@ def scan_eligible_candidates(
             )
             if not isinstance(pending, list):
                 raise DispatchError("producer_discovery_floor_status_invalid")
-            discovered = frozenset(
-                str(row["event_id"])
-                for row in pending
-                if isinstance(row, Mapping)
-                and isinstance(row.get("event_id"), str)
-                and parse_time(row.get("recorded_at")) is not None
-                and parse_time(row.get("recorded_at")) > discovery_floor
-            )
+            discovered_ids: set[str] = set()
+            for raw_row in pending:
+                if not isinstance(raw_row, Mapping):
+                    continue
+                capture_id = raw_row.get("event_id")
+                if not isinstance(capture_id, str) or not capture_id:
+                    pre_candidate_cutoff_rejections.append(
+                        (
+                            dict(raw_row),
+                            "producer_capture_identity_missing",
+                            "needs_review",
+                        )
+                    )
+                    continue
+                if (
+                    capture_allowlist is not None
+                    and capture_id not in capture_allowlist
+                ):
+                    continue
+                recorded_at = parse_time(raw_row.get("recorded_at"))
+                if recorded_at is None:
+                    pre_candidate_cutoff_rejections.append(
+                        (
+                            dict(raw_row),
+                            "producer_recorded_at_invalid",
+                            "needs_review",
+                        )
+                    )
+                elif recorded_at <= discovery_floor:
+                    pre_candidate_cutoff_rejections.append(
+                        (
+                            dict(raw_row),
+                            "pre_cutoff_capture",
+                            "historical_cutoff",
+                        )
+                    )
+                else:
+                    discovered_ids.add(capture_id)
+            discovered = frozenset(discovered_ids)
             capture_allowlist = (
                 discovered
                 if capture_allowlist is None
@@ -1668,6 +1702,42 @@ def scan_eligible_candidates(
             }
         )
 
+    for raw_row, rejection_code, rejection_phase in (
+        pre_candidate_cutoff_rejections
+    ):
+        capture_id = raw_row.get("event_id")
+        decisions.append(
+            {
+                "subject": subject,
+                "capture_id": (
+                    capture_id if isinstance(capture_id, str) else None
+                ),
+                "study_date": (
+                    raw_row.get("study_date")
+                    if isinstance(raw_row.get("study_date"), str)
+                    else study_date
+                ),
+                "target_label": (
+                    capture_id if isinstance(capture_id, str) else subject
+                ),
+                "eligible": False,
+                "reason": rejection_code,
+                "error_code": (
+                    rejection_code
+                    if rejection_phase == "needs_review"
+                    else None
+                ),
+                "phase": rejection_phase,
+                "model_enqueue_allowed": False,
+                "normalization_warnings": (
+                    [rejection_code]
+                    if rejection_phase == "needs_review"
+                    else []
+                ),
+                "formal_write_count": 0,
+            }
+        )
+
     for candidate, rejection_code in route_rejections:
         rejected_rule_binding = dispatch_rule_binding(
             release_id=release_id,
@@ -1753,12 +1823,18 @@ def scan_eligible_candidates(
     } | {
         candidate.capture_id
         for candidate, _reason, _phase in cutoff_rejections
+    } | {
+        str(raw_row.get("event_id"))
+        for raw_row, _reason, _phase in pre_candidate_cutoff_rejections
+        if isinstance(raw_row.get("event_id"), str)
     } | reused_capture_ids
     for capture_id, raw_reason in candidate_errors.items():
         if (
             not isinstance(capture_id, str)
             or not isinstance(raw_reason, str)
             or capture_id in handled_capture_ids
+            or capture_allowlist is not None
+            and capture_id not in capture_allowlist
         ):
             continue
         readiness = readiness_by_capture.get(capture_id)
@@ -2092,11 +2168,15 @@ class CoreCandidateRunner:
         self.terminal_review_stage_count = 0
         self._analysis_package_critical: StageResult | None = None
 
-    @staticmethod
-    def _analysis_package_stage_result(
-        result: ModelResult, stage: str
-    ) -> StageResult:
+    def _analysis_package_authority(
+        self, result: ModelResult
+    ) -> dict[str, Any]:
         package = result.analysis
+        expected_stages = (
+            ("terra_analysis", "gpt-5.6-terra"),
+            ("luna_analysis", "gpt-5.6-luna"),
+            ("terra_final", "gpt-5.6-terra"),
+        )
         if (
             result.pipeline_status != "analysis_package_ready"
             or not isinstance(package, Mapping)
@@ -2105,38 +2185,387 @@ class CoreCandidateRunner:
             or not isinstance(package.get("package_sha256"), str)
             or not isinstance(package.get("package_ref"), str)
             or not isinstance(package.get("stages"), list)
+            or package.get("capture_id") != self.candidate.capture_id
+            or package.get("subject") != self.candidate.subject
+            or package.get("study_date") != self.candidate.study_date
+            or package.get("stage_order")
+            != [stage for stage, _model in expected_stages]
+            or len(package["stages"]) != len(expected_stages)
+            or package.get("status") != "ready_for_nightly"
+            or package.get("formal_write_count") != 0
+            or package.get("package_ref")
+            != "study-intake-analysis-package://sha256/"
+            + str(package.get("package_sha256"))
         ):
             raise DispatchError("analysis_package_result_invalid")
-        package_stage = "terra_analysis" if stage == "analysis" else "terra_final"
-        row = next(
-            (
-                value
-                for value in package["stages"]
-                if isinstance(value, Mapping)
-                and value.get("stage") == package_stage
+        package_warnings = package.get("warnings")
+        if not isinstance(package_warnings, list) or any(
+            not isinstance(code, str) or not code
+            for code in package_warnings
+        ):
+            raise DispatchError("analysis_package_warning_invalid")
+
+        def checked_pair(
+            value: Mapping[str, Any],
+            sha_key: str,
+            ref_key: str,
+            prefixes: tuple[str, ...],
+        ) -> tuple[str, str]:
+            digest = value.get(sha_key)
+            ref = value.get(ref_key)
+            if (
+                not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or not isinstance(ref, str)
+                or not any(
+                    ref == prefix + digest for prefix in prefixes
+                )
+            ):
+                raise DispatchError("analysis_package_stage_ref_invalid")
+            return digest, ref
+
+        authority_rows: list[dict[str, Any]] = []
+        provider_total = 0
+        mcp_total = 0
+        semantic_total = 0
+        quality_issues = bool(package_warnings)
+        for expected, raw_row in zip(expected_stages, package["stages"]):
+            expected_stage, expected_model = expected
+            if (
+                not isinstance(raw_row, Mapping)
+                or raw_row.get("stage") != expected_stage
+                or raw_row.get("requested_model") != expected_model
+                or raw_row.get("requested_reasoning_effort") != "max"
+                or raw_row.get("read_only") is not True
+                or raw_row.get("formal_write_count") != 0
+                or raw_row.get("normalization_status")
+                not in {"complete", "incomplete"}
+            ):
+                raise DispatchError("analysis_package_stage_invalid")
+            runtime = raw_row.get("runtime")
+            receipt = raw_row.get("receipt")
+            if not isinstance(runtime, Mapping) or not isinstance(
+                receipt, Mapping
+            ):
+                raise DispatchError("analysis_package_stage_receipt_missing")
+            report_sha, report_ref = checked_pair(
+                raw_row,
+                "report_sha256",
+                "report_ref",
+                ("study-intake-analysis-stage-report://sha256/",),
+            )
+            raw_sha, raw_ref = checked_pair(
+                raw_row,
+                "raw_output_sha256",
+                "raw_output_ref",
+                (
+                    "study-intake-model-stage-raw-output://sha256/",
+                    "study-intake-direct-model-stage-raw://sha256/",
+                ),
+            )
+            analysis_execution_sha, analysis_execution_ref = checked_pair(
+                raw_row,
+                "execution_receipt_sha256",
+                "execution_receipt_ref",
+                (
+                    "study-intake-analysis-stage-execution-receipt://sha256/",
+                ),
+            )
+            analysis_normalization_sha, analysis_normalization_ref = (
+                checked_pair(
+                    raw_row,
+                    "normalization_receipt_sha256",
+                    "normalization_receipt_ref",
+                    (
+                        "study-intake-analysis-stage-normalization-receipt://sha256/",
+                    ),
+                )
+            )
+            stage_execution_sha, stage_execution_ref = checked_pair(
+                receipt,
+                "stage_execution_receipt_sha256",
+                "stage_execution_receipt_ref",
+                ("study-intake-model-stage-execution://sha256/",),
+            )
+            stage_normalization_sha, stage_normalization_ref = checked_pair(
+                receipt,
+                "stage_normalization_receipt_sha256",
+                "stage_normalization_receipt_ref",
+                ("study-intake-model-stage-normalization://sha256/",),
+            )
+            process_identity = receipt.get(
+                "provider_process_identity_sha256"
+            )
+            process_exit = receipt.get("provider_process_exit_sha256")
+            for digest in (process_identity, process_exit):
+                if (
+                    not isinstance(digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                ):
+                    raise DispatchError(
+                        "analysis_package_process_closure_missing"
+                    )
+            semantic_count = receipt.get("semantic_stage_count")
+            provider_count = receipt.get("provider_request_count")
+            mcp_count = receipt.get("mcp_tool_call_count")
+            model_count = receipt.get("model_call_count")
+            warning_count = receipt.get("normalization_warning_count")
+            warning_rows = receipt.get("normalization_warnings")
+            if (
+                receipt.get("status") != "ready"
+                or receipt.get("requested_model") != expected_model
+                or receipt.get("requested_reasoning_effort") != "max"
+                or receipt.get("formal_write_count") != 0
+                or receipt.get("execution_status") != "completed"
+                or receipt.get("provider_returncode") != 0
+                or receipt.get("raw_output_object_sha256") != raw_sha
+                or receipt.get("raw_output_object_ref") != raw_ref
+                or isinstance(semantic_count, bool)
+                or semantic_count != 1
+                or isinstance(provider_count, bool)
+                or not isinstance(provider_count, int)
+                or provider_count < 1
+                or isinstance(mcp_count, bool)
+                or not isinstance(mcp_count, int)
+                or mcp_count < 0
+                or provider_count != mcp_count + 1
+                or model_count != 1
+                or isinstance(warning_count, bool)
+                or not isinstance(warning_count, int)
+                or warning_count < 0
+                or not isinstance(warning_rows, list)
+                or warning_count != len(warning_rows)
+                or any(
+                    not isinstance(warning, Mapping)
+                    for warning in warning_rows
+                )
+            ):
+                raise DispatchError("analysis_package_count_closure_invalid")
+            receipt_sha256 = hashlib.sha256(
+                (
+                    json.dumps(
+                        dict(receipt),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest()
+            if raw_row.get("receipt_sha256") != receipt_sha256:
+                raise DispatchError("analysis_package_stage_receipt_invalid")
+            if (
+                runtime.get("requested_model") != expected_model
+                or runtime.get("requested_reasoning_effort") != "max"
+                or runtime.get("runtime_model")
+                != receipt.get("runtime_model")
+                or runtime.get("runtime_reasoning_effort")
+                != receipt.get("runtime_reasoning_effort")
+                or runtime.get("runtime_metadata_provenance")
+                != receipt.get("runtime_metadata_provenance")
+                or runtime.get("duration_ms") != receipt.get("duration_ms")
+            ):
+                raise DispatchError("analysis_package_runtime_binding_invalid")
+            identity_status = receipt.get("runtime_identity_status")
+            if identity_status == "confirmed":
+                if (
+                    receipt.get("runtime_model") != expected_model
+                    or receipt.get("runtime_reasoning_effort") != "max"
+                ):
+                    raise DispatchError(
+                        "analysis_package_runtime_identity_invalid"
+                    )
+            elif identity_status == "requested_unverified":
+                if (
+                    receipt.get("runtime_model") is not None
+                    or receipt.get("runtime_reasoning_effort") is not None
+                    or receipt.get("runtime_metadata_provenance")
+                    != "unavailable"
+                ):
+                    raise DispatchError(
+                        "analysis_package_runtime_identity_invalid"
+                    )
+            else:
+                raise DispatchError(
+                    "analysis_package_runtime_identity_invalid"
+                )
+            row_has_issues = bool(
+                raw_row.get("normalization_status") == "incomplete"
+                or warning_count
+            )
+            quality_issues = quality_issues or row_has_issues
+            authority_rows.append(
+                {
+                    "stage": expected_stage,
+                    "requested_model": expected_model,
+                    "requested_reasoning_effort": "max",
+                    "runtime_identity_status": identity_status,
+                    "runtime_model": receipt.get("runtime_model"),
+                    "runtime_reasoning_effort": receipt.get(
+                        "runtime_reasoning_effort"
+                    ),
+                    "runtime_metadata_provenance": receipt.get(
+                        "runtime_metadata_provenance"
+                    ),
+                    "duration_ms": int(receipt.get("duration_ms") or 0),
+                    "semantic_stage_count": semantic_count,
+                    "provider_request_count": provider_count,
+                    "mcp_tool_call_count": mcp_count,
+                    "model_call_count": model_count,
+                    "raw_output_sha256": raw_sha,
+                    "raw_output_ref": raw_ref,
+                    "report_sha256": report_sha,
+                    "report_ref": report_ref,
+                    "analysis_execution_receipt_sha256": (
+                        analysis_execution_sha
+                    ),
+                    "analysis_execution_receipt_ref": (
+                        analysis_execution_ref
+                    ),
+                    "analysis_normalization_receipt_sha256": (
+                        analysis_normalization_sha
+                    ),
+                    "analysis_normalization_receipt_ref": (
+                        analysis_normalization_ref
+                    ),
+                    "stage_execution_receipt_sha256": stage_execution_sha,
+                    "stage_execution_receipt_ref": stage_execution_ref,
+                    "stage_normalization_receipt_sha256": (
+                        stage_normalization_sha
+                    ),
+                    "stage_normalization_receipt_ref": (
+                        stage_normalization_ref
+                    ),
+                    "normalization_status": raw_row.get(
+                        "normalization_status"
+                    ),
+                    "normalization_warning_count": warning_count,
+                    "normalization_warnings": [
+                        copy.deepcopy(dict(warning))
+                        for warning in warning_rows
+                    ],
+                    "provider_process_identity_sha256": process_identity,
+                    "provider_process_exit_sha256": process_exit,
+                    "provider_returncode": 0,
+                    "execution_status": "succeeded",
+                    "quality_status": (
+                        "issues_found" if row_has_issues else "passed"
+                    ),
+                    "report_disposition": (
+                        "needs_sol_review"
+                        if row_has_issues
+                        else "accepted"
+                    ),
+                    "formal_write_count": 0,
+                }
+            )
+            provider_total += provider_count
+            mcp_total += mcp_count
+            semantic_total += semantic_count
+        if (
+            semantic_total != result.semantic_stage_count
+            or provider_total != result.provider_request_count
+            or mcp_total != result.mcp_tool_call_count
+        ):
+            raise DispatchError("analysis_package_count_mismatch")
+        return {
+            "schema_version": "study-intake-analysis-package-authority-v1",
+            "analysis_package_id": package.get("package_id"),
+            "analysis_package_sha256": package.get("package_sha256"),
+            "analysis_package_ref": package.get("package_ref"),
+            "stage_order": [stage for stage, _model in expected_stages],
+            "stages": authority_rows,
+            "execution_status": "succeeded",
+            "quality_status": (
+                "issues_found" if quality_issues else "passed"
             ),
-            None,
+            "report_disposition": (
+                "needs_sol_review" if quality_issues else "accepted"
+            ),
+            "report_available": True,
+            "sol_review_status": (
+                "pending" if quality_issues else "not_required"
+            ),
+            "formal_write_count": 0,
+        }
+
+    def _analysis_package_stage_result(
+        self, result: ModelResult, stage: str
+    ) -> StageResult:
+        authority = self._analysis_package_authority(result)
+        package_stage = (
+            "terra_analysis" if stage == "analysis" else "terra_final"
         )
-        if not isinstance(row, Mapping):
-            raise DispatchError("analysis_package_stage_missing")
+        row = next(
+            value
+            for value in authority["stages"]
+            if value["stage"] == package_stage
+        )
+        warning_rows = tuple(
+            copy.deepcopy(dict(warning))
+            for warning in row["normalization_warnings"]
+        )
         return StageResult(
             payload={
                 "stage": stage,
-                "analysis_package_id": package.get("package_id"),
-                "analysis_package_sha256": package["package_sha256"],
-                "analysis_package_ref": package["package_ref"],
-                "analysis_report_sha256": row.get("report_sha256"),
-                "analysis_report_ref": row.get("report_ref"),
-                "analysis_raw_output_sha256": row.get("raw_output_sha256"),
-                "analysis_raw_output_ref": row.get("raw_output_ref"),
-                "normalization_status": row.get("normalization_status"),
+                "analysis_package_id": authority["analysis_package_id"],
+                "analysis_package_sha256": authority[
+                    "analysis_package_sha256"
+                ],
+                "analysis_package_ref": authority["analysis_package_ref"],
+                "analysis_package_stage": copy.deepcopy(row),
+                "analysis_package_authority": (
+                    copy.deepcopy(authority)
+                    if stage == "analysis"
+                    else None
+                ),
                 "formal_write_count": 0,
             },
-            runtime_model=None,
-            runtime_reasoning_effort=None,
-            runtime_metadata_provenance="unavailable",
-            runtime_identity_status="requested_unverified",
-            duration_ms=0,
+            runtime_model=row["runtime_model"],
+            runtime_reasoning_effort=row["runtime_reasoning_effort"],
+            runtime_metadata_provenance=row[
+                "runtime_metadata_provenance"
+            ],
+            runtime_identity_status=row["runtime_identity_status"],
+            duration_ms=row["duration_ms"],
+            semantic_stage_count=1,
+            provider_request_count=row["provider_request_count"],
+            mcp_tool_call_count=row["mcp_tool_call_count"],
+            model_call_count=row["model_call_count"],
+            raw_output_object_sha256=row["raw_output_sha256"],
+            raw_output_object_ref=row["raw_output_ref"],
+            stage_execution_receipt_sha256=row[
+                "stage_execution_receipt_sha256"
+            ],
+            stage_execution_receipt_ref=row[
+                "stage_execution_receipt_ref"
+            ],
+            stage_normalization_receipt_sha256=row[
+                "stage_normalization_receipt_sha256"
+            ],
+            stage_normalization_receipt_ref=row[
+                "stage_normalization_receipt_ref"
+            ],
+            normalization_status=(
+                "normalized_with_warnings"
+                if row["normalization_status"] == "incomplete"
+                or warning_rows
+                else "normalized"
+            ),
+            normalization_warning_count=len(warning_rows),
+            normalization_warnings=warning_rows,
+            requested_model=row["requested_model"],
+            requested_reasoning_effort=row[
+                "requested_reasoning_effort"
+            ],
+            analysis_package_stages=(
+                tuple(
+                    copy.deepcopy(dict(value))
+                    for value in authority["stages"]
+                )
+                if stage == "analysis"
+                else ()
+            ),
         )
 
     def run_analysis(
@@ -2204,6 +2633,11 @@ class CoreCandidateRunner:
             analysis_stage = self._analysis_package_stage_result(
                 result, "analysis"
             )
+            analysis_authority = analysis_stage.payload.get(
+                "analysis_package_authority"
+            )
+            if not isinstance(analysis_authority, Mapping):
+                raise DispatchError("analysis_package_authority_missing")
             self._analysis_package_critical = (
                 self._analysis_package_stage_result(
                     result, "critical_review"
@@ -2217,6 +2651,14 @@ class CoreCandidateRunner:
                 "package_ref": result.analysis.get("package_ref"),
                 "formal_write_count": 0,
             }
+            if analysis_authority.get("quality_status") == "issues_found":
+                self.terminal_outcome = "succeeded"
+                self.terminal_error_code = None
+                self.terminal_quality_error_code = (
+                    "analysis_package_needs_review"
+                )
+                self.terminal_report_disposition = "needs_sol_review"
+                self.terminal_review_stage_count = 3
             return analysis_stage
         if self._record_direct_stage_events:
             worker.runner._execute_prompt = _DirectStageEventRecorder(

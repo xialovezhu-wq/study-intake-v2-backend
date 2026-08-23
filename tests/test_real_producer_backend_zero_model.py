@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import hashlib
 import importlib.util
 import json
@@ -21,6 +22,31 @@ CANONICAL_ROOT = ROOT.parent
 MATH_ROOT = CANONICAL_ROOT / "kaoyan-math"
 CS408_ROOT = CANONICAL_ROOT / "kaoyan-408"
 ENGLISH_ROOT = CANONICAL_ROOT / "kaoyan-english"
+ACTUAL_ROOTS = {
+    "math": Path(
+        os.environ.get(
+            "STUDY_INTAKE_ACTUAL_MATH_ROOT",
+            Path.home() / "Documents/kaoyan-math",
+        )
+    ),
+    "cs408": Path(
+        os.environ.get(
+            "STUDY_INTAKE_ACTUAL_CS408_ROOT",
+            Path.home() / "Documents/kaoyan-408",
+        )
+    ),
+    "english": Path(
+        os.environ.get(
+            "STUDY_INTAKE_ACTUAL_ENGLISH_ROOT",
+            Path.home() / "Documents/kaoyan-english",
+        )
+    ),
+}
+DESCRIPTOR_RELATIVE_PATHS = {
+    "math": Path("数学一回滚复习系统/schema/producer-binding-v1.json"),
+    "cs408": Path("schema/producer-binding-v1.json"),
+    "english": Path("schema/english_pipeline/producer-binding-v1.json"),
+}
 for directory in (ROOT / "lib", ROOT / "bin", ROOT / "tests"):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
@@ -28,6 +54,7 @@ for directory in (ROOT / "lib", ROOT / "bin", ROOT / "tests"):
 from concurrent_dispatch import (  # noqa: E402
     ConcurrentDispatcher,
     FrozenTask,
+    LeaseStore,
     StageResult,
 )
 from core_dispatch_bridge import scan_eligible_candidates  # noqa: E402
@@ -35,8 +62,10 @@ from preprocessor_core import (  # noqa: E402
     Candidate,
     Cs408Adapter,
     EnglishAdapter,
+    LOADED_CORE_SHA256,
     MathAdapter,
 )
+from preprocess_dispatcher import ProductionDispatchRuntime  # noqa: E402
 from tests import test_english_adapter as backend_english_tests  # noqa: E402
 
 
@@ -49,6 +78,10 @@ EXPECTED_MAIN_HEADS = {
 }
 SUBJECT_REPOS_AVAILABLE = all(
     path.is_dir() for path in (MATH_ROOT, CS408_ROOT, ENGLISH_ROOT)
+)
+ACTUAL_PRODUCERS_AVAILABLE = all(
+    (root / DESCRIPTOR_RELATIVE_PATHS[subject]).is_file()
+    for subject, root in ACTUAL_ROOTS.items()
 )
 
 
@@ -144,6 +177,32 @@ class BoundaryRunner:
         return self.stage("critical_review", task)
 
 
+class ImmediateZeroModelRunner:
+    @staticmethod
+    def stage(stage: str, task: FrozenTask) -> StageResult:
+        return StageResult(
+            payload={"stage": stage, "unit_sha256": task.unit_sha256},
+            runtime_model="gpt-5.6-luna",
+            runtime_reasoning_effort="max",
+            runtime_metadata_provenance="codex_json_attestation_v1",
+            runtime_identity_status="confirmed",
+            duration_ms=1,
+        )
+
+    def run_analysis(
+        self, task: FrozenTask, _context: object
+    ) -> StageResult:
+        return self.stage("analysis", task)
+
+    def run_critical_review(
+        self,
+        task: FrozenTask,
+        _draft: Mapping[str, Any],
+        _context: object,
+    ) -> StageResult:
+        return self.stage("critical_review", task)
+
+
 def nonzero_formal_write_values(value: Any) -> list[Any]:
     found: list[Any] = []
     if isinstance(value, Mapping):
@@ -169,6 +228,174 @@ def tree_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_lf_sha256(value: Any) -> str:
+    payload = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def actual_descriptor(subject: str) -> tuple[Path, dict[str, Any]]:
+    root = ACTUAL_ROOTS[subject]
+    path = root / DESCRIPTOR_RELATIVE_PATHS[subject]
+    if not path.is_file():
+        raise AssertionError(f"H4_SKIPPED_MISSING_ACTUAL_ROOT:{subject}")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    core = {
+        key: copy.deepcopy(item)
+        for key, item in value.items()
+        if key != "descriptor_content_sha256"
+    }
+    if (
+        value.get("schema_version") != "producer_binding_descriptor_v1"
+        or value.get("subject") != subject
+        or value.get("formal_write_count") != 0
+        or value.get("descriptor_content_sha256")
+        != canonical_lf_sha256(core)
+    ):
+        raise AssertionError(f"actual descriptor invalid: {subject}")
+    source_rows = value.get("producer", {}).get("source_files")
+    if not isinstance(source_rows, list) or not source_rows:
+        raise AssertionError(f"actual source closure missing: {subject}")
+    normalized_sources = []
+    for row in source_rows:
+        source_path = Path(str(row.get("path") or ""))
+        if (
+            not source_path.is_file()
+            or sha256_file(source_path) != row.get("sha256")
+        ):
+            raise AssertionError(f"actual source drift: {subject}:{source_path}")
+        normalized_sources.append(
+            {"path": str(source_path), "sha256": row["sha256"]}
+        )
+    if value["producer"].get("source_closure_sha256") != canonical_lf_sha256(
+        normalized_sources
+    ):
+        raise AssertionError(f"actual source closure invalid: {subject}")
+    contract_rows = value.get("capture_contract", {}).get("files")
+    if not isinstance(contract_rows, list) or not contract_rows:
+        raise AssertionError(f"actual capture contract missing: {subject}")
+    for row in contract_rows:
+        contract_path = Path(str(row.get("path") or ""))
+        if (
+            not contract_path.is_file()
+            or sha256_file(contract_path) != row.get("sha256")
+        ):
+            raise AssertionError(
+                f"actual capture contract drift: {subject}:{contract_path}"
+            )
+    return path, value
+
+
+def install_actual_descriptor_overlay(
+    subject: str, fixture_root: Path
+) -> dict[str, Any]:
+    fixture_root = fixture_root.resolve()
+    actual_root = ACTUAL_ROOTS[subject].resolve()
+    actual_path, descriptor = actual_descriptor(subject)
+    source_preimage = {
+        str(Path(row["path"])): sha256_file(Path(row["path"]))
+        for row in descriptor["producer"]["source_files"]
+    }
+    overlay = copy.deepcopy(descriptor)
+    source_rows: list[dict[str, str]] = []
+    for row in descriptor["producer"]["source_files"]:
+        source = Path(row["path"])
+        relative = source.relative_to(actual_root)
+        target = fixture_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        source_rows.append(
+            {"path": str(target), "sha256": sha256_file(target)}
+        )
+    overlay["producer"]["source_files"] = source_rows
+    overlay["producer"]["source_closure_sha256"] = canonical_lf_sha256(
+        source_rows
+    )
+    binding_root = fixture_root / ".h4-production-binding"
+    skill_rows = overlay["foreground_skill"]
+    for role in ("authoritative", "installed"):
+        source = Path(skill_rows[f"{role}_path"])
+        target = binding_root / "skills" / role / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        skill_rows[f"{role}_path"] = str(target)
+        skill_rows[f"{role}_sha256"] = sha256_file(target)
+    contract_rows: list[dict[str, str]] = []
+    for index, row in enumerate(descriptor["capture_contract"]["files"]):
+        source = Path(row["path"])
+        target = binding_root / "contracts" / f"{index:02d}-{source.name}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        contract_rows.append(
+            {"path": str(target), "sha256": sha256_file(target)}
+        )
+    overlay["capture_contract"]["files"] = contract_rows
+    overlay["capture_contract"]["files_sha256"] = canonical_lf_sha256(
+        contract_rows
+    )
+    overlay_core = {
+        key: copy.deepcopy(value)
+        for key, value in overlay.items()
+        if key != "descriptor_content_sha256"
+    }
+    overlay["descriptor_content_sha256"] = canonical_lf_sha256(
+        overlay_core
+    )
+    descriptor_path = fixture_root / DESCRIPTOR_RELATIVE_PATHS[subject]
+    descriptor_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor_path.write_text(
+        json.dumps(overlay, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    attestation_root = fixture_root / str(
+        overlay["attestation_relative_root"]
+    )
+    if attestation_root.exists():
+        shutil.rmtree(attestation_root)
+    lock = {
+        "foreground_capture_contracts": {
+            subject: {
+                "descriptor_path": str(descriptor_path),
+                "descriptor_sha256": sha256_file(descriptor_path),
+                "attestation_required_after": overlay[
+                    "attestation_required_after"
+                ],
+                "producer_source_closure_sha256": overlay["producer"][
+                    "source_closure_sha256"
+                ],
+                "foreground_skill_sha256": overlay["foreground_skill"][
+                    "installed_sha256"
+                ],
+            }
+        },
+        "formal_write_count": 0,
+    }
+    lock_path = binding_root / "component-lock.json"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(lock, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "actual_descriptor_path": actual_path,
+        "actual_descriptor_sha256": sha256_file(actual_path),
+        "descriptor_path": descriptor_path,
+        "component_lock_path": lock_path,
+        "source_preimage": source_preimage,
+    }
+
+
 def forbidden_control_keys(value: Any) -> set[str]:
     forbidden = {
         "release_id",
@@ -190,8 +417,11 @@ def forbidden_control_keys(value: Any) -> set[str]:
 
 
 @unittest.skipUnless(
-    SUBJECT_REPOS_AVAILABLE,
-    "canonical Math, CS408, and English source repositories are required",
+    SUBJECT_REPOS_AVAILABLE and ACTUAL_PRODUCERS_AVAILABLE,
+    (
+        "H4_SKIPPED_MISSING_ACTUAL_ROOT: canonical and actual Math, CS408, "
+        "and English Producer repositories are required"
+    ),
 )
 class RealProducerBackendZeroModelTests(unittest.TestCase):
     def assert_canonical_main_sources(
@@ -357,6 +587,214 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
             **safety,
         }
 
+    def assert_actual_production_runtime_once(
+        self,
+        *,
+        subject: str,
+        fixture_root: Path,
+        worker: ActualAdapterWorker,
+        target_capture_id: str,
+        overlay: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        runtime_root = fixture_root.parent / f"h4-{subject}-runtime"
+        release_manifest = fixture_root.parent / f"h4-{subject}-release.json"
+        release_manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": "study-intake-preprocessor-release-v2",
+                    "release_id": RELEASE_ID,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        profile_name = {
+            "math": "math_deep_v2",
+            "cs408": "cs408_deep_v2",
+            "english": "english_two_pass_v1",
+        }[subject]
+        config = {
+            "execution_mode": "live_authorized",
+            "runtime_root": str(runtime_root),
+            "timezone": "Asia/Shanghai",
+            "release": {"manifest_path": str(release_manifest)},
+            "model": {
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+            },
+            "adapters": {
+                subject: {
+                    "enabled": True,
+                    "repo_root": str(fixture_root),
+                }
+            },
+            "dispatch": {
+                "production_canary": {
+                    "enabled": True,
+                    "status": "production_canary_active",
+                    "admission": "first_post_activation_producer_capture",
+                    "keep_backlog_drained": True,
+                    "post_activation_only": True,
+                    "initial_canary_inflight_limit": 1,
+                    "continuous_concurrency_limit": 20,
+                }
+            },
+            profile_name: {
+                "soft_runtime_warning_seconds": 60,
+                "stall_timeout_seconds": 60,
+                "stall_probe_interval_seconds": 1,
+                "stall_probe_required_consecutive_failures": 2,
+            },
+        }
+        runtime = ProductionDispatchRuntime(
+            config,
+            subject,
+            fixture_root.parent / f"h4-{subject}-config.json",
+            scan_worker_factory=lambda _config: worker,
+            ordinary_local_capture=True,
+        )
+        runtime.config["processing_plugin"] = {
+            "component_lock_path": str(overlay["component_lock_path"])
+        }
+        available = worker.eligible_candidates(
+            subject,
+            "2026-08-22",
+            capture_allowlist=None,
+            controlled_replay=False,
+        )
+        target = next(
+            row
+            for row, _reason in available
+            if row.capture_id == target_capture_id
+        )
+        exact_allowlist = (
+            frozenset(
+                str(capture_id)
+                for capture_id in target.input_binding.get(
+                    "capture_event_ids", []
+                )
+            )
+            if subject == "english"
+            and isinstance(
+                target.input_binding.get("capture_event_ids"), list
+            )
+            else frozenset({target_capture_id})
+        )
+        self.assertTrue(exact_allowlist)
+        processing_contract_sha256 = target.input_binding.get(
+            "processing_contract_sha256"
+        )
+        self.assertIsInstance(processing_contract_sha256, str)
+        self.assertIsInstance(target.recorded_at, str)
+        target_recorded_at = dt.datetime.fromisoformat(
+            str(target.recorded_at).replace("Z", "+00:00")
+        )
+        self.assertIsNotNone(target_recorded_at.utcoffset())
+        activated_at = (
+            target_recorded_at - dt.timedelta(seconds=1)
+        ).isoformat()
+        authority_core = {
+            "schema_version": "study-intake-producer-authority-v1",
+            "subject": subject,
+            "release_id": RELEASE_ID,
+            "loaded_core_sha256": LOADED_CORE_SHA256,
+            "processing_contract_sha256": processing_contract_sha256,
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+            "formal_write_count": 0,
+        }
+        producer_authority = {
+            **authority_core,
+            "authority_fingerprint": hashlib.sha256(
+                json.dumps(
+                    authority_core,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        store = runtime.dispatcher.lease_store
+        store.begin_subject_drain(subject)
+        store.activate_production_canary(
+            subject,
+            release_id=RELEASE_ID,
+            producer_authority=producer_authority,
+            activated_at=activated_at,
+            continuous_concurrency_limit=20,
+        )
+        runtime.dispatcher.runner_factory = (
+            lambda _task, _context: ImmediateZeroModelRunner()
+        )
+        fixture_preimage = tree_sha256(fixture_root)
+        source_preimage = dict(overlay["source_preimage"])
+        with (
+            mock.patch(
+                "preprocessor_core.CodexRunner._invoke_subprocess",
+                side_effect=AssertionError("real Provider path invoked"),
+            ) as provider_call,
+            mock.patch(
+                "preprocess_dispatcher.ProcessingPluginHost",
+                side_effect=AssertionError("production MCP host invoked"),
+            ) as mcp_host,
+            mock.patch("preprocess_dispatcher._write_subject_projections"),
+        ):
+            handles, decisions = runtime.scan_and_submit(
+                capture_allowlist=exact_allowlist
+            )
+            self.assertEqual(len(handles), 1, decisions)
+            self.assertTrue(runtime.dispatcher.drain(timeout=5))
+            results = [handle.wait(1) for handle in handles]
+            projected = runtime.persist_finished_luna(handles)
+        provider_call.assert_not_called()
+        mcp_host.assert_not_called()
+        self.assertEqual(len(projected), 1)
+        self.assertEqual(results[0].outcome, "succeeded")
+        completion = results[0].completion
+        assert isinstance(completion, Mapping)
+        self.assertEqual(completion["capture_id"], target_capture_id)
+        self.assertTrue(completion["package_ref"])
+        self.assertTrue(completion["report_json_ref"])
+        self.assertTrue(Path(completion["package_path"]).is_file())
+        verified = store.verify_authoritative_completion(
+            subject,
+            target_capture_id,
+            expected_release_id=RELEASE_ID,
+            expected_unit_sha256=results[0].unit_sha256,
+        )
+        self.assertEqual(
+            verified["completion"]["report_json_ref"],
+            completion["report_json_ref"],
+        )
+        history = store.verify_task_event_history(
+            results[0].unit_sha256,
+            expected_release_id=RELEASE_ID,
+        )
+        self.assertEqual(
+            sum(
+                row["event"].get("event") == "claim"
+                for row in history["events"]
+            ),
+            1,
+        )
+        self.assertEqual(tree_sha256(fixture_root), fixture_preimage)
+        for raw_path, digest in source_preimage.items():
+            self.assertEqual(sha256_file(Path(raw_path)), digest)
+        for path in runtime_root.rglob("*.json"):
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(nonzero_formal_write_values(value), [], path)
+        return {
+            "subject": subject,
+            "capture_id": target_capture_id,
+            "claim_count": 1,
+            "provider_request_count": 0,
+            "mcp_tool_call_count": 0,
+            "formal_write_count": 0,
+            "actual_descriptor_sha256": overlay[
+                "actual_descriptor_sha256"
+            ],
+        }
+
     def test_math_actual_quick_intake_to_backend_runner_boundary(self) -> None:
         self.assert_canonical_main_sources(
             MATH_ROOT,
@@ -391,19 +829,10 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 },
             ]
             receipt = case.invoke_record(payload)
+            overlay = install_actual_descriptor_overlay("math", case.base)
             copied_script = (
                 case.base
                 / "数学一回滚复习系统/scripts/quick_intake.py"
-            )
-            copied_script.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(
-                MATH_ROOT / "数学一回滚复习系统/scripts/quick_intake.py",
-                copied_script,
-            )
-            shutil.copy2(
-                MATH_ROOT
-                / "数学一回滚复习系统/scripts/producer_binding_attestation.py",
-                copied_script.with_name("producer_binding_attestation.py"),
             )
             adapter = MathAdapter(
                 {
@@ -427,6 +856,14 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 adapter.status,
                 transform=adapter.deep_candidate,
             )
+            h4 = self.assert_actual_production_runtime_once(
+                subject="math",
+                fixture_root=case.base,
+                worker=worker,
+                target_capture_id=receipt["event_id"],
+                overlay=overlay,
+            )
+            self.assertEqual(h4["provider_request_count"], 0)
             runtime = case.base / "isolated-backend-runtime"
             task, decisions = self.scan_actual(
                 runtime=runtime,
@@ -573,7 +1010,21 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 },
                 resolution,
             )
-            status_script = CS408_ROOT / "scripts/intake_fact_capture_408.py"
+            overlay = install_actual_descriptor_overlay(
+                "cs408", managed.repo
+            )
+            for name in (
+                "intake_lib_408.py",
+                "bounded_jsonl_index_408.py",
+                "linked_practice_source_408.py",
+                "question_source_attestation_408.py",
+                "review_feedback_loop.py",
+            ):
+                source = ACTUAL_ROOTS["cs408"] / "scripts" / name
+                target = managed.repo / "scripts" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            status_script = managed.repo / "scripts/intake_fact_capture_408.py"
             adapter = Cs408Adapter(
                 {
                     "enabled": True,
@@ -603,6 +1054,14 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 {"status_timeout_seconds": 10},
             )
             worker = ActualAdapterWorker("cs408", adapter, adapter.status)
+            h4 = self.assert_actual_production_runtime_once(
+                subject="cs408",
+                fixture_root=managed.repo,
+                worker=worker,
+                target_capture_id=receipt["capture_id"],
+                overlay=overlay,
+            )
+            self.assertEqual(h4["mcp_tool_call_count"], 0)
             runtime = Path(managed.tmp.name) / "isolated-backend-runtime"
             task, _decisions = self.scan_actual(
                 runtime=runtime,
@@ -886,6 +1345,17 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
             )
             assert isinstance(completion, dict)
             quick_flush = receipts[0]["quick_flush"]
+            overlay = install_actual_descriptor_overlay(
+                "english", adapter_case.repo
+            )
+            for source in sorted(
+                (ACTUAL_ROOTS["english"] / "english_pipeline").glob(
+                    "*.py"
+                )
+            ):
+                target = adapter_case.repo / "english_pipeline" / source.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
             english_config = copy.deepcopy(
                 adapter_case.config["adapters"]["english"]
             )
@@ -927,6 +1397,22 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 publish_evidence_readiness=False,
             )
             self.assertEqual(len(frozen), 2, decisions)
+            quick_flush_candidate = next(
+                row.candidate
+                for row in frozen
+                if row.task.frozen_payload["input_binding"].get(
+                    "batch_trigger"
+                )
+                == "explicit_quick_intake"
+            )
+            h4 = self.assert_actual_production_runtime_once(
+                subject="english",
+                fixture_root=adapter_case.repo,
+                worker=worker,
+                target_capture_id=quick_flush_candidate.capture_id,
+                overlay=overlay,
+            )
+            self.assertEqual(h4["formal_write_count"], 0)
             self.assertEqual(
                 sorted(
                     row.task.frozen_payload["input_binding"][

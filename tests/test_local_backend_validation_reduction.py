@@ -13,14 +13,21 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-for directory in (ROOT / "lib", ROOT / "bin", ROOT / "tests"):
+for directory in (
+    ROOT / "lib",
+    ROOT / "bin",
+    ROOT / "tests",
+    ROOT / "dashboard",
+):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
 from concurrent_dispatch import (  # noqa: E402
     ConcurrentDispatcher,
+    DispatchError,
     FrozenTask,
     LeaseStore,
+    StageResult,
     dispatch_rule_binding,
 )
 from core_dispatch_bridge import (  # noqa: E402
@@ -36,10 +43,16 @@ from live_execution_gate import (  # noqa: E402
 )
 from preprocessor_core import (  # noqa: E402
     Candidate,
+    LOADED_CORE_SHA256,
     ModelResult,
+    release_identity,
     sha256_value,
 )
-from preprocess_dispatcher import ProductionDispatchRuntime  # noqa: E402
+from preprocess_dispatcher import (  # noqa: E402
+    ProductionDispatchRuntime,
+    _run_once,
+)
+import server as dashboard_server  # noqa: E402
 from tests.test_foreground_skill_binding_v3 import (  # noqa: E402
     _build_subject_fixture,
 )
@@ -505,33 +518,472 @@ class ScannerReductionTests(unittest.TestCase):
         )
 
 
+class SourceOnlyRehearsalControlTests(unittest.TestCase):
+    class ZeroModelRunner:
+        @staticmethod
+        def _stage(stage: str, task: FrozenTask) -> StageResult:
+            return StageResult(
+                payload={"stage": stage, "unit_sha256": task.unit_sha256},
+                runtime_model="gpt-5.6-luna",
+                runtime_reasoning_effort="max",
+                runtime_metadata_provenance="codex_json_attestation_v1",
+                runtime_identity_status="confirmed",
+                duration_ms=1,
+            )
+
+        def run_analysis(
+            self, task: FrozenTask, _context: object
+        ) -> StageResult:
+            return self._stage("analysis", task)
+
+        def run_critical_review(
+            self,
+            task: FrozenTask,
+            _draft: object,
+            _context: object,
+        ) -> StageResult:
+            return self._stage("critical_review", task)
+
+    @staticmethod
+    def _config(runtime_root: Path) -> dict:
+        return OrdinaryLocalSubmitTests._config(runtime_root)
+
+    @staticmethod
+    def _producer_authority() -> dict:
+        core = {
+            "schema_version": "study-intake-producer-authority-v1",
+            "subject": "math",
+            "release_id": LOADED_CORE_SHA256,
+            "loaded_core_sha256": LOADED_CORE_SHA256,
+            "processing_contract_sha256": PROCESSING_CONTRACT,
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+            "formal_write_count": 0,
+        }
+        return {**core, "authority_fingerprint": sha256_value(core)}
+
+    def test_source_only_exact_run_once_uses_existing_high_water(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            runtime_root = root / "runtime"
+            config = self._config(runtime_root)
+            self.assertNotIn("release", config)
+            source_release_id, source_provenance = release_identity(config)
+            self.assertEqual(source_release_id, LOADED_CORE_SHA256)
+            self.assertEqual(source_provenance, "loaded_core_only")
+            producer_fixture = _build_subject_fixture(
+                root, "math", "source-only-rehearsal"
+            )
+            descriptor_path = producer_fixture["descriptor"]
+            descriptor = json.loads(
+                descriptor_path.read_text(encoding="utf-8")
+            )
+            descriptor["attestation_required_after"] = (
+                "2099-01-01T00:00:00Z"
+            )
+            descriptor_core = {
+                key: value
+                for key, value in descriptor.items()
+                if key != "descriptor_content_sha256"
+            }
+            descriptor["descriptor_content_sha256"] = hashlib.sha256(
+                (
+                    json.dumps(
+                        descriptor_core,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest()
+            descriptor_path.write_text(
+                json.dumps(descriptor, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            config["adapters"] = {
+                "math": {
+                    "enabled": True,
+                    "repo_root": str(producer_fixture["root"]),
+                }
+            }
+            cutoff = "2026-08-22T10:00:00+08:00"
+
+            def math_candidate(
+                index: int, capture_id: str, recorded_at: str
+            ) -> Candidate:
+                template = core_candidate(index, subject="math")
+                return Candidate(
+                    **{
+                        **template.__dict__,
+                        "capture_id": capture_id,
+                        "study_date": "2026-08-22",
+                        "recorded_at": recorded_at,
+                        "input_fingerprint": hashlib.sha256(
+                            capture_id.encode("utf-8")
+                        ).hexdigest(),
+                        "input_binding": {
+                            **template.input_binding,
+                            "original_content_hash": hashlib.sha256(
+                                f"source:{capture_id}".encode("utf-8")
+                            ).hexdigest(),
+                        },
+                    }
+                )
+
+            target = math_candidate(
+                950,
+                "MFI-CAP-SOURCE-ONLY-TARGET",
+                "2026-08-22T10:00:02+08:00",
+            )
+            sibling = math_candidate(
+                951,
+                "MFI-CAP-SOURCE-ONLY-SIBLING",
+                "2026-08-22T10:00:03+08:00",
+            )
+            historical = math_candidate(
+                952,
+                "MFI-CAP-SOURCE-ONLY-HISTORICAL",
+                "2026-08-22T10:00:00+08:00",
+            )
+            scanner = make_scanner_worker_factory(
+                release_id=LOADED_CORE_SHA256,
+                eligible_candidates=[
+                    (historical, "new"),
+                    (target, "new"),
+                    (sibling, "new"),
+                ],
+                scan_statuses={
+                    "math": {
+                        "pending": [
+                            {
+                                "event_id": historical.capture_id,
+                                "recorded_at": historical.recorded_at,
+                                "study_date": historical.study_date,
+                            },
+                            {
+                                "event_id": "MFI-CAP-SOURCE-ONLY-INVALID",
+                                "recorded_at": "invalid",
+                                "study_date": "2026-08-22",
+                            },
+                            {
+                                "event_id": target.capture_id,
+                                "recorded_at": target.recorded_at,
+                                "study_date": target.study_date,
+                            },
+                            {
+                                "event_id": sibling.capture_id,
+                                "recorded_at": sibling.recorded_at,
+                                "study_date": sibling.study_date,
+                            },
+                        ]
+                    }
+                },
+                adapters={
+                    "math": SimpleNamespace(
+                        candidate_diagnostics={},
+                        candidate_errors={},
+                    )
+                },
+            )
+            runtime = ProductionDispatchRuntime(
+                config,
+                "math",
+                root / "config.json",
+                scan_worker_factory=scanner,
+                ordinary_local_capture=True,
+            )
+            self.assertFalse(runtime.production_canary)
+            runtime.dispatcher.lease_store.begin_subject_drain("math")
+            runtime.dispatcher.lease_store.activate_production_canary(
+                "math",
+                release_id=LOADED_CORE_SHA256,
+                producer_authority=self._producer_authority(),
+                activated_at=cutoff,
+                continuous_concurrency_limit=20,
+            )
+            gate = (
+                runtime.dispatcher.lease_store.production_canary_status_read_only(
+                    "math",
+                    expected_release_id=LOADED_CORE_SHA256,
+                )
+            )
+            assert gate is not None
+            self.assertEqual(gate["state"], "armed")
+            self.assertEqual(
+                gate["producer_high_watermark"]["recorded_at"], cutoff
+            )
+            self.assertEqual(
+                gate["release_id"], LOADED_CORE_SHA256
+            )
+
+            _frozen, visibility = scan_eligible_candidates(
+                {
+                    **config,
+                    "runtime_root": str(root / "visibility-runtime"),
+                },
+                "math",
+                worker_factory=scanner,
+                producer_recorded_after=cutoff,
+                publish_evidence_readiness=False,
+            )
+            visibility_by_capture = {
+                row.get("capture_id"): row for row in visibility
+            }
+            self.assertEqual(
+                visibility_by_capture[historical.capture_id]["phase"],
+                "historical_cutoff",
+            )
+            self.assertEqual(
+                visibility_by_capture[
+                    "MFI-CAP-SOURCE-ONLY-INVALID"
+                ]["phase"],
+                "needs_review",
+            )
+
+            runtime.dispatcher.runner_factory = (
+                lambda _task, _context: self.ZeroModelRunner()
+            )
+            original_scan_and_submit = runtime.scan_and_submit
+            captured_decisions: list[dict] = []
+
+            def capture_scan_and_submit(**kwargs: object):
+                handles, decisions = original_scan_and_submit(**kwargs)
+                captured_decisions.extend(decisions)
+                return handles, decisions
+
+            runtime.scan_and_submit = capture_scan_and_submit  # type: ignore[method-assign]
+            with (
+                mock.patch(
+                    "preprocess_dispatcher.ProductionDispatchRuntime",
+                    return_value=runtime,
+                ),
+                mock.patch(
+                    "preprocess_dispatcher._write_subject_projections"
+                ),
+                mock.patch(
+                    "preprocessor_core.CodexRunner._invoke_subprocess",
+                    side_effect=AssertionError("Provider tripwire invoked"),
+                ) as provider_tripwire,
+                mock.patch(
+                    "preprocess_dispatcher.ProcessingPluginHost",
+                    side_effect=AssertionError("MCP tripwire invoked"),
+                ) as mcp_tripwire,
+            ):
+                result = _run_once(
+                    config,
+                    "math",
+                    root / "config.json",
+                    capture_id=target.capture_id,
+                )
+            self.assertEqual(result["status"], "drained")
+            self.assertEqual(
+                result["eligible_count"],
+                1,
+                {"calls": scanner.calls, "decisions": captured_decisions},
+            )
+            self.assertEqual(
+                result["results"][0]["completion"]["capture_id"],
+                target.capture_id,
+            )
+            self.assertNotEqual(
+                result["results"][0]["completion"]["capture_id"],
+                sibling.capture_id,
+            )
+            self.assertTrue(
+                result["results"][0]["completion"]["report_json_ref"]
+            )
+            self.assertEqual(result["formal_write_count"], 0)
+            provider_tripwire.assert_not_called()
+            mcp_tripwire.assert_not_called()
+            scanner_calls = [
+                row
+                for row in scanner.calls
+                if row["method"] == "eligible_candidates"
+            ]
+            self.assertEqual(
+                scanner_calls[-1]["kwargs"]["capture_allowlist"],
+                frozenset({target.capture_id}),
+            )
+            queue_root = (
+                runtime_root
+                / "dispatch/state/production-canary-queue"
+            )
+            self.assertEqual(
+                list(queue_root.rglob("*.json"))
+                if queue_root.exists()
+                else [],
+                [],
+            )
+
+
 class OrdinaryLocalSubmitTests(unittest.TestCase):
+    @staticmethod
+    def _config(runtime_root: Path) -> dict:
+        return {
+            "execution_mode": "live_authorized",
+            "runtime_root": str(runtime_root),
+            "timezone": "Asia/Shanghai",
+            "model": {
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+            },
+            "dispatch": {
+                "production_canary": {
+                    "enabled": True,
+                    "status": "production_canary_active",
+                    "admission": "first_post_activation_producer_capture",
+                    "keep_backlog_drained": True,
+                    "post_activation_only": True,
+                    "initial_canary_inflight_limit": 1,
+                    "continuous_concurrency_limit": 20,
+                }
+            },
+            "math_deep_v2": {
+                "soft_runtime_warning_seconds": 60,
+                "stall_timeout_seconds": 60,
+                "stall_probe_interval_seconds": 1,
+                "stall_probe_required_consecutive_failures": 2,
+            },
+        }
+
+    def _runtime(self, runtime_root: Path) -> ProductionDispatchRuntime:
+        return ProductionDispatchRuntime(
+            self._config(runtime_root),
+            "math",
+            runtime_root.parent / "config.json",
+            ordinary_local_capture=True,
+        )
+
+    def test_signed_operational_control_gates_ordinary_scan_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime_root = Path(temporary).resolve() / "runtime"
+            runtime = self._runtime(runtime_root)
+            status = {
+                "draining": True,
+                "active_count": 0,
+                "claimed_total": 0,
+            }
+            states = {
+                "armed": (True, True, "running"),
+                "failed_drained": (False, False, "paused"),
+                "paused_drained": (False, False, "paused"),
+                "consumer_disabled": (False, False, "paused"),
+            }
+            for label, (expected_allowed, consumer_enabled, daemon_status) in (
+                ("armed", states["armed"]),
+                ("failed_drained", states["failed_drained"]),
+                ("paused_drained", states["paused_drained"]),
+                ("consumer_disabled", states["consumer_disabled"]),
+            ):
+                with self.subTest(state=label):
+                    gate_state = "armed" if label == "consumer_disabled" else label
+                    gate = {
+                        "schema_version": "study-intake-production-canary-state-v3",
+                        "status": "production_canary_active",
+                        "subject": "math",
+                        "release_id": LOADED_CORE_SHA256,
+                        "state": gate_state,
+                        "luna_consumer_enabled": consumer_enabled,
+                    }
+                    with mock.patch.object(
+                        runtime.dispatcher.lease_store,
+                        "production_canary_status_read_only",
+                        return_value=gate,
+                    ):
+                        control = runtime.ordinary_operational_control(status)
+                    self.assertEqual(control["allowed"], expected_allowed)
+                    self.assertEqual(control["daemon_status"], daemon_status)
+                    self.assertEqual(control["gate_state"], gate_state)
+
+    def test_run_once_obeys_same_pause_without_clearing_drain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime_root = Path(temporary).resolve() / "runtime"
+            config = self._config(runtime_root)
+            fake_runtime = mock.Mock()
+            fake_runtime.ordinary_operational_control.return_value = {
+                "allowed": False,
+                "reason": "ordinary_control_paused_drained",
+                "daemon_status": "paused",
+                "gate_state": "paused_drained",
+            }
+            fake_runtime.dispatcher.lease_store.subject_status.return_value = {
+                "draining": True,
+                "active_count": 0,
+                "claimed_total": 0,
+            }
+            fake_runtime.subject_sol.read_subject.return_value = {}
+            with (
+                mock.patch(
+                    "preprocess_dispatcher.ProductionDispatchRuntime",
+                    return_value=fake_runtime,
+                ),
+                mock.patch("preprocess_dispatcher._write_subject_projections"),
+            ):
+                result = _run_once(
+                    config,
+                    "math",
+                    Path(temporary).resolve() / "config.json",
+                )
+            fake_runtime.dispatcher.lease_store.clear_subject_drain.assert_not_called()
+            fake_runtime.scan_and_submit.assert_not_called()
+            self.assertEqual(result["status"], "paused")
+            self.assertEqual(result["eligible_count"], 0)
+
+    def test_armed_control_keeps_direct_submit_out_of_canary_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime_root = Path(temporary).resolve() / "runtime"
+            runtime_root.mkdir()
+            runtime = self._runtime(runtime_root)
+            frozen_candidate = candidate(
+                "math",
+                "MFI-CAP-ORDINARY-CONTROL-001",
+                "2026-08-22T12:30:00+08:00",
+            )
+            frozen_task = FrozenTask.from_candidate(frozen_candidate)
+            unit = EligibleFrozenCandidate(
+                frozen_task, frozen_candidate, "new_capture"
+            )
+            decision = {
+                "subject": "math",
+                "capture_id": frozen_candidate.capture_id,
+                "unit_sha256": frozen_task.unit_sha256,
+                "eligible": True,
+                "model_enqueue_allowed": True,
+                "formal_write_count": 0,
+            }
+            runtime._local_capture_recorded_after = mock.Mock(
+                return_value="2026-08-22T10:00:00+08:00"
+            )
+            runtime.ordinary_operational_control = mock.Mock(
+                return_value={
+                    "allowed": True,
+                    "reason": "ordinary_control_armed",
+                    "daemon_status": "running",
+                    "gate_state": "armed",
+                }
+            )
+            runtime.dispatcher.submit = mock.Mock(return_value=object())
+            runtime.dispatcher.lease_store.materialize_production_canary_task = (
+                mock.Mock()
+            )
+            with (
+                mock.patch(
+                    "preprocess_dispatcher.scan_eligible_candidates",
+                    return_value=([unit], [decision]),
+                ),
+                mock.patch("preprocess_dispatcher._write_subject_projections"),
+            ):
+                handles, _decisions = runtime.scan_and_submit()
+            self.assertEqual(len(handles), 1)
+            runtime.dispatcher.submit.assert_called_once_with(frozen_task)
+            runtime.dispatcher.lease_store.materialize_production_canary_task.assert_not_called()
+
     def test_live_daemon_mode_uses_existing_submit_without_canary_or_subject_admission(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime_root = Path(temporary).resolve() / "runtime"
             runtime_root.mkdir()
-            config = {
-                "execution_mode": "live_authorized",
-                "runtime_root": str(runtime_root),
-                "timezone": "Asia/Shanghai",
-                "dispatch": {
-                    "production_canary": {
-                        "enabled": True,
-                        "status": "production_canary_active",
-                        "admission": "first_post_activation_producer_capture",
-                        "keep_backlog_drained": True,
-                        "post_activation_only": True,
-                        "initial_canary_inflight_limit": 1,
-                        "continuous_concurrency_limit": 20,
-                    }
-                },
-                "math_deep_v2": {
-                    "soft_runtime_warning_seconds": 60,
-                    "stall_timeout_seconds": 60,
-                    "stall_probe_interval_seconds": 1,
-                    "stall_probe_required_consecutive_failures": 2,
-                },
-            }
+            config = self._config(runtime_root)
             frozen_candidate = candidate(
                 "math",
                 "MFI-CAP-ORDINARY-LOCAL-001",
@@ -578,6 +1030,14 @@ class OrdinaryLocalSubmitTests(unittest.TestCase):
             runtime._local_capture_recorded_after = mock.Mock(
                 return_value="2026-08-22T10:00:00+08:00"
             )
+            runtime.ordinary_operational_control = mock.Mock(
+                return_value={
+                    "allowed": True,
+                    "reason": "ordinary_control_armed",
+                    "daemon_status": "running",
+                    "gate_state": "armed",
+                }
+            )
             runtime._prepare_batch_before_submit = mock.Mock()
             with (
                 mock.patch(
@@ -610,8 +1070,12 @@ class OrdinaryLocalSubmitTests(unittest.TestCase):
         runtime = object.__new__(ProductionDispatchRuntime)
         runtime.subject = "math"
         runtime.ordinary_local_capture = True
+        runtime.production_canary = False
         runtime.subject_sol = mock.Mock()
         runtime.dispatcher = mock.Mock()
+        runtime._direct_controlled_candidates = {
+            "e" * 64: (object(), "actual_foreground_capture")
+        }
         completion = {
             "subject": "math",
             "capture_id": "MFI-CAP-LOCAL-COMPLETE-001",
@@ -631,15 +1095,18 @@ class OrdinaryLocalSubmitTests(unittest.TestCase):
             error_code=None,
         )
         handle = mock.Mock(done=True)
+        handle.unit_sha256 = "e" * 64
         handle.wait.return_value = result
 
-        projected = runtime._persist_finished_luna_unchecked([handle])
+        persisted = runtime.persist_finished_luna_with_status([handle])
+        projected = persisted["projected"]
 
         self.assertEqual(len(projected), 1)
         self.assertEqual(projected[0]["capture_id"], completion["capture_id"])
         self.assertEqual(projected[0]["package_ref"], completion["package_ref"])
         self.assertEqual(projected[0]["formal_write_count"], 0)
         runtime.subject_sol.record_verified_luna_completion.assert_not_called()
+        self.assertNotIn("e" * 64, runtime._direct_controlled_candidates)
 
 
 class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
@@ -657,51 +1124,182 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                 "lease_store": lease_store,
             }
 
-        def run(self, _candidate: Candidate) -> ModelResult:
-            stages = [
-                {
-                    "stage": stage,
-                    "report_sha256": digest,
-                    "report_ref": (
-                        "study-intake-analysis-stage-report://sha256/"
-                        + digest
+        def run(self, candidate_value: Candidate) -> ModelResult:
+            stages = []
+            for index, (stage, model) in enumerate(
+                (
+                    ("terra_analysis", "gpt-5.6-terra"),
+                    ("luna_analysis", "gpt-5.6-luna"),
+                    ("terra_final", "gpt-5.6-terra"),
+                ),
+                start=1,
+            ):
+                def digest(label: str) -> str:
+                    return hashlib.sha256(
+                        f"{stage}:{label}".encode("utf-8")
+                    ).hexdigest()
+
+                raw_digest = digest("raw")
+                report_digest = digest("report")
+                execution_digest = digest("analysis-execution")
+                normalization_digest = digest("analysis-normalization")
+                stage_execution_digest = digest("stage-execution")
+                stage_normalization_digest = digest("stage-normalization")
+                process_identity_digest = digest("process-identity")
+                process_exit_digest = digest("process-exit")
+                normalization_status = (
+                    "incomplete" if stage == "luna_analysis" else "complete"
+                )
+                warning_rows = (
+                    [
+                        {
+                            "code": "synthetic_luna_incomplete",
+                            "stage": stage,
+                            "kind": "normalization_warning",
+                        }
+                    ]
+                    if normalization_status == "incomplete"
+                    else []
+                )
+                receipt = {
+                    "status": "ready",
+                    "requested_model": model,
+                    "requested_reasoning_effort": "max",
+                    "runtime_model": model,
+                    "runtime_reasoning_effort": "max",
+                    "runtime_metadata_provenance": (
+                        "codex_json_attestation_v1"
                     ),
-                    "raw_output_sha256": raw_digest,
-                    "raw_output_ref": (
+                    "runtime_identity_status": "confirmed",
+                    "duration_ms": index,
+                    "semantic_stage_count": 1,
+                    "provider_request_count": index + 1,
+                    "mcp_tool_call_count": index,
+                    "model_call_count": 1,
+                    "raw_output_object_sha256": raw_digest,
+                    "raw_output_object_ref": (
                         "study-intake-model-stage-raw-output://sha256/"
                         + raw_digest
                     ),
-                    "normalization_status": "incomplete",
+                    "stage_execution_receipt_sha256": stage_execution_digest,
+                    "stage_execution_receipt_ref": (
+                        "study-intake-model-stage-execution://sha256/"
+                        + stage_execution_digest
+                    ),
+                    "stage_normalization_receipt_sha256": (
+                        stage_normalization_digest
+                    ),
+                    "stage_normalization_receipt_ref": (
+                        "study-intake-model-stage-normalization://sha256/"
+                        + stage_normalization_digest
+                    ),
+                    "normalization_status": normalization_status,
+                    "normalization_warning_count": len(warning_rows),
+                    "normalization_warnings": warning_rows,
+                    "provider_process_identity_sha256": (
+                        process_identity_digest
+                    ),
+                    "provider_process_exit_sha256": process_exit_digest,
+                    "provider_returncode": 0,
+                    "execution_status": "completed",
+                    "formal_write_count": 0,
                 }
-                for stage, digest, raw_digest in (
-                    ("terra_analysis", "1" * 64, "2" * 64),
-                    ("luna_analysis", "3" * 64, "4" * 64),
-                    ("terra_final", "5" * 64, "6" * 64),
+                receipt_sha256 = hashlib.sha256(
+                    (
+                        json.dumps(
+                            receipt,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                ).hexdigest()
+                stages.append(
+                    {
+                        "stage": stage,
+                        "requested_model": model,
+                        "requested_reasoning_effort": "max",
+                        "read_only": True,
+                        "report_sha256": report_digest,
+                        "report_ref": (
+                            "study-intake-analysis-stage-report://sha256/"
+                            + report_digest
+                        ),
+                        "raw_output_sha256": raw_digest,
+                        "raw_output_ref": (
+                            "study-intake-model-stage-raw-output://sha256/"
+                            + raw_digest
+                        ),
+                        "execution_receipt_sha256": execution_digest,
+                        "execution_receipt_ref": (
+                            "study-intake-analysis-stage-execution-receipt://sha256/"
+                            + execution_digest
+                        ),
+                        "normalization_receipt_sha256": normalization_digest,
+                        "normalization_receipt_ref": (
+                            "study-intake-analysis-stage-normalization-receipt://sha256/"
+                            + normalization_digest
+                        ),
+                        "normalization_status": normalization_status,
+                        "runtime": {
+                            "requested_model": model,
+                            "requested_reasoning_effort": "max",
+                            "runtime_model": model,
+                            "runtime_reasoning_effort": "max",
+                            "runtime_metadata_provenance": (
+                                "codex_json_attestation_v1"
+                            ),
+                            "duration_ms": index,
+                        },
+                        "receipt": receipt,
+                        "receipt_sha256": receipt_sha256,
+                        "formal_write_count": 0,
+                    }
                 )
-            ]
             package = {
                 "schema_version": "study-intake-analysis-package-v1",
                 "package_id": "ANPKG-LOCAL-TERMINAL-001",
+                "capture_id": candidate_value.capture_id,
+                "subject": candidate_value.subject,
+                "study_date": candidate_value.study_date,
                 "package_sha256": "7" * 64,
                 "package_ref": (
                     "study-intake-analysis-package://sha256/" + "7" * 64
                 ),
+                "stage_order": [
+                    "terra_analysis",
+                    "luna_analysis",
+                    "terra_final",
+                ],
                 "stages": stages,
+                "warnings": ["synthetic_luna_incomplete"],
+                "status": "ready_for_nightly",
                 "formal_write_count": 0,
             }
             return ModelResult(
                 analysis=package,
-                duration_ms=3,
+                duration_ms=sum(
+                    row["receipt"]["duration_ms"] for row in stages
+                ),
                 runtime_model="gpt-5.6-terra",
                 runtime_reasoning_effort="max",
                 runtime_metadata_provenance="synthetic_zero_model",
                 pipeline_status="analysis_package_ready",
                 draft_analysis={"summary": "analysis"},
                 critical_review={"summary": "final"},
-                stage_receipts={},
+                stage_receipts={
+                    row["stage"]: row["receipt"] for row in stages
+                },
                 semantic_stage_count=3,
-                provider_request_count=0,
-                mcp_tool_call_count=0,
+                provider_request_count=sum(
+                    row["receipt"]["provider_request_count"]
+                    for row in stages
+                ),
+                mcp_tool_call_count=sum(
+                    row["receipt"]["mcp_tool_call_count"]
+                    for row in stages
+                ),
             )
 
     class FakeWorker:
@@ -764,7 +1362,7 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
 
             result = dispatcher.submit(task).wait(5)
 
-            self.assertEqual(result.outcome, "succeeded")
+            self.assertEqual(result.outcome, "succeeded", result.error_code)
             self.assertIsNotNone(result.completion)
             self.assertEqual(
                 result.completion["capture_id"],
@@ -773,6 +1371,115 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
             self.assertTrue(result.completion["package_ref"])
             self.assertTrue(result.completion["report_json_ref"])
             self.assertEqual(result.completion.get("formal_write_count", 0), 0)
+
+            receipt = json.loads(
+                Path(result.completion["receipt_path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            package = json.loads(
+                Path(result.completion["package_path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            authority = package["analysis"]["analysis_package_authority"]
+            self.assertEqual(authority["execution_status"], "succeeded")
+            self.assertEqual(authority["quality_status"], "issues_found")
+            self.assertEqual(
+                authority["report_disposition"], "needs_sol_review"
+            )
+            observed = receipt["observed_stage_runtime"]["analysis"]
+            stages = observed["analysis_package_stages"]
+            self.assertEqual(
+                [row["stage"] for row in stages],
+                ["terra_analysis", "luna_analysis", "terra_final"],
+            )
+            self.assertEqual(
+                [row["requested_model"] for row in stages],
+                ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-terra"],
+            )
+            self.assertTrue(
+                all(row["provider_process_identity_sha256"] for row in stages)
+            )
+            self.assertTrue(
+                all(row["provider_process_exit_sha256"] for row in stages)
+            )
+            projected, _, _, _ = dashboard_server._dispatch_stage_receipts(
+                receipt
+            )
+            self.assertEqual(
+                list(projected),
+                ["terra_analysis", "luna_analysis", "terra_final"],
+            )
+            self.assertEqual(
+                sum(row["provider_request_count"] for row in projected.values()),
+                sum(
+                    row["provider_request_count"]
+                    for row in authority["stages"]
+                ),
+            )
+
+            duplicate = dispatcher.submit(task).wait(1)
+            self.assertEqual(duplicate.status, "deduplicated")
+            self.assertEqual(
+                duplicate.completion["package_ref"],
+                result.completion["package_ref"],
+            )
+
+    def test_analysis_package_rejects_missing_authority_and_count_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary).resolve() / "runtime"
+            candidate_value = candidate(
+                "math",
+                "MFI-CAP-ANALYSIS-PACKAGE-INVALID-001",
+                "2026-08-22T12:45:00+08:00",
+            )
+            config = {
+                "execution_mode": "live_authorized",
+                "runtime_root": str(runtime),
+                "model": {
+                    "model": "gpt-5.6-luna",
+                    "reasoning_effort": "max",
+                },
+                "consumer_stage_chain": {"enabled": True},
+                "analysis_package_v1": {"enabled": True},
+            }
+            bridge = CoreCandidateRunner(
+                config,
+                candidate_value,
+                "actual_foreground_capture",
+                LeaseStore(runtime),
+            )
+            original = self.FakeAnalysisPackageRunner().run(candidate_value)
+            cases = {}
+            missing_raw = json.loads(json.dumps(original.analysis))
+            missing_raw["stages"][0].pop("raw_output_ref")
+            cases["missing_raw"] = ModelResult(
+                **{**original.__dict__, "analysis": missing_raw}
+            )
+            missing_process = json.loads(json.dumps(original.analysis))
+            missing_process["stages"][1]["receipt"].pop(
+                "provider_process_exit_sha256"
+            )
+            cases["missing_process"] = ModelResult(
+                **{**original.__dict__, "analysis": missing_process}
+            )
+            count_drift = ModelResult(
+                **{
+                    **original.__dict__,
+                    "provider_request_count": (
+                        original.provider_request_count + 1
+                    ),
+                }
+            )
+            cases["count_drift"] = count_drift
+            for label, model_result in cases.items():
+                with self.subTest(case=label), self.assertRaisesRegex(
+                    DispatchError, "analysis_package_"
+                ):
+                    bridge._analysis_package_stage_result(
+                        model_result, "analysis"
+                    )
 
 
 if __name__ == "__main__":

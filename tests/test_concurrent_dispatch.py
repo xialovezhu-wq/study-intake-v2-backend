@@ -2046,12 +2046,24 @@ class ConcurrentDispatchTests(unittest.TestCase):
                 "math": {
                     "pending": [
                         {
-                            "event_id": "OLD",
+                            "event_id": "BEFORE",
+                            "recorded_at": "2026-08-15T12:26:17Z",
+                            "study_date": "2026-08-15",
+                        },
+                        {
+                            "event_id": "EQUAL",
                             "recorded_at": "2026-08-15T12:26:18Z",
+                            "study_date": "2026-08-15",
+                        },
+                        {
+                            "event_id": "INVALID",
+                            "recorded_at": "not-a-timestamp",
+                            "study_date": "2026-08-15",
                         },
                         {
                             "event_id": "NEW",
                             "recorded_at": "2026-08-15T12:26:19Z",
+                            "study_date": "2026-08-15",
                         },
                     ]
                 }
@@ -2072,7 +2084,20 @@ class ConcurrentDispatchTests(unittest.TestCase):
             producer_recorded_after="2026-08-15T12:26:18Z",
         )
         self.assertEqual(frozen, [])
-        self.assertEqual(decisions, [])
+        self.assertEqual(
+            {
+                row["capture_id"]: (row["phase"], row["reason"])
+                for row in decisions
+            },
+            {
+                "BEFORE": ("historical_cutoff", "pre_cutoff_capture"),
+                "EQUAL": ("historical_cutoff", "pre_cutoff_capture"),
+                "INVALID": ("needs_review", "producer_recorded_at_invalid"),
+            },
+        )
+        self.assertTrue(
+            all(row["model_enqueue_allowed"] is False for row in decisions)
+        )
         self.assertEqual(
             [
                 row["kwargs"]["capture_allowlist"]

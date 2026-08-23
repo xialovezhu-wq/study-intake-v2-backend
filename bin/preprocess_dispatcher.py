@@ -144,7 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("run", help="long-running subject dispatcher")
-    subparsers.add_parser("run-once", help="scan and drain one subject batch")
+    run_once = subparsers.add_parser(
+        "run-once",
+        help="scan and drain one subject batch",
+        allow_abbrev=False,
+    )
+    run_once.add_argument(
+        "--capture-id",
+        help="restrict the ordinary scan to one exact existing Capture ID",
+    )
     subparsers.add_parser("status", help="read subject lease/drain status")
     subparsers.add_parser(
         "canary-readiness",
@@ -805,6 +813,10 @@ class ProductionDispatchRuntime:
             _production_canary_enabled(config)
             and not self.ordinary_local_capture
         )
+        self.ordinary_signed_control = bool(
+            self.ordinary_local_capture
+            and _production_canary_enabled(config)
+        )
         self.continuous_concurrency_limit = (
             int(config["dispatch"]["production_canary"][
                 "continuous_concurrency_limit"
@@ -875,7 +887,72 @@ class ProductionDispatchRuntime:
                 ]
             ),
             production_canary=self.production_canary,
+            ordinary_signed_control=self.ordinary_signed_control,
         )
+
+    def ordinary_operational_control(
+        self, status: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Reopen the signed subject control before an ordinary claim.
+
+        Ordinary Capture processing deliberately bypasses SubjectSol batches
+        and the legacy canary queue, but it does not bypass operator control.
+        An active signed canary state owns admission while its keep-backlog
+        drain remains present; otherwise the generic subject drain applies.
+        """
+
+        current = (
+            dict(status)
+            if isinstance(status, Mapping)
+            else self.dispatcher.lease_store.subject_status(self.subject)
+        )
+        gate_state: str | None = None
+        consumer_enabled: bool | None = None
+        if _production_canary_enabled(self.config):
+            configured_release_id, _ = release_identity(self.config)
+            gate = (
+                self.dispatcher.lease_store.production_canary_status_read_only(
+                    self.subject,
+                    expected_release_id=configured_release_id,
+                )
+            )
+            if isinstance(gate, Mapping):
+                gate_state = str(gate.get("state") or "") or None
+                consumer_enabled = gate.get("luna_consumer_enabled")
+            allowed = bool(
+                gate_state in {"armed", "continuous_concurrent_unlocked"}
+                and consumer_enabled is True
+            )
+            reason = (
+                "ordinary_control_armed"
+                if allowed and gate_state == "armed"
+                else "ordinary_control_continuous"
+                if allowed
+                else "ordinary_control_missing"
+                if gate_state is None
+                else f"ordinary_control_{gate_state}"
+                if gate_state
+                not in {"armed", "continuous_concurrent_unlocked"}
+                else "ordinary_control_consumer_disabled"
+                if consumer_enabled is not True
+                else "ordinary_control_blocked"
+            )
+        else:
+            allowed = current.get("draining") is not True
+            reason = (
+                "ordinary_control_running"
+                if allowed
+                else "ordinary_control_subject_drained"
+            )
+        return {
+            "allowed": allowed,
+            "reason": reason,
+            "daemon_status": "running" if allowed else "paused",
+            "gate_state": gate_state,
+            "consumer_enabled": consumer_enabled,
+            "draining": bool(current.get("draining")),
+            "formal_write_count": 0,
+        }
 
     def _local_capture_recorded_after(self) -> str:
         """Reuse the frozen deployment high-water without canary admission."""
@@ -3023,9 +3100,57 @@ class ProductionDispatchRuntime:
             )
         return decisions
 
-    def scan_and_submit(self) -> tuple[list[Any], list[dict[str, Any]]]:
+    def scan_and_submit(
+        self,
+        *,
+        capture_allowlist: frozenset[str] | None = None,
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
         if self.config.get("execution_mode") == "offline":
             raise DispatchError("offline_producer_scan_forbidden")
+        if capture_allowlist is not None and (
+            not capture_allowlist
+            or any(
+                not isinstance(capture_id, str) or not capture_id
+                for capture_id in capture_allowlist
+            )
+        ):
+            raise DispatchError("capture_allowlist_invalid")
+        if getattr(self, "ordinary_local_capture", False):
+            status = self.dispatcher.lease_store.subject_status(self.subject)
+            control = self.ordinary_operational_control(status)
+            if control["allowed"] is not True:
+                decisions = [
+                    {
+                        "subject": self.subject,
+                        "capture_id": (
+                            next(iter(capture_allowlist))
+                            if capture_allowlist is not None
+                            and len(capture_allowlist) == 1
+                            else None
+                        ),
+                        "study_date": current_date(
+                            str(self.config.get("timezone") or "UTC")
+                        ),
+                        "eligible": False,
+                        "reason": control["reason"],
+                        "error_code": control["reason"],
+                        "phase": "operational_control",
+                        "model_enqueue_allowed": False,
+                        "model_call_count": 0,
+                        "provider_request_count": 0,
+                        "mcp_tool_call_count": 0,
+                        "formal_write_count": 0,
+                    }
+                ]
+                _write_subject_projections(
+                    self.config,
+                    self.subject,
+                    daemon_status=str(control["daemon_status"]),
+                    decisions=decisions,
+                    lease_status=status,
+                    error_code=str(control["reason"]),
+                )
+                return [], decisions
         if self.production_canary:
             self.dispatcher.lease_store.reconcile_production_canary_preclaim_failures(
                 self.subject
@@ -3073,6 +3198,8 @@ class ProductionDispatchRuntime:
             scan_worker_factory = getattr(self, "_scan_worker_factory", None)
             if scan_worker_factory is not None:
                 scan_kwargs["worker_factory"] = scan_worker_factory
+            if capture_allowlist is not None:
+                scan_kwargs["capture_allowlist"] = capture_allowlist
             if getattr(self, "ordinary_local_capture", False):
                 scan_kwargs["producer_recorded_after"] = (
                     self._local_capture_recorded_after()
@@ -3603,6 +3730,11 @@ class ProductionDispatchRuntime:
                         "exception": exc,
                     }
                 )
+            finally:
+                if getattr(self, "ordinary_local_capture", False):
+                    self._direct_controlled_candidates.pop(
+                        unit_sha256, None
+                    )
         return {
             "projected": projected,
             "handled_units": handled_units,
@@ -3967,15 +4099,63 @@ class ProductionDispatchRuntime:
 
 
 def _run_once(
-    config: Mapping[str, Any], subject: str, config_path: Path
+    config: Mapping[str, Any],
+    subject: str,
+    config_path: Path,
+    *,
+    capture_id: str | None = None,
 ) -> dict[str, Any]:
     if config.get("execution_mode") == "offline":
         raise DispatchError("offline_run_once_forbidden")
     runtime = ProductionDispatchRuntime(
         config, subject, config_path, ordinary_local_capture=True
     )
-    runtime.dispatcher.lease_store.clear_subject_drain(subject)
-    handles, decisions = runtime.scan_and_submit()
+    initial_status = runtime.dispatcher.lease_store.subject_status(subject)
+    control = runtime.ordinary_operational_control(initial_status)
+    exact_allowlist = (
+        frozenset({capture_id}) if isinstance(capture_id, str) else None
+    )
+    if control["allowed"] is not True:
+        decisions = [
+            {
+                "subject": subject,
+                "capture_id": capture_id,
+                "study_date": current_date(
+                    str(config.get("timezone") or "UTC")
+                ),
+                "eligible": False,
+                "reason": control["reason"],
+                "error_code": control["reason"],
+                "phase": "operational_control",
+                "model_enqueue_allowed": False,
+                "model_call_count": 0,
+                "provider_request_count": 0,
+                "mcp_tool_call_count": 0,
+                "formal_write_count": 0,
+            }
+        ]
+        _write_subject_projections(
+            config,
+            subject,
+            daemon_status="paused",
+            decisions=decisions,
+            lease_status=initial_status,
+            error_code=str(control["reason"]),
+        )
+        return {
+            "schema_version": "study-intake-concurrent-run-once-v1",
+            "subject": subject,
+            "status": "paused",
+            "eligible_count": 0,
+            "results": [],
+            "lease_status": initial_status,
+            "subject_sol": runtime.subject_sol.read_subject(subject),
+            "control": control,
+            "formal_write_count": 0,
+        }
+    handles, decisions = runtime.scan_and_submit(
+        capture_allowlist=exact_allowlist
+    )
     runtime.dispatcher.drain()
     runtime.persist_finished_luna(handles)
     results = [handle.wait(0) for handle in handles]
@@ -4167,8 +4347,11 @@ def _run_daemon(
     }
     outstanding: list[Any] = []
 
-    def write_control_heartbeat() -> Mapping[str, Any]:
-        status = runtime.dispatcher.lease_store.subject_status(subject)
+    def daemon_operational_control(
+        status: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if getattr(runtime, "ordinary_local_capture", False):
+            return runtime.ordinary_operational_control(status)
         canary_gate = status.get("canary_gate")
         canary_control_alive = bool(
             runtime.production_canary
@@ -4176,15 +4359,22 @@ def _run_daemon(
             and canary_gate.get("status") == "production_canary_active"
             and canary_gate.get("state") != "inactive_rolled_back"
         )
-        daemon_status = (
-            "paused"
-            if status.get("draining") is True and not canary_control_alive
-            else "running"
+        allowed = bool(
+            status.get("draining") is not True or canary_control_alive
         )
+        return {
+            "allowed": allowed,
+            "daemon_status": "running" if allowed else "paused",
+            "formal_write_count": 0,
+        }
+
+    def write_control_heartbeat() -> Mapping[str, Any]:
+        status = runtime.dispatcher.lease_store.subject_status(subject)
+        control = daemon_operational_control(status)
         _write_subject_projections_resilient(
             config,
             subject,
-            daemon_status=daemon_status,
+            daemon_status=str(control["daemon_status"]),
             decisions=[],
             lease_status=status,
         )
@@ -4228,13 +4418,7 @@ def _run_daemon(
             decisions: list[dict[str, Any]] = []
             submitted = 0
             status = runtime.dispatcher.lease_store.subject_status(subject)
-            canary_gate = status.get("canary_gate")
-            canary_control_alive = bool(
-                runtime.production_canary
-                and isinstance(canary_gate, Mapping)
-                and canary_gate.get("status") == "production_canary_active"
-                and canary_gate.get("state") != "inactive_rolled_back"
-            )
+            control = daemon_operational_control(status)
             if config.get("execution_mode") == "offline":
                 _write_subject_projections_resilient(
                     config,
@@ -4257,7 +4441,7 @@ def _run_daemon(
                 )
                 stop.wait(_poll_interval(config, subject))
                 continue
-            if status.get("draining") is True and not canary_control_alive:
+            if control["allowed"] is not True:
                 _write_subject_projections_resilient(
                     config,
                     subject,
@@ -4387,7 +4571,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Path(str(config["runtime_root"]))
             )
             if args.command == "run-once":
-                value = _run_once(config, subject, args.config)
+                value = _run_once(
+                    config,
+                    subject,
+                    args.config,
+                    capture_id=args.capture_id,
+                )
                 code = 0 if all(
                     row["outcome"] in {"succeeded", None}
                     for row in value["results"]

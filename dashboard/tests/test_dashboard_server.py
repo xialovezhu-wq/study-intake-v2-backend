@@ -1241,7 +1241,18 @@ class DashboardServerTest(unittest.TestCase):
 
     def test_item_release_mismatch_isolated_as_diagnostic_placeholder(self) -> None:
         payload = json.loads(self.projection_path.read_text(encoding="utf-8"))
-        payload["subjects"]["math"]["items"][0]["release_id"] = "2" * 64
+        malformed = payload["subjects"]["math"]["items"][0]
+        malformed["release_id"] = "2" * 64
+        payload["subjects"]["math"]["counts"] = dashboard._v3_counts(
+            [
+                (
+                    dashboard._diagnostic_item_placeholder(item, "math")
+                    if item is malformed
+                    else item
+                )
+                for item in payload["subjects"]["math"]["items"]
+            ]
+        )
         self.projection_path.write_text(json.dumps(payload), encoding="utf-8")
 
         status, _, summary = self.json_request(
@@ -1984,6 +1995,17 @@ class DashboardServerTest(unittest.TestCase):
         malformed = payload["subjects"]["math"]["items"][0]
         malformed_capture_id = malformed["capture_id"]
         malformed["unexpected_backend_field"] = {"unsafe": "ignored"}
+        normalized_math_items = [
+            (
+                dashboard._diagnostic_item_placeholder(item, "math")
+                if item is malformed
+                else item
+            )
+            for item in payload["subjects"]["math"]["items"]
+        ]
+        payload["subjects"]["math"]["counts"] = dashboard._v3_counts(
+            normalized_math_items
+        )
         sibling_capture_ids = {
             item["capture_id"]
             for subject in payload["subjects"].values()
@@ -2014,6 +2036,24 @@ class DashboardServerTest(unittest.TestCase):
         self.assertFalse(placeholder["formal_write_eligible"])
         self.assertFalse(placeholder["production_accepted"])
 
+        summary_status, _, summary = self.json_request(
+            "GET", "/api/v1/summary?date=2026-08-04&subject=math"
+        )
+        self.assertEqual(summary_status, 200)
+        self.assertEqual(
+            {
+                key: summary["counts"][key]
+                for key in dashboard.V3_COUNT_KEYS
+            },
+            payload["subjects"]["math"]["counts"],
+        )
+        self.assertEqual(
+            summary["counts"]["terminal"],
+            summary["counts"]["quality_passed"]
+            + summary["counts"]["needs_rework"]
+            + summary["counts"]["failed"],
+        )
+
         detail_status, _, detail = self.json_request(
             "GET",
             f"/api/v1/items/{malformed_capture_id}?date=2026-08-04&subject=math",
@@ -2038,6 +2078,19 @@ class DashboardServerTest(unittest.TestCase):
             for item in subject["items"]
         }
         payload["subjects"]["math"]["items"].append([])
+        normalized = [
+            (
+                dashboard._diagnostic_item_placeholder({}, "math", ordinal=index)
+                if not isinstance(item, dict)
+                else item
+            )
+            for index, item in enumerate(
+                payload["subjects"]["math"]["items"]
+            )
+        ]
+        payload["subjects"]["math"]["counts"] = dashboard._v3_counts(
+            normalized
+        )
         self.projection_path.write_text(json.dumps(payload), encoding="utf-8")
 
         status, _, listing = self.json_request(
@@ -2056,6 +2109,24 @@ class DashboardServerTest(unittest.TestCase):
         health_status, _, health = self.json_request("GET", "/healthz")
         self.assertEqual(health_status, baseline_health_status)
         self.assertEqual(health.get("error"), baseline_health.get("error"))
+
+    def test_required_producer_selection_typo_fails_closed(self) -> None:
+        gate = self.production_canary_gate(
+            "math", state="canary_in_flight"
+        )
+        selection = gate["selected"]
+        assert isinstance(selection, dict)
+        selection["source_event_set_sh256"] = selection.pop(
+            "source_event_set_sha256"
+        )
+        self.assertEqual(
+            dashboard._production_canary_contract_error(
+                gate,
+                subject="math",
+                release_id="1" * 64,
+            ),
+            "projection_v3_canary_selection_invalid",
+        )
 
     def test_english_empty_state_is_a_real_enabled_subject(self) -> None:
         status, _, summary = self.json_request(

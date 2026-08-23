@@ -952,6 +952,9 @@ class StageResult:
     normalization_status: str | None = None
     normalization_warning_count: int = 0
     normalization_warnings: tuple[Mapping[str, Any], ...] = ()
+    requested_model: str = REQUIRED_MODEL
+    requested_reasoning_effort: str = REQUIRED_REASONING_EFFORT
+    analysis_package_stages: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def coerce(cls, value: object) -> "StageResult":
@@ -970,6 +973,15 @@ class StageResult:
                 ),
                 runtime_reasoning_effort=(
                     str(raw_effort) if isinstance(raw_effort, str) else None
+                ),
+                requested_model=str(
+                    value.get("requested_model", REQUIRED_MODEL)
+                ),
+                requested_reasoning_effort=str(
+                    value.get(
+                        "requested_reasoning_effort",
+                        REQUIRED_REASONING_EFFORT,
+                    )
                 ),
                 runtime_metadata_provenance=str(
                     value.get("runtime_metadata_provenance", "unavailable")
@@ -1134,16 +1146,27 @@ class StageResult:
                     for item in value.get("normalization_warnings", ())
                     if isinstance(item, Mapping)
                 ),
+                analysis_package_stages=tuple(
+                    copy.deepcopy(dict(item))
+                    for item in value.get("analysis_package_stages", ())
+                    if isinstance(item, Mapping)
+                ),
             )
         else:
             raise DispatchError("stage_result_invalid")
         identity_status = result.runtime_identity_status
+        if (
+            result.requested_model not in {"gpt-5.6-luna", "gpt-5.6-terra"}
+            or result.requested_reasoning_effort
+            != REQUIRED_REASONING_EFFORT
+        ):
+            raise DispatchError("stage_requested_identity_invalid")
         if identity_status is None:
             identity_status = (
                 "confirmed"
-                if result.runtime_model == REQUIRED_MODEL
+                if result.runtime_model == result.requested_model
                 and result.runtime_reasoning_effort
-                == REQUIRED_REASONING_EFFORT
+                == result.requested_reasoning_effort
                 and result.runtime_metadata_provenance
                 == "codex_json_attestation_v1"
                 else "requested_unverified"
@@ -1155,9 +1178,9 @@ class StageResult:
             object.__setattr__(result, "runtime_identity_status", identity_status)
         if identity_status == "confirmed":
             if (
-                result.runtime_model != REQUIRED_MODEL
+                result.runtime_model != result.requested_model
                 or result.runtime_reasoning_effort
-                != REQUIRED_REASONING_EFFORT
+                != result.requested_reasoning_effort
                 or result.runtime_metadata_provenance
                 != "codex_json_attestation_v1"
             ):
@@ -1174,9 +1197,9 @@ class StageResult:
                 not isinstance(result.runtime_model, str)
                 and not isinstance(result.runtime_reasoning_effort, str)
             ) or (
-                result.runtime_model == REQUIRED_MODEL
+                result.runtime_model == result.requested_model
                 and result.runtime_reasoning_effort
-                == REQUIRED_REASONING_EFFORT
+                == result.requested_reasoning_effort
             ):
                 raise DispatchError("runtime_identity_quarantine_invalid")
         else:
@@ -1229,6 +1252,19 @@ class StageResult:
                 + result.review_mcp_transcript_sha256
             ):
                 raise DispatchError("stage_review_transcript_binding_invalid")
+        if result.analysis_package_stages:
+            if (
+                [
+                    row.get("stage")
+                    for row in result.analysis_package_stages
+                ]
+                != ["terra_analysis", "luna_analysis", "terra_final"]
+                or any(
+                    row.get("formal_write_count") != 0
+                    for row in result.analysis_package_stages
+                )
+            ):
+                raise DispatchError("analysis_package_stage_runtime_invalid")
         grounding_fields = (
             result.read_session_manifest_sha256,
             result.authority_snapshot_manifest_sha256,
@@ -10448,12 +10484,19 @@ class LeaseStore:
         task: FrozenTask | None = None,
         controlled_replay_authority: Mapping[str, Any] | None = None,
         production_canary: bool = False,
+        ordinary_signed_control: bool = False,
         now: str | None = None,
     ) -> ClaimDecision:
         timestamp = now or _utc_now()
         current_time = _parse_utc(timestamp)
         with _ExclusiveFileLock(self.lock_path):
-            if production_canary and controlled_replay_authority is not None:
+            if sum(
+                (
+                    controlled_replay_authority is not None,
+                    bool(production_canary),
+                    bool(ordinary_signed_control),
+                )
+            ) > 1:
                 raise DispatchError("production_canary_controlled_replay_forbidden")
             if controlled_replay_authority is not None:
                 if task is None or task.unit_sha256 != unit_sha256:
@@ -10484,6 +10527,41 @@ class LeaseStore:
                     lease_owner_id=owner_id,
                     lease_fence=1,
                 )
+            elif ordinary_signed_control:
+                if (
+                    task is None
+                    or task.unit_sha256 != unit_sha256
+                    or subject not in {"math", "cs408", "english"}
+                    or not self._drain_path(str(subject)).exists()
+                ):
+                    raise DispatchError("ordinary_control_binding_invalid")
+                contract = task.frozen_payload.get("dispatch_contract")
+                release_id = (
+                    contract.get("release_id")
+                    if isinstance(contract, Mapping)
+                    else None
+                )
+                if not isinstance(release_id, str):
+                    raise DispatchError("ordinary_control_release_missing")
+                _validate_unit_sha256(release_id)
+                state = self._read_canary_state_locked(str(subject))
+                assert state is not None
+                gate_state = state.get("state")
+                if state.get("release_id") != release_id:
+                    raise DispatchError(
+                        "ordinary_control_release_mismatch"
+                    )
+                if (
+                    gate_state
+                    not in {"armed", "continuous_concurrent_unlocked"}
+                    or state.get("luna_consumer_enabled") is not True
+                ):
+                    raise DispatchError(
+                        f"ordinary_control_{gate_state}"
+                        if gate_state
+                        not in {"armed", "continuous_concurrent_unlocked"}
+                        else "ordinary_control_consumer_disabled"
+                    )
             elif subject is not None and self._drain_path(subject).exists():
                 raise DispatchError("subject_draining")
             completion = self._read_object(self._completion_path(unit_sha256))
@@ -14592,6 +14670,111 @@ class LeaseStore:
                 raise DispatchError("stale_lease_fence")
             return callback()
 
+    def send_provider_stdin_if_current(
+        self,
+        task: FrozenTask,
+        lease: Lease,
+        *,
+        stage_name: str,
+        provider_process_identity_sha256: str,
+        provider_process_identity_path: str,
+        context_root: Path,
+        executable_path: Path,
+        argv: Sequence[str],
+        callback: Callable[[], Any],
+    ) -> Any:
+        """Reopen every local-trusted binding before Provider stdin.
+
+        Popen and process-identity publication intentionally happen first so
+        the child can be supervised and killed without an unaudited process.
+        The prompt itself is sent only while the original lease fence remains
+        current and the sealed task/detail/process identities still bind the
+        exact runtime, Capture, command, and task context.
+        """
+
+        if (
+            not isinstance(provider_process_identity_sha256, str)
+            or not isinstance(provider_process_identity_path, str)
+            or not provider_process_identity_path
+            or not isinstance(context_root, Path)
+            or not isinstance(executable_path, Path)
+            or not argv
+            or any(not isinstance(item, str) or not item for item in argv)
+            or not callable(callback)
+        ):
+            raise DispatchError("provider_pre_stdin_binding_invalid")
+        _validate_unit_sha256(provider_process_identity_sha256)
+        expected_context = (
+            self.runtime_root
+            / "dispatch"
+            / "contexts"
+            / task.unit_sha256
+            / f"fence-{lease.fence}"
+        ).resolve()
+        try:
+            checked_context = context_root.resolve(strict=True)
+            checked_executable = executable_path.resolve(strict=True)
+            executable_sha256 = _sha256_bytes(checked_executable.read_bytes())
+        except OSError as exc:
+            raise DispatchError("provider_pre_stdin_binding_invalid") from exc
+        if checked_context != expected_context or not checked_context.is_dir():
+            raise DispatchError("provider_pre_stdin_context_mismatch")
+        frozen = task.frozen_payload
+        subject = str(frozen.get("subject") or "")
+        capture_id = str(frozen.get("capture_id") or "")
+        if subject not in {"math", "cs408", "english"} or not capture_id:
+            raise DispatchError("provider_pre_stdin_task_binding_invalid")
+        with _ExclusiveFileLock(self.lock_path):
+            current = self._read_object(self._lease_path(lease.unit_sha256))
+            if not self._matches(current, lease, status="claimed"):
+                raise DispatchError("stale_lease_fence")
+            detail = self._read_object(
+                self.task_detail_root / f"{task.unit_sha256}.json"
+            )
+            if detail is None:
+                raise DispatchError("provider_pre_stdin_task_detail_missing")
+            self._verify_seal(detail, purpose="dispatch-task-detail")
+            if (
+                detail.get("unit_sha256") != task.unit_sha256
+                or detail.get("frozen_payload_sha256")
+                != task.frozen_payload_sha256
+                or detail.get("subject") != subject
+                or detail.get("capture_id") != capture_id
+                or detail.get("owner_id") != lease.owner_id
+                or detail.get("fence") != lease.fence
+            ):
+                raise DispatchError(
+                    "provider_pre_stdin_task_detail_binding_mismatch"
+                )
+            identity, identity_sha256, identity_path = (
+                self._provider_process_identity_locked(
+                    task, lease, stage_name
+                )
+            )
+            if (
+                identity_sha256 != provider_process_identity_sha256
+                or identity_path != provider_process_identity_path
+                or identity.get("unit_sha256") != task.unit_sha256
+                or identity.get("frozen_payload_sha256")
+                != task.frozen_payload_sha256
+                or identity.get("subject") != subject
+                or identity.get("capture_id") != capture_id
+                or identity.get("owner_id") != lease.owner_id
+                or identity.get("lease_fence") != lease.fence
+                or identity.get("context_root") != str(expected_context)
+                or identity.get("cwd") != str(expected_context)
+                or identity.get("executable_path")
+                != str(checked_executable)
+                or identity.get("executable_sha256") != executable_sha256
+                or identity.get("argv") != list(argv)
+                or identity.get("argv_sha256")
+                != _sha256_bytes(_canonical_bytes(list(argv)))
+            ):
+                raise DispatchError(
+                    "provider_pre_stdin_process_binding_mismatch"
+                )
+            return callback()
+
     @staticmethod
     def _matches(
         value: Mapping[str, Any] | None,
@@ -18130,8 +18313,8 @@ def _publish_named_immutable(path: Path, value: Mapping[str, Any]) -> None:
             pass
 def _stage_runtime(result: StageResult) -> dict[str, Any]:
     runtime = {
-        "requested_model": REQUIRED_MODEL,
-        "requested_reasoning_effort": REQUIRED_REASONING_EFFORT,
+        "requested_model": result.requested_model,
+        "requested_reasoning_effort": result.requested_reasoning_effort,
         "runtime_identity_status": result.runtime_identity_status,
         "runtime_model": result.runtime_model,
         "runtime_reasoning_effort": result.runtime_reasoning_effort,
@@ -18164,6 +18347,11 @@ def _stage_runtime(result: StageResult) -> dict[str, Any]:
             for row in result.normalization_warnings
         ],
     }
+    if result.analysis_package_stages:
+        runtime["analysis_package_stages"] = [
+            copy.deepcopy(dict(row))
+            for row in result.analysis_package_stages
+        ]
     if result.review_mcp_transcript_sha256 is not None:
         runtime.update(
             {
@@ -18314,6 +18502,7 @@ class ConcurrentDispatcher:
         stall_probe_required_consecutive_failures: int = 2,
         controlled_replay_authority: Mapping[str, Any] | None = None,
         production_canary: bool = False,
+        ordinary_signed_control: bool = False,
     ) -> None:
         resolved_soft_warning = (
             float(soft_runtime_warning_seconds)
@@ -18353,9 +18542,16 @@ class ConcurrentDispatcher:
             if controlled_replay_authority is not None
             else None
         )
-        if production_canary and controlled_replay_authority is not None:
+        if sum(
+            (
+                controlled_replay_authority is not None,
+                bool(production_canary),
+                bool(ordinary_signed_control),
+            )
+        ) > 1:
             raise DispatchError("production_canary_controlled_replay_forbidden")
         self.production_canary = bool(production_canary)
+        self.ordinary_signed_control = bool(ordinary_signed_control)
         self._condition = threading.Condition()
         self._active: dict[str, DispatchHandle] = {}
         self._finishing: set[str] = set()
@@ -18388,6 +18584,7 @@ class ConcurrentDispatcher:
                 task=task,
                 controlled_replay_authority=self.controlled_replay_authority,
                 production_canary=self.production_canary,
+                ordinary_signed_control=self.ordinary_signed_control,
             )
             self.lease_store.register_content_members(task)
             if decision.status == "completed":
@@ -18834,7 +19031,7 @@ class ConcurrentDispatcher:
                 elif (
                     terminal_outcome == "succeeded"
                     and report_disposition == "needs_sol_review"
-                    and review_stage_count in {1, 2}
+                    and review_stage_count in {1, 2, 3}
                     and terminal_error is None
                     and isinstance(terminal_quality_error, str)
                     and terminal_quality_error
@@ -18844,7 +19041,7 @@ class ConcurrentDispatcher:
                 elif (
                     terminal_outcome == "failed"
                     and report_disposition == "quarantined"
-                    and review_stage_count in {1, 2}
+                    and review_stage_count in {1, 2, 3}
                     and isinstance(terminal_error, str)
                     and terminal_error
                 ):

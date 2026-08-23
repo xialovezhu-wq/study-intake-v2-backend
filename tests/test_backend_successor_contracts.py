@@ -337,6 +337,61 @@ class BackendSuccessorContractTests(unittest.TestCase):
         )
         self.assertEqual(output_path.read_bytes(), exact_raw)
 
+    def test_lease_takeover_after_launch_blocks_provider_stdin(self) -> None:
+        runner, store, frozen = self._bound_codex_runner()
+        lifecycle = runner._dispatch_process_lifecycle
+        assert lifecycle is not None
+        original_lease = lifecycle["lease"]
+        context_root = (
+            self.runtime
+            / "dispatch/contexts"
+            / frozen.unit_sha256
+            / f"fence-{original_lease.fence}"
+        )
+        context_root.mkdir(parents=True, exist_ok=True)
+        sentinel = self.runtime / "provider-received-stdin.bin"
+        original_progress = runner._publish_provider_progress
+        takeover_injected = False
+
+        def inject_takeover(**kwargs: object) -> object:
+            nonlocal takeover_injected
+            value = original_progress(**kwargs)
+            if (
+                kwargs.get("progress_kind") == "provider_event"
+                and not takeover_injected
+            ):
+                takeover_injected = True
+                recovered = store.recover_after_infrastructure_crash(
+                    original_lease,
+                    error_code="synthetic_pre_stdin_takeover",
+                )
+                self.assertEqual(recovered.fence, original_lease.fence + 1)
+            return value
+
+        provider = (
+            "import pathlib,sys;"
+            "pathlib.Path(sys.argv[1]).write_bytes(sys.stdin.buffer.read())"
+        )
+        with mock.patch.object(
+            runner,
+            "_publish_provider_progress",
+            side_effect=inject_takeover,
+        ):
+            with self.assertRaisesRegex(
+                PreprocessorError, "stale_lease_fence"
+            ):
+                runner._invoke_subprocess(
+                    [sys.executable, "-c", provider, str(sentinel)],
+                    input=b"PROVIDER_REQUEST_MUST_NOT_BE_SENT",
+                    timeout=0,
+                    cwd=context_root,
+                    stage_name="math_analysis",
+                    raw_output_path=None,
+                    provider_schema_sha256="e" * 64,
+                )
+        self.assertTrue(takeover_injected)
+        self.assertFalse(sentinel.exists())
+
     def test_first_chunk_survives_real_host_sigkill_without_false_final(self) -> None:
         _runner, store, frozen = self._bound_codex_runner()
         context_root = (

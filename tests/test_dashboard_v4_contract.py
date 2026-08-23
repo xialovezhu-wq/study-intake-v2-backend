@@ -18,15 +18,26 @@ import server as dashboard  # noqa: E402
 
 FIXTURE = ROOT / "dashboard/tests/fixtures/dashboard_projection.json"
 H = "a" * 64
+V5_ONLY_ITEM_FIELDS = {
+    "report_available",
+    "formal_write_eligible",
+    "execution_status",
+    "quality_status",
+    "report_disposition",
+    "terminal_error_code",
+    "production_accepted",
+}
 
 
 def v4_projection() -> dict:
     value = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    value["schema_version"] = dashboard.SCHEMA_VERSION
+    value["schema_version"] = dashboard.PREVIOUS_SCHEMA_VERSION
     value["configured_global_continuous_concurrency_limit"] = 60
     for section in value["subjects"].values():
         for item in section["items"]:
             projection._ensure_task_axes(item)
+            for field in V5_ONLY_ITEM_FIELDS:
+                item.pop(field, None)
             if item.get("server_queue_status") == "rate_limited":
                 item["server_queue_status"] = "confirmed_rate_limited"
         section["batch_partition"] = {
@@ -52,9 +63,47 @@ def v4_projection() -> dict:
     return value
 
 
+def v5_projection() -> dict:
+    value = v4_projection()
+    value["schema_version"] = dashboard.SCHEMA_VERSION
+    for section in value["subjects"].values():
+        for item in section["items"]:
+            projection._ensure_task_axes(item)
+        section["counts"] = dashboard._v3_counts(section["items"])
+    return value
+
+
 class DashboardProjectionV4ContractTests(unittest.TestCase):
     def test_complete_v4_projection_is_accepted(self) -> None:
         self.assertIsNone(dashboard._projection_contract_error(v4_projection()))
+
+    def test_v4_rejects_v5_only_shared_axes_while_v5_accepts_them(self) -> None:
+        value = v4_projection()
+        item = value["subjects"]["math"]["items"][0]
+        item.update(
+            {
+                "report_available": True,
+                "formal_write_eligible": False,
+                "execution_status": "succeeded",
+                "quality_status": "passed",
+                "report_disposition": "accepted",
+                "sol_review_status": "not_required",
+                "terminal_error_code": None,
+                "production_accepted": False,
+            }
+        )
+        placeholder = dashboard._public_item(
+            item,
+            "math",
+            expected_release_id=item["release_id"],
+            schema_version=value["schema_version"],
+        )
+        self.assertIsNotNone(placeholder)
+        assert placeholder is not None
+        self.assertTrue(placeholder["diagnostic_placeholder"])
+        self.assertIsNone(
+            dashboard._projection_contract_error(v5_projection())
+        )
 
     def test_missing_required_task_axis_is_item_local_placeholder(self) -> None:
         value = v4_projection()
@@ -62,6 +111,16 @@ class DashboardProjectionV4ContractTests(unittest.TestCase):
         capture_id = item["capture_id"]
         item.pop(
             "authority_snapshot_sha256"
+        )
+        value["subjects"]["math"]["counts"] = dashboard._v3_counts(
+            [
+                (
+                    dashboard._diagnostic_item_placeholder(row, "math")
+                    if row is item
+                    else row
+                )
+                for row in value["subjects"]["math"]["items"]
+            ]
         )
         self.assertIsNone(dashboard._projection_contract_error(value))
         public = next(
@@ -77,6 +136,16 @@ class DashboardProjectionV4ContractTests(unittest.TestCase):
         capture_id = item["capture_id"]
         item["server_queue_status"] = "unknown"
         item["server_queue_confirmation"] = "confirmed_event"
+        value["subjects"]["math"]["counts"] = dashboard._v3_counts(
+            [
+                (
+                    dashboard._diagnostic_item_placeholder(row, "math")
+                    if row is item
+                    else row
+                )
+                for row in value["subjects"]["math"]["items"]
+            ]
+        )
         self.assertIsNone(dashboard._projection_contract_error(value))
         public = next(
             row

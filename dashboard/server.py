@@ -659,6 +659,43 @@ def _terminal_failure_bindings_valid(value: Any) -> bool:
     return True
 
 
+CANARY_SELECTION_REQUIRED_FIELDS = frozenset(
+    {
+        "producer_unit_id",
+        "producer_recorded_at",
+        "producer_input_contract_sha256",
+        "source_event_set_sha256",
+        "unit_sha256",
+        "frozen_payload_sha256",
+    }
+)
+
+
+def _canary_selection_valid(value: Any) -> bool:
+    if (
+        not isinstance(value, Mapping)
+        or not CANARY_SELECTION_REQUIRED_FIELDS.issubset(value)
+        or SAFE_ID.fullmatch(str(value.get("producer_unit_id") or ""))
+        is None
+        or not _valid_timestamp_text(value.get("producer_recorded_at"))
+    ):
+        return False
+    for key in (
+        "producer_input_contract_sha256",
+        "source_event_set_sha256",
+        "unit_sha256",
+        "frozen_payload_sha256",
+        "canary_gate_sha256",
+        "canary_gate_authority_sha256",
+    ):
+        raw = value.get(key)
+        if raw is not None and (
+            not isinstance(raw, str) or SHA256.fullmatch(raw) is None
+        ):
+            return False
+    return True
+
+
 def _production_canary_contract_error(
     value: Any,
     *,
@@ -984,24 +1021,7 @@ def _production_canary_contract_error(
     for selection in (selected, last_selected):
         if selection is None:
             continue
-        if not isinstance(selection, Mapping):
-            return "projection_v3_canary_selection_invalid"
-        for key in (
-            "producer_input_contract_sha256",
-            "source_event_set_sha256",
-            "unit_sha256",
-            "frozen_payload_sha256",
-            "canary_gate_sha256",
-            "canary_gate_authority_sha256",
-        ):
-            raw = selection.get(key)
-            if raw is not None and (
-                not isinstance(raw, str) or SHA256.fullmatch(raw) is None
-            ):
-                return "projection_v3_canary_selection_invalid"
-        if SAFE_ID.fullmatch(str(selection.get("producer_unit_id") or "")) is None:
-            return "projection_v3_canary_selection_invalid"
-        if not _valid_timestamp_text(selection.get("producer_recorded_at")):
+        if not _canary_selection_valid(selection):
             return "projection_v3_canary_selection_invalid"
     if state == "canary_in_flight" and selected is None:
         return "projection_v3_canary_selection_invalid"
@@ -1018,6 +1038,7 @@ def _production_canary_contract_error(
             or SHA256.fullmatch(unit_sha256) is None
             or not isinstance(active_selected, Mapping)
             or active_selected.get("unit_sha256") != unit_sha256
+            or not _canary_selection_valid(active_selected)
         ):
             return "projection_v3_canary_selection_invalid"
     if state == "canary_in_flight" and (
@@ -1495,7 +1516,7 @@ ITEM_TERMINAL_STATUSES = frozenset({
     "evidence_pending", "workflow_complete", "workflow_complete_with_warnings",
     "workflow_partial", "execution_failed", "cancelled", "stalled",
 })
-ITEM_AXIS_CONTRACT = {
+V4_ITEM_AXIS_CONTRACT = {
     "evidence_access_status": frozenset({"unverified", "ready", "missing", "quarantined"}),
     "analysis_execution_status": frozenset({"not_started", "running", "completed", "failed", "cancelled", "stalled"}),
     "review_execution_status": frozenset({"not_started", "running", "completed", "failed", "cancelled", "stalled"}),
@@ -1505,6 +1526,20 @@ ITEM_AXIS_CONTRACT = {
     "formal_write_status": frozenset({"not_authorized", "pending", "committed", "failed"}),
     "stall_probe_status": frozenset({"not_applicable", "healthy", "stall_suspected", "probing", "stalled", "cancelled"}),
 }
+
+V5_ITEM_AXIS_CONTRACT = dict(V4_ITEM_AXIS_CONTRACT)
+
+V5_ONLY_ITEM_FIELDS = frozenset(
+    {
+        "report_available",
+        "formal_write_eligible",
+        "execution_status",
+        "quality_status",
+        "report_disposition",
+        "terminal_error_code",
+        "production_accepted",
+    }
+)
 
 V4_NULLABLE_SHA256_ITEM_FIELDS = frozenset(
     {
@@ -2249,7 +2284,17 @@ def _item_needs_diagnostic_placeholder(
     ):
         return True
     if schema_version in MODERN_SCHEMA_VERSIONS:
+        axis_contract = (
+            V5_ITEM_AXIS_CONTRACT
+            if schema_version == SCHEMA_VERSION
+            else V4_ITEM_AXIS_CONTRACT
+        )
         if not V4_REQUIRED_ITEM_FIELDS.issubset(item):
+            return True
+        if (
+            schema_version == PREVIOUS_SCHEMA_VERSION
+            and V5_ONLY_ITEM_FIELDS.intersection(item)
+        ):
             return True
         if schema_version == SCHEMA_VERSION and (
             not V5_REQUIRED_ITEM_FIELDS.issubset(item)
@@ -2261,7 +2306,7 @@ def _item_needs_diagnostic_placeholder(
         if (
             any(
                 item.get(key) not in allowed
-                for key, allowed in ITEM_AXIS_CONTRACT.items()
+                for key, allowed in axis_contract.items()
             )
             or not isinstance(warning_codes, list)
             or warning_codes != sorted(set(warning_codes))
@@ -2506,22 +2551,28 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
             + values["evidence_pending"]
         ):
             return "projection_v3_counts_not_closed"
-        recomputed = _v3_counts(items)
-        malformed_item_present = any(
-            _item_needs_diagnostic_placeholder(
+        normalized_items: list[Mapping[str, Any]] = []
+        for ordinal, item in enumerate(items):
+            if _item_needs_diagnostic_placeholder(
                 item,
                 subject=subject,
                 release_id=release_id,
                 schema_version=str(schema_version),
-            )
-            for item in items
-        )
-        if (
-            not malformed_item_present
-            and any(
-                recomputed[key] != values[key]
-                for key in V3_COUNT_KEYS
-            )
+            ):
+                normalized_items.append(
+                    _diagnostic_item_placeholder(
+                        item if isinstance(item, Mapping) else {},
+                        subject,
+                        ordinal=ordinal,
+                    )
+                )
+            else:
+                assert isinstance(item, Mapping)
+                normalized_items.append(item)
+        recomputed = _v3_counts(normalized_items)
+        if any(
+            recomputed[key] != values[key]
+            for key in V3_COUNT_KEYS
         ):
             return "projection_v3_counts_not_reproducible"
         if payload.get("schema_version") in MODERN_SCHEMA_VERSIONS:
@@ -2661,6 +2712,11 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
             ):
                 return "projection_v3_task_identity_invalid"
             if payload.get("schema_version") in MODERN_SCHEMA_VERSIONS:
+                axis_contract = (
+                    V5_ITEM_AXIS_CONTRACT
+                    if payload.get("schema_version") == SCHEMA_VERSION
+                    else V4_ITEM_AXIS_CONTRACT
+                )
                 if not V4_REQUIRED_ITEM_FIELDS.issubset(item):
                     return "projection_v4_task_shape_invalid"
                 if payload.get("schema_version") == SCHEMA_VERSION and (
@@ -2669,14 +2725,15 @@ def _projection_contract_error(payload: Mapping[str, Any]) -> str | None:
                     or item.get("formal_write_eligible") is not False
                 ):
                     return "projection_v5_review_report_shape_invalid"
-                if payload.get("schema_version") == PREVIOUS_SCHEMA_VERSION and (
-                    "report_available" in item
-                    or "formal_write_eligible" in item
+                if (
+                    payload.get("schema_version")
+                    == PREVIOUS_SCHEMA_VERSION
+                    and V5_ONLY_ITEM_FIELDS.intersection(item)
                 ):
                     return "projection_v4_task_unknown_field"
                 if any(
                     item.get(key) not in allowed
-                    for key, allowed in ITEM_AXIS_CONTRACT.items()
+                    for key, allowed in axis_contract.items()
                 ):
                     return "projection_v4_task_axes_invalid"
                 warning_codes = item.get("warning_codes")
@@ -5280,6 +5337,98 @@ def _dispatch_stage_receipts(
     model_contract = receipt.get("model_contract") if isinstance(receipt, Mapping) else None
     if not isinstance(observed, Mapping):
         return {}, None, None, False
+    analysis_runtime = observed.get("analysis")
+    analysis_package_stages = (
+        analysis_runtime.get("analysis_package_stages")
+        if isinstance(analysis_runtime, Mapping)
+        else None
+    )
+    if isinstance(analysis_package_stages, list):
+        expected = (
+            ("terra_analysis", "gpt-5.6-terra"),
+            ("luna_analysis", "gpt-5.6-luna"),
+            ("terra_final", "gpt-5.6-terra"),
+        )
+        if len(analysis_package_stages) != len(expected):
+            return {}, None, None, False
+        projected: dict[str, dict[str, Any]] = {}
+        for raw, (stage, requested_model) in zip(
+            analysis_package_stages, expected
+        ):
+            if (
+                not isinstance(raw, Mapping)
+                or raw.get("stage") != stage
+                or raw.get("requested_model") != requested_model
+                or raw.get("requested_reasoning_effort") != "max"
+                or raw.get("runtime_identity_status")
+                not in {"confirmed", "requested_unverified"}
+                or raw.get("execution_status") != "succeeded"
+                or raw.get("quality_status")
+                not in {"passed", "issues_found"}
+                or raw.get("report_disposition")
+                not in {"accepted", "needs_sol_review"}
+                or raw.get("formal_write_count") != 0
+            ):
+                return {}, None, None, False
+            row: dict[str, Any] = {
+                "status": "completed",
+                "requested_model": requested_model,
+                "requested_reasoning_effort": "max",
+                "runtime_identity_status": raw[
+                    "runtime_identity_status"
+                ],
+                "execution_status": raw["execution_status"],
+                "quality_status": raw["quality_status"],
+                "report_disposition": raw["report_disposition"],
+            }
+            for key in (
+                "duration_ms",
+                "semantic_stage_count",
+                "provider_request_count",
+                "mcp_tool_call_count",
+                "model_call_count",
+            ):
+                value = _safe_non_negative_integer(raw.get(key))
+                if value is None:
+                    return {}, None, None, False
+                row[key] = value
+            for key in (
+                "runtime_model",
+                "runtime_reasoning_effort",
+                "runtime_metadata_provenance",
+                "raw_output_ref",
+                "report_ref",
+                "analysis_execution_receipt_ref",
+                "analysis_normalization_receipt_ref",
+                "stage_execution_receipt_ref",
+                "stage_normalization_receipt_ref",
+            ):
+                value = _safe_public_text(raw.get(key), limit=320)
+                if value is not None:
+                    row[key] = value
+            for key in (
+                "raw_output_sha256",
+                "report_sha256",
+                "analysis_execution_receipt_sha256",
+                "analysis_normalization_receipt_sha256",
+                "stage_execution_receipt_sha256",
+                "stage_normalization_receipt_sha256",
+                "provider_process_identity_sha256",
+                "provider_process_exit_sha256",
+            ):
+                value = raw.get(key)
+                if (
+                    not isinstance(value, str)
+                    or SHA256.fullmatch(value) is None
+                ):
+                    return {}, None, None, False
+                row[key] = value
+            projected[stage] = row
+        runtime_attested = all(
+            row["runtime_identity_status"] == "confirmed"
+            for row in projected.values()
+        )
+        return projected, None, None, runtime_attested
     requested_model = (
         model_contract.get("model")
         if isinstance(model_contract, Mapping)
@@ -5297,9 +5446,15 @@ def _dispatch_stage_receipts(
             continue
         row: dict[str, Any] = {
             "status": "completed",
-            "requested_model": requested_model,
-            "requested_reasoning_effort": requested_effort,
-            "runtime_identity_status": "requested_unverified",
+            "requested_model": runtime.get(
+                "requested_model", requested_model
+            ),
+            "requested_reasoning_effort": runtime.get(
+                "requested_reasoning_effort", requested_effort
+            ),
+            "runtime_identity_status": runtime.get(
+                "runtime_identity_status", "requested_unverified"
+            ),
         }
         duration = _safe_non_negative_integer(runtime.get("duration_ms"))
         if duration is not None:
@@ -6016,7 +6171,11 @@ def _public_dispatch_task_detail(
         and result_status == "ready"
         and completion.get("package_sha256")
         and completion.get("receipt_sha256")
-        and set(verified_stage_receipts) == {"analysis", "critical_review"}
+        and set(verified_stage_receipts)
+        in (
+            {"analysis", "critical_review"},
+            {"terra_analysis", "luna_analysis", "terra_final"},
+        )
     )
     public_result: dict[str, Any] = {
         "status": result_status,
