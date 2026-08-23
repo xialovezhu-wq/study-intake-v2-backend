@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import importlib.util
 import io
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "lib") not in sys.path:
     sys.path.insert(0, str(ROOT / "lib"))
 import core_dispatch_bridge  # noqa: E402
+import preprocessor_core  # noqa: E402
 from concurrent_dispatch import DispatchResult  # noqa: E402
 
 SCRIPT = ROOT / "scripts/run_source_subject_provider_acceptance.py"
@@ -832,6 +834,253 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
             b'{"canonical":true}\n',
         )
         self.assertNotIn("Documents/kaoyan-math", rows[0]["path"])
+
+    def test_math_and_cs408_workers_reopen_bound_english_runtime_closure(
+        self,
+    ) -> None:
+        semantic_files = (
+            "english_pipeline/candidates.py",
+            "english_pipeline/cli.py",
+            "english_pipeline/constants.py",
+            "english_pipeline/errors.py",
+            "english_pipeline/events.py",
+            "english_pipeline/formal.py",
+            "english_pipeline/migrations.py",
+            "english_pipeline/nightly.py",
+            "english_pipeline/quick_flush.py",
+            "english_pipeline/review_status.py",
+            "english_pipeline/util.py",
+            "english_pipeline/views.py",
+            "english_pipeline/writer.py",
+            "scripts/build_old_word_memory_curve_index.py",
+            "scripts/build_review_status_proposals.py",
+            "scripts/english_learning_pipeline.py",
+            "scripts/select_bbdc_foundation.py",
+            "schema/english_pipeline/capture-event-v2.schema.json",
+            "schema/english_pipeline/luna-candidate-v2.schema.json",
+        )
+        historical_files = {
+            "scripts/build_old_word_memory_curve_index.py": "evidence_only",
+            "scripts/build_review_status_proposals.py": "replaced_by_current",
+            "scripts/select_bbdc_foundation.py": "evidence_only",
+        }
+
+        def write_source(root: Path, relative: str, payload: bytes) -> None:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+
+        math = self.base / "canonical-math"
+        cs408 = self.base / "canonical-cs408"
+        english = self.base / "canonical-english"
+        historical = self.base / "bound-english-historical-source"
+        for root, source, skill, contract in (
+            (
+                math,
+                "数学一回滚复习系统/scripts/quick_intake.py",
+                "skills/math/SKILL.md",
+                "schema/math-capture.json",
+            ),
+            (
+                cs408,
+                "scripts/intake_fact_capture_408.py",
+                "skills/cs408/SKILL.md",
+                "schema/cs408-capture.json",
+            ),
+        ):
+            write_source(root, source, b"# canonical source\n")
+            write_source(root, skill, b"# canonical skill\n")
+            write_source(root, contract, b"{}\n")
+
+        english_closure_files = (
+            "english_pipeline/__init__.py",
+            "english_pipeline/candidates.py",
+            "english_pipeline/cli.py",
+            "english_pipeline/constants.py",
+            "english_pipeline/errors.py",
+            "english_pipeline/events.py",
+            "english_pipeline/formal.py",
+            "english_pipeline/migrations.py",
+            "english_pipeline/nightly.py",
+            "english_pipeline/producer_binding_attestation.py",
+            "english_pipeline/quick_flush.py",
+            "english_pipeline/review_status.py",
+            "english_pipeline/util.py",
+            "english_pipeline/views.py",
+            "english_pipeline/writer.py",
+            "scripts/english_learning_pipeline.py",
+        )
+        for relative in sorted(
+            set(english_closure_files)
+            | (set(semantic_files) - set(historical_files))
+        ):
+            payload = b"{}\n" if relative.endswith(".json") else b"# canonical English\n"
+            write_source(english, relative, payload)
+        write_source(
+            english,
+            "skills/english/SKILL.md",
+            b"# canonical English skill\n",
+        )
+        write_source(
+            english,
+            "schema/english-capture.json",
+            b"{}\n",
+        )
+
+        manifest_rows: list[dict[str, object]] = []
+        for relative, classification in historical_files.items():
+            payload = f"# bound historical source: {relative}\n".encode("utf-8")
+            write_source(historical, relative, payload)
+            manifest_rows.append(
+                {
+                    "path": relative,
+                    "file_sha256": hashlib.sha256(payload).hexdigest(),
+                    "size": len(payload),
+                    "classification": classification,
+                    "replacement_reference": (
+                        "english_pipeline/review_status.py"
+                        if classification == "replaced_by_current"
+                        else None
+                    ),
+                }
+            )
+        write_source(
+            english,
+            "schema/study-intake-historical-source-closure-v1.json",
+            acceptance.canonical_bytes(
+                {
+                    "schema_version": (
+                        "study-intake-historical-source-closure-v1"
+                    ),
+                    "files": manifest_rows,
+                }
+            ),
+        )
+
+        spec = {
+            "subjects": {
+                "math": {
+                    "canonical_root": str(math),
+                    "expected_head": "1" * 40,
+                    "closure_files": [
+                        "数学一回滚复习系统/scripts/quick_intake.py"
+                    ],
+                    "canonical_skill_file": "skills/math/SKILL.md",
+                    "capture_contract_files": ["schema/math-capture.json"],
+                },
+                "cs408": {
+                    "canonical_root": str(cs408),
+                    "expected_head": "2" * 40,
+                    "closure_files": ["scripts/intake_fact_capture_408.py"],
+                    "canonical_skill_file": "skills/cs408/SKILL.md",
+                    "capture_contract_files": ["schema/cs408-capture.json"],
+                },
+                "english": {
+                    "canonical_root": str(english),
+                    "expected_head": "3" * 40,
+                    "closure_files": list(english_closure_files),
+                    "canonical_skill_file": "skills/english/SKILL.md",
+                    "capture_contract_files": [
+                        "schema/english-capture.json"
+                    ],
+                    "semantic_runtime_source_root": str(historical),
+                },
+            }
+        }
+        closures, _heads = acceptance.materialize_canonical_closures(
+            spec,
+            self.producer,
+        )
+        english_runtime = closures["english"]
+        schema = english_runtime / "schema/english_pipeline/luna-candidate-v2.schema.json"
+        profile = {
+            "enabled": True,
+            "analysis_prompt_version": "english-analysis-test-v1",
+            "critical_review_prompt_version": "english-review-test-v1",
+            "analysis_output_schema": str(schema),
+            "critical_review_output_schema": str(schema),
+            "controlled_contract_path": str(schema),
+            "max_prompt_bytes": 4096,
+            "max_output_bytes": 4096,
+        }
+        base_config = {
+            "runtime_root": str(self.runtime),
+            "worker": {"model_timeout_seconds": 60},
+            "model": {
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+            },
+            "adapters": {
+                "math": {"enabled": False, "repo_root": str(closures["math"])},
+                "cs408": {
+                    "enabled": False,
+                    "repo_root": str(closures["cs408"]),
+                },
+                "english": {
+                    "enabled": False,
+                    "repo_root": str(english_runtime),
+                    "candidate_schema": str(schema),
+                },
+            },
+            preprocessor_core.ENGLISH_PROFILE: profile,
+        }
+        with (
+            mock.patch.object(
+                preprocessor_core,
+                "release_identity",
+                return_value=("a" * 64, "source_mode_test"),
+            ),
+            mock.patch.object(
+                preprocessor_core,
+                "subject_semantic_code_closure_manifest",
+                return_value={"code_closure_sha256": "b" * 64},
+            ),
+            mock.patch.object(
+                preprocessor_core,
+                "subject_dispatch_bridge_code_closure_manifest",
+                return_value={"code_closure_sha256": "c" * 64},
+            ),
+            mock.patch.object(
+                preprocessor_core,
+                "processing_plugin_contract",
+                return_value=None,
+            ),
+            mock.patch.object(
+                preprocessor_core,
+                "make_adapters",
+                return_value={name: object() for name in acceptance.SUBJECTS},
+            ),
+            mock.patch.object(
+                preprocessor_core.CodexRunner,
+                "_invoke_subprocess",
+                side_effect=AssertionError("Provider path invoked"),
+            ) as provider_call,
+        ):
+            for subject in ("math", "cs408"):
+                with self.subTest(subject=subject):
+                    config = copy.deepcopy(base_config)
+                    config["source_acceptance_subject"] = subject
+                    worker = preprocessor_core.Worker(
+                        config,
+                        model_runner=object(),
+                        logger=mock.Mock(),
+                    )
+                    self.assertEqual(
+                        worker.model_config[
+                            "english_processing_contract"
+                        ]["external_semantic_source_set_sha256"],
+                        preprocessor_core.source_file_set_manifest(
+                            english_runtime,
+                            semantic_files,
+                        )["file_set_sha256"],
+                    )
+        provider_call.assert_not_called()
+        self.assertEqual(
+            english_runtime.name,
+            "kaoyan-english-runtime-closure",
+        )
+        for relative in semantic_files:
+            self.assertTrue((english_runtime / relative).is_file(), relative)
 
     def test_canonical_descriptor_rejects_relative_path_escape(self) -> None:
         canonical = self.base / "canonical-escape"

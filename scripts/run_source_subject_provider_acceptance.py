@@ -29,6 +29,37 @@ from typing import Any, Mapping
 
 SPEC_SCHEMA = "study-intake-source-subject-provider-spec-v1"
 SUBJECTS = ("math", "cs408", "english")
+SUBJECT_CLOSURE_NAMES = {
+    "math": "kaoyan-math",
+    "cs408": "kaoyan-408",
+    "english": "kaoyan-english-runtime-closure",
+}
+ENGLISH_SEMANTIC_RUNTIME_FILES = (
+    "english_pipeline/candidates.py",
+    "english_pipeline/cli.py",
+    "english_pipeline/constants.py",
+    "english_pipeline/errors.py",
+    "english_pipeline/events.py",
+    "english_pipeline/formal.py",
+    "english_pipeline/migrations.py",
+    "english_pipeline/nightly.py",
+    "english_pipeline/quick_flush.py",
+    "english_pipeline/review_status.py",
+    "english_pipeline/util.py",
+    "english_pipeline/views.py",
+    "english_pipeline/writer.py",
+    "scripts/build_old_word_memory_curve_index.py",
+    "scripts/build_review_status_proposals.py",
+    "scripts/english_learning_pipeline.py",
+    "scripts/select_bbdc_foundation.py",
+    "schema/english_pipeline/capture-event-v2.schema.json",
+    "schema/english_pipeline/luna-candidate-v2.schema.json",
+)
+ENGLISH_HISTORICAL_RUNTIME_FILES = {
+    "scripts/build_old_word_memory_curve_index.py": "evidence_only",
+    "scripts/build_review_status_proposals.py": "replaced_by_current",
+    "scripts/select_bbdc_foundation.py": "evidence_only",
+}
 REQUIRED_ROOT_ENV = {
     "runtime": "STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT",
     "producer": "STUDY_SOURCE_ACCEPTANCE_PRODUCER_ROOT",
@@ -394,7 +425,9 @@ def materialize_source_release(
         "${PYTHON_EXECUTABLE}": sys.executable,
         "${MATH_ROOT}": str(roots["producer"] / "kaoyan-math"),
         "${CS408_ROOT}": str(roots["producer"] / "kaoyan-408"),
-        "${ENGLISH_ROOT}": str(roots["producer"] / "kaoyan-english"),
+        "${ENGLISH_ROOT}": str(
+            roots["producer"] / SUBJECT_CLOSURE_NAMES["english"]
+        ),
     }
     config = _render_tokens(template, bindings)
     config["release"]["manifest_path"] = str(source_release / "release.json")
@@ -487,6 +520,85 @@ def _descriptor(
     path.write_bytes(canonical_bytes(value))
 
 
+def _materialize_english_semantic_runtime(
+    canonical_root: Path,
+    closure_root: Path,
+    spec: Mapping[str, Any],
+) -> None:
+    historical = Path(str(spec.get("semantic_runtime_source_root") or ""))
+    if (
+        not historical.is_absolute()
+        or historical.is_symlink()
+        or not historical.is_dir()
+        or any(
+            part.lower() in {"current", "releases", "site-packages"}
+            for part in historical.parts
+        )
+    ):
+        raise AcceptanceError("english_semantic_runtime_source_root_invalid")
+    historical = historical.resolve(strict=True)
+    manifest_path = (
+        canonical_root
+        / "schema/study-intake-historical-source-closure-v1.json"
+    )
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise AcceptanceError("english_historical_source_manifest_invalid")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AcceptanceError("english_historical_source_manifest_invalid") from exc
+    rows = manifest.get("files")
+    if (
+        manifest.get("schema_version")
+        != "study-intake-historical-source-closure-v1"
+        or not isinstance(rows, list)
+    ):
+        raise AcceptanceError("english_historical_source_manifest_invalid")
+    by_path = {
+        str(row.get("path")): row
+        for row in rows
+        if isinstance(row, Mapping) and isinstance(row.get("path"), str)
+    }
+    for relative in ENGLISH_SEMANTIC_RUNTIME_FILES:
+        canonical_source = canonical_root / relative
+        if canonical_source.is_file() and not canonical_source.is_symlink():
+            source, _unused = _canonical_relative_path(canonical_root, relative)
+        else:
+            expected_classification = ENGLISH_HISTORICAL_RUNTIME_FILES.get(
+                relative
+            )
+            row = by_path.get(relative)
+            if (
+                expected_classification is None
+                or not isinstance(row, Mapping)
+                or row.get("classification") != expected_classification
+                or not isinstance(row.get("file_sha256"), str)
+                or not isinstance(row.get("size"), int)
+            ):
+                raise AcceptanceError("english_semantic_runtime_member_unbound")
+            source, _unused = _canonical_relative_path(historical, relative)
+            if (
+                source.stat().st_size != row["size"]
+                or sha256_file(source) != row["file_sha256"]
+            ):
+                raise AcceptanceError("english_semantic_runtime_member_drift")
+        target = (closure_root / relative).resolve(strict=False)
+        try:
+            target.relative_to(closure_root.resolve(strict=True))
+        except ValueError as exc:
+            raise AcceptanceError("english_semantic_runtime_target_invalid") from exc
+        if target.exists() or target.is_symlink():
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or sha256_file(target) != sha256_file(source)
+            ):
+                raise AcceptanceError("english_semantic_runtime_target_drift")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 def materialize_canonical_closures(
     spec: Mapping[str, Any], producer_root: Path
 ) -> tuple[dict[str, Path], dict[str, str]]:
@@ -518,7 +630,7 @@ def materialize_canonical_closures(
             )
         ):
             raise AcceptanceError("subject_canonical_contract_invalid")
-        closure = producer_root / {"math": "kaoyan-math", "cs408": "kaoyan-408", "english": "kaoyan-english"}[subject]
+        closure = producer_root / SUBJECT_CLOSURE_NAMES[subject]
         closure.mkdir(parents=True)
         _descriptor(
             subject,
@@ -528,6 +640,12 @@ def materialize_canonical_closures(
             canonical_skill_file,
             list(capture_contract_files),
         )
+        if subject == "english":
+            _materialize_english_semantic_runtime(
+                canonical_root,
+                closure,
+                row,
+            )
         roots[subject] = closure
         head = row.get("expected_head")
         if not isinstance(head, str) or len(head) < 40:
@@ -912,9 +1030,13 @@ def run(spec_path: Path) -> dict[str, Any]:
                 return completion_bridge.wait(handle, timeout)
 
             dispatch_module.DispatchHandle.wait = completion_compatible_wait
+            original_canonical_root = self.canonical_root
+            if subject in {"math", "cs408"}:
+                self.canonical_root = roots["producer"]
             try:
                 return super()._real_acceptance(testcase, **kwargs)
             finally:
+                self.canonical_root = original_canonical_root
                 dispatch_module.DispatchHandle.wait = original_wait
 
     harness = SourceAcceptance(
