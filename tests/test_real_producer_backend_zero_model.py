@@ -596,8 +596,14 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
         target_capture_id: str,
         overlay: Mapping[str, Any],
     ) -> dict[str, Any]:
-        runtime_root = fixture_root.parent / f"h4-{subject}-runtime"
-        release_manifest = fixture_root.parent / f"h4-{subject}-release.json"
+        runtime_root = (
+            fixture_root.parent
+            / f".{fixture_root.name}-h4-{subject}-runtime"
+        )
+        release_manifest = (
+            fixture_root.parent
+            / f".{fixture_root.name}-h4-{subject}-release.json"
+        )
         release_manifest.write_text(
             json.dumps(
                 {

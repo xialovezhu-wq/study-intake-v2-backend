@@ -17837,7 +17837,7 @@ class CodexRunner:
                 rows.append(
                     {
                         "artifact_id": f"article-source-{source_hash[:24]}",
-                        "artifact_kind": "source_text",
+                        "artifact_kind": "article_text",
                         "source_role": "canonical_source_copy",
                         "content": envelope,
                         "sha256": digest,
