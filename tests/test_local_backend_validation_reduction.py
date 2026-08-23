@@ -1394,6 +1394,49 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
             self.assertEqual(progress["stderr_bytes"], 7)
             self.assertEqual(progress["mcp_tool_call_count"], 3)
 
+    def test_analysis_package_expects_all_three_provider_closures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary).resolve() / "runtime"
+            candidate_value = candidate(
+                "english",
+                "EN-ANALYSIS-PACKAGE-PROVIDER-CLOSURE-001",
+                "2026-08-22T12:45:00+08:00",
+            )
+            bridge = CoreCandidateRunner(
+                {
+                    "execution_mode": "live_authorized",
+                    "runtime_root": str(runtime),
+                    "model": {
+                        "model": "gpt-5.6-luna",
+                        "reasoning_effort": "max",
+                    },
+                    "consumer_stage_chain": {"enabled": True},
+                    "analysis_package_v1": {"enabled": True},
+                },
+                candidate_value,
+                "actual_foreground_capture",
+                LeaseStore(runtime),
+            )
+            model_result = self.FakeAnalysisPackageRunner().run(
+                candidate_value
+            )
+            analysis = bridge._analysis_package_stage_result(
+                model_result, "analysis"
+            )
+            critical = bridge._analysis_package_stage_result(
+                model_result, "critical_review"
+            )
+            self.assertEqual(
+                LeaseStore._expected_provider_process_stages(
+                    "english", analysis, critical
+                ),
+                {
+                    "english_analysis",
+                    "english_luna_analysis",
+                    "english_critical_review",
+                },
+            )
+
     def test_analysis_package_ready_reaches_existing_terminal_publisher(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary).resolve() / "runtime"

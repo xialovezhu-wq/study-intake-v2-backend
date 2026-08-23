@@ -14791,6 +14791,39 @@ class LeaseStore:
             and value.get("status") == status
         )
 
+    @staticmethod
+    def _expected_provider_process_stages(
+        subject: str,
+        analysis: StageResult | None,
+        critical_review: StageResult | None,
+    ) -> set[str]:
+        if analysis is not None and analysis.analysis_package_stages:
+            stage_order = [
+                str(row.get("stage") or "")
+                for row in analysis.analysis_package_stages
+            ]
+            if stage_order != [
+                "terra_analysis",
+                "luna_analysis",
+                "terra_final",
+            ]:
+                raise DispatchError(
+                    "analysis_package_provider_stage_order_invalid"
+                )
+            return {
+                f"{subject}_analysis",
+                f"{subject}_luna_analysis",
+                f"{subject}_critical_review",
+            }
+        return {
+            f"{subject}_{stage_name}"
+            for stage_name, stage in (
+                ("analysis", analysis),
+                ("critical_review", critical_review),
+            )
+            if stage is not None
+        }
+
     def publish_terminal(
         self,
         lease: Lease,
@@ -14873,14 +14906,11 @@ class LeaseStore:
                         / "preprocess_task_runner.py"
                     ).resolve()
                 )
-                expected_provider_stages = {
-                    f"{subject}_{stage_name}"
-                    for stage_name, stage in (
-                        ("analysis", analysis),
-                        ("critical_review", critical_review),
+                expected_provider_stages = (
+                    self._expected_provider_process_stages(
+                        subject, analysis, critical_review
                     )
-                    if stage is not None
-                }
+                )
                 if outcome == "succeeded" and canonical_runner:
                     if set(provider_stages) != expected_provider_stages or any(
                         row.get("returncode") != 0
