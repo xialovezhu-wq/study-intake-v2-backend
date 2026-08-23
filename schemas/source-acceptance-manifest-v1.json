@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.study-intake.invalid/schemas/source-acceptance-manifest-v1.json",
+  "title": "Study Intake source acceptance manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["core", "source_manifest_sha256"],
+  "properties": {
+    "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "core": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "producer_mode", "backend", "shared_mcp", "subjects", "harness", "config_sha256", "formal_write_count"],
+      "properties": {
+        "schema_version": {"const": "study-intake-source-acceptance-manifest-v1"},
+        "producer_mode": {"enum": ["canonical", "actual_skill"]},
+        "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "formal_write_count": {"const": 0},
+        "backend": {
+          "type": "object",
+          "required": ["root", "branch", "head", "tree", "clean", "status_sha256", "module", "tracked_files"],
+          "properties": {
+            "root": {"type": "string", "minLength": 1},
+            "branch": {"type": "string"},
+            "head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+            "tree": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+            "clean": {"const": true},
+            "status_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "module": {"type": "string", "minLength": 1},
+            "tracked_files": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/relativeFile"}
+            }
+          }
+        },
+        "shared_mcp": {
+          "type": "object",
+          "required": ["root", "branch", "head", "tree", "clean", "status_sha256", "module_file", "tracked_files"],
+          "properties": {
+            "root": {"type": "string", "minLength": 1},
+            "branch": {"type": "string"},
+            "head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+            "tree": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+            "clean": {"const": true},
+            "status_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "module_file": {"$ref": "#/$defs/absoluteFile"},
+            "tracked_files": {"type": "array", "items": {"$ref": "#/$defs/relativeFile"}}
+          }
+        },
+        "subjects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["math", "cs408", "english"],
+          "properties": {
+            "math": {"$ref": "#/$defs/subject"},
+            "cs408": {"$ref": "#/$defs/subject"},
+            "english": {"$ref": "#/$defs/subject"}
+          }
+        },
+        "harness": {
+          "type": "object",
+          "required": ["files", "sha256"],
+          "properties": {
+            "files": {"type": "array", "minItems": 4, "items": {"$ref": "#/$defs/absoluteFile"}},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "relativeFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "absoluteFile": {"$ref": "#/$defs/relativeFile"},
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject_root", "producer_source_root", "git", "files"],
+      "properties": {
+        "subject_root": {"type": "string", "minLength": 1},
+        "producer_source_root": {"type": "string", "minLength": 1},
+        "git": {"type": "object"},
+        "files": {
+          "type": "object",
+          "required": ["producer_module_file", "skill_file", "writer_file"],
+          "additionalProperties": {"$ref": "#/$defs/absoluteFile"},
+          "properties": {
+            "producer_module_file": {"$ref": "#/$defs/absoluteFile"},
+            "skill_file": {"$ref": "#/$defs/absoluteFile"},
+            "writer_file": {"$ref": "#/$defs/absoluteFile"},
+            "command_source": {"$ref": "#/$defs/absoluteFile"}
+          }
+        }
+      }
+    }
+  }
+}
