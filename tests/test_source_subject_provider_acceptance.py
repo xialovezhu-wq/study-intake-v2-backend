@@ -263,10 +263,9 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
         self.assertEqual(mirror.name, provenance["release_id"])
         self.assertFalse(provenance["backend_build_executed"])
         self.assertFalse((self.runtime / "current").exists())
-        self.assertEqual(
-            json.loads((mirror / "release.json").read_text())["source_mode"],
-            True,
-        )
+        release_manifest = json.loads((mirror / "release.json").read_text())
+        self.assertEqual(release_manifest["source_mode"], True)
+        self.assertEqual(release_manifest["component_inventory"], {})
 
     def test_canonical_descriptor_contains_only_canonical_closure_bytes(self) -> None:
         canonical = self.base / "canonical-math"

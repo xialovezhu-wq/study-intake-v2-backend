@@ -294,6 +294,7 @@ def materialize_source_release(
     release_manifest = {
         "schema_version": "study-intake-preprocessor-release-v2",
         "release_id": release_id,
+        "component_inventory": {},
         "source_mode": True,
         "formal_write_count": 0,
     }
