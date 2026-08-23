@@ -1199,6 +1199,20 @@ class MathV2CoreTests(unittest.TestCase):
             "先完成换元，再按原变量确定性回代。",
         )
         self.assertEqual(solution["content"]["formal_write_count"], 0)
+        self.assertEqual(
+            solution["sha256"],
+            hashlib.sha256(
+                (
+                    json.dumps(
+                        solution["content"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
 
     def test_math_runner_does_not_invent_missing_solution_artifact(self) -> None:
         adapter = Worker(self.config, model_runner=FakeMathRunner()).adapters["math"]

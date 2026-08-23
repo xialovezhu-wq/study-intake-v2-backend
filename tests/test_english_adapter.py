@@ -610,6 +610,20 @@ print(json.dumps({
             article_artifacts[0]["content"]["canonical_text"],
             source["canonical_text"],
         )
+        self.assertEqual(
+            article_artifacts[0]["sha256"],
+            hashlib.sha256(
+                (
+                    json.dumps(
+                        article_artifacts[0]["content"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
         facts = runner._capture_mcp_facts(candidate)["facts"][
             "article_source_artifact"
         ]
