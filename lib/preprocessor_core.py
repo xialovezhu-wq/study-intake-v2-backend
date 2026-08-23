@@ -17782,7 +17782,7 @@ class CodexRunner:
                         "formal_write_count": 0,
                     }
                     digest = hashlib.sha256(
-                        canonical_bytes(envelope)
+                        canonical_bytes(envelope) + b"\n"
                     ).hexdigest()
                     rows.append(
                         {
@@ -17833,7 +17833,9 @@ class CodexRunner:
                     "canonical_text": canonical_text,
                     "formal_write_count": 0,
                 }
-                digest = hashlib.sha256(canonical_bytes(envelope)).hexdigest()
+                digest = hashlib.sha256(
+                    canonical_bytes(envelope) + b"\n"
+                ).hexdigest()
                 rows.append(
                     {
                         "artifact_id": f"article-source-{source_hash[:24]}",
