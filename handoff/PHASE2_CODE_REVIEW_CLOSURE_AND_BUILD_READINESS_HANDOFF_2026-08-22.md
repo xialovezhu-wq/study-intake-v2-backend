@@ -16,10 +16,11 @@
 |---|---|
 | Feature branch | `codex/local-backend-validation-reduction-phase1-20260822` |
 | Recovery starting HEAD | `ef479c7a2792e63cfd0a0e01e603f6fcd583af85` |
-| Tested code HEAD after isolated-acceptance repair | `876552a913f6666ec4512b6ae30fdb5020a880f4` |
+| Tested code HEAD after isolated-acceptance repairs | `e341cb8a6eaa60cf2332ebaec795d3239c95a60e` |
 | Implementation commit | `791fe66` |
 | Portable regression commit | `ea90baf` |
 | English isolated-acceptance repair | `876552a` |
+| Inline artifact canonical LF repair | `e341cb8` |
 | Shared MCP `main` | `37eab4e6638fabd6be15e31f0f278c8b6651dcf9` |
 | Math canonical `main` | `8dfe49dcb6e0784a716ac87248039212737ed63b` |
 | CS408 canonical `main` | `09e811e97f7e99ece7cab1751aca86ec92a7c41e` |
@@ -127,14 +128,14 @@ Git or the handoff.
 
 | Suite | Passed | Failed | Skipped | Duration |
 |---|---:|---:|---:|---:|
-| Backend Core full discovery | 1215 | 0 | 0 | 836.813 s |
-| Dashboard full discovery | 129 | 0 | 0 | 8.190 s |
-| Frontend view-model | 18 assertions | 0 | 0 | 0.093 s |
-| Math Producer full | 75 | 0 | 0 | 0.929 s |
-| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.505 s |
-| English Producer full | 61 | 0 | 0 | 1.782 s |
-| Shared MCP full | 78 | 0 | 0 | 9.494 s |
-| English isolated-acceptance affected set | 81 | 0 | 0 | 32.637 s |
+| Backend Core full discovery | 1215 | 0 | 0 | 831.721 s |
+| Dashboard full discovery | 129 | 0 | 0 | 9.208 s |
+| Frontend view-model | 18 assertions | 0 | 0 | 0.094 s |
+| Math Producer full | 75 | 0 | 0 | 0.915 s |
+| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.765 s |
+| English Producer full | 61 | 0 | 0 | 1.983 s |
+| Shared MCP full | 78 | 0 | 0 | 12.360 s |
+| Inline artifact affected set | 127 | 0 | 0 | 33.748 s |
 | Final affected combined | 144 | 0 | 0 | 74.108 s |
 | Final ordinary/canary combined | 59 | 0 | 0 | 8.872 s |
 | Actual production-byte zero-model | 3 | 0 | 0 | 2.030 s |
@@ -195,8 +196,19 @@ Provider or MCP invocation because the English inline article artifact used
 `source_text` while the ProcessingPlugin contract accepts `article_text`.
 Candidate `3127bf2c...` was never activated. The minimal source correction and
 repeatable H4 temporary-runtime isolation are committed at `876552a`; Backend
-Core 1215/1215 and every final suite passed again. A new immutable candidate is
-therefore required and the rejected candidate must not be deployed.
+Core 1215/1215 and every final suite passed again.
+
+The successor candidate
+`a64649f67e697995742c6179a83206181d5ecc463cc5b8684f783de6725937fd`
+passed strict verify and advanced farther through the same isolated English
+Capture, but was also rejected before Provider invocation: inline article
+content was hashed without the canonical trailing LF required by the
+ProcessingPlugin freezer. The same defect existed in the fallback inline Math
+solution-text artifact. Both digests now use canonical JSON plus LF and have
+exact English and Math regressions at `e341cb8`. Candidate `a64649f6...` was
+never activated. Backend Core 1215/1215, the 127-test affected set, and all six
+final suites passed on the corrected source. A third immutable candidate is
+therefore required; neither rejected candidate may be deployed.
 
 The feature worktree is ready to be pushed and built as an immutable candidate.
 Build must use the frozen authorized formal baseline, explicit production
