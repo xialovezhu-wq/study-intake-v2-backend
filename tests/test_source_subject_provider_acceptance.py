@@ -88,9 +88,12 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
         manifest_path = release / "release.json"
         manifest_path.write_bytes(acceptance.canonical_bytes(manifest))
         manifest_path.chmod(0o444)
-        python = self.base / "python"
-        python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        python.chmod(0o755)
+        python_real = self.base / "python-real"
+        python_real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python_real.chmod(0o755)
+        python = self.base / "venv/bin/python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(python_real)
         spec = {
             "canonical_source_root": str(source),
             "release_root": str(release),
@@ -195,6 +198,9 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             verified["canonical_helpers_sha256"],
             binding["canonical_helpers_sha256"],
+        )
+        self.assertEqual(
+            verified["python_executable"], binding["python_executable"]
         )
 
     def test_mcp_source_or_release_drift_fails_closed(self) -> None:

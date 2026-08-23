@@ -158,7 +158,11 @@ def verify_sealed_mcp(spec: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise AcceptanceError("sealed_mcp_release_file_invalid")
     python = Path(str(raw.get("python_executable") or ""))
-    if not python.is_file() or not os.access(python, os.X_OK):
+    if (
+        not python.is_absolute()
+        or not python.is_file()
+        or not os.access(python, os.X_OK)
+    ):
         raise AcceptanceError("sealed_mcp_python_invalid")
     helpers_path = source / "tests/helpers.py"
     helpers_binding = verify_file_binding(
@@ -172,7 +176,7 @@ def verify_sealed_mcp(spec: Mapping[str, Any]) -> dict[str, Any]:
         "release_id": release_id,
         "release_manifest_sha256": sha256_file(manifest_path),
         "source_files_sha256": hashlib.sha256(canonical_bytes(canonical)).hexdigest(),
-        "python_executable": str(python.resolve()),
+        "python_executable": str(python.absolute()),
         "canonical_helpers_path": helpers_binding["path"],
         "canonical_helpers_sha256": helpers_binding["sha256"],
         "build_release_invoked": False,
