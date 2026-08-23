@@ -16,11 +16,12 @@
 |---|---|
 | Feature branch | `codex/local-backend-validation-reduction-phase1-20260822` |
 | Recovery starting HEAD | `ef479c7a2792e63cfd0a0e01e603f6fcd583af85` |
-| Tested code HEAD after isolated-acceptance repairs | `e341cb8a6eaa60cf2332ebaec795d3239c95a60e` |
+| Tested code HEAD after isolated-acceptance repairs | `d69d1f0c1503606888d77ee2150a4b2c1d896f86` |
 | Implementation commit | `791fe66` |
 | Portable regression commit | `ea90baf` |
 | English isolated-acceptance repair | `876552a` |
 | Inline artifact canonical LF repair | `e341cb8` |
+| Three-stage task supervisor event repair | `d69d1f0` |
 | Shared MCP `main` | `37eab4e6638fabd6be15e31f0f278c8b6651dcf9` |
 | Math canonical `main` | `8dfe49dcb6e0784a716ac87248039212737ed63b` |
 | CS408 canonical `main` | `09e811e97f7e99ece7cab1751aca86ec92a7c41e` |
@@ -128,18 +129,19 @@ Git or the handoff.
 
 | Suite | Passed | Failed | Skipped | Duration |
 |---|---:|---:|---:|---:|
-| Backend Core full discovery | 1215 | 0 | 0 | 831.721 s |
-| Dashboard full discovery | 129 | 0 | 0 | 9.208 s |
-| Frontend view-model | 18 assertions | 0 | 0 | 0.094 s |
-| Math Producer full | 75 | 0 | 0 | 0.915 s |
-| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.765 s |
-| English Producer full | 61 | 0 | 0 | 1.983 s |
-| Shared MCP full | 78 | 0 | 0 | 12.360 s |
+| Backend Core full discovery | 1216 | 0 | 0 | 815.263 s |
+| Dashboard full discovery | 129 | 0 | 0 | 4.526 s |
+| Frontend view-model | 18 assertions | 0 | 0 | 0.014 s |
+| Math Producer full | 75 | 0 | 0 | 0.784 s |
+| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.268 s |
+| English Producer full | 61 | 0 | 0 | 1.638 s |
+| Shared MCP full | 78 | 0 | 0 | 8.738 s |
+| Three-stage task-runner event regression | 8 | 0 | 0 | 0.077 s |
 | Inline artifact affected set | 127 | 0 | 0 | 33.748 s |
 | Final affected combined | 144 | 0 | 0 | 74.108 s |
 | Final ordinary/canary combined | 59 | 0 | 0 | 8.872 s |
-| Actual production-byte zero-model | 3 | 0 | 0 | 2.030 s |
-| Source-only exact run-once | 1 | 0 | 0 | included in targeted/full |
+| Actual production-byte zero-model | 3 | 0 | 0 | 1.931 s |
+| Source-only exact run-once | 1 | 0 | 0 | 0.052 s |
 
 Shared MCP used its existing 3.13 dependency runtime with the editable source
 pointer temporarily rebound to the canonical checkout. The original pointer
@@ -173,7 +175,7 @@ failure with `manual_live_authorization_missing` / `failed_drained`. It had
 zero model, Provider, MCP, and formal writes. No replay or recovery was
 attempted in this phase.
 
-## Zero-call and no-mutation proof
+## Pre-build code-review zero-call and no-mutation proof
 
 ```text
 real_terra_call_count=0
@@ -185,6 +187,14 @@ production_capture_consumed_count=0
 formal_write_count=0
 PROTECTED_PRODUCTION_SURFACES_UNCHANGED=true
 ```
+
+After immutable candidates were built, the isolated synthetic acceptance lane
+completed two non-production Terra model calls. Across those two calls it
+observed 12 MCP attempts: 10 succeeded and two returned business-level
+`NOT_FOUND` against an initially incomplete synthetic catalog. It completed no
+Luna or Terra-final call. Every artifact remained below an ephemeral isolated
+runtime, formal writes stayed zero, and production Provider, MCP, Capture, task,
+package, report, and formal surfaces remained unchanged.
 
 ## Build readiness
 
@@ -210,7 +220,21 @@ never activated. Backend Core 1215/1215, the 127-test affected set, and all six
 final suites passed on the corrected source. A third immutable candidate is
 therefore required; neither rejected candidate may be deployed.
 
-The feature worktree is ready to be pushed and built as an immutable candidate.
+The third candidate
+`adb573627936f1eb23f3f56fd2463d170a51962e0be6dc3b141c4118db7ab3cf`
+also passed strict immutable verification and was never activated. After the
+acceptance harness was aligned with the content-addressed runtime, task
+supervisor, and complete synthetic English catalog, its English Terra-analysis
+stage completed with 5/5 MCP calls, a zero Provider return code, sealed task and
+Provider process closure, and zero formal writes. The child then failed before
+starting Luna analysis because `_StageEventRecorder` did not recognize the new
+`english_luna_analysis` stage introduced by the three-stage AnalysisPackage
+path. The same missing mapping affected Math and CS408. Commit `d69d1f0` maps
+each subject's Luna stage to the authenticated `model_submitted` task event and
+adds a three-subject regression. Backend Core now passes 1216/1216. Candidate
+`adb57362...` is rejected; a fourth immutable candidate is required.
+
+The feature worktree is ready to be pushed and built as a fourth immutable candidate.
 Build must use the frozen authorized formal baseline, explicit production
 Math/CS408/English roots, the current immutable Shared MCP release, and the
 repository-owned `release_manager.py`. It must not switch `current`, change
