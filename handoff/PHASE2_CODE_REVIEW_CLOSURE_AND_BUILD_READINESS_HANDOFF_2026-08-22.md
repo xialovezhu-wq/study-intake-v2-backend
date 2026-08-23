@@ -16,7 +16,7 @@
 |---|---|
 | Feature branch | `codex/local-backend-validation-reduction-phase1-20260822` |
 | Recovery starting HEAD | `ef479c7a2792e63cfd0a0e01e603f6fcd583af85` |
-| Tested code HEAD after isolated-acceptance repairs | `b65dbd40d487e2c3926068a2acb9008d9b618f9f` |
+| Tested code HEAD after isolated-acceptance repairs | `7094110188cc042a782a8abd374a015c5a2bf8b5` |
 | Implementation commit | `791fe66` |
 | Portable regression commit | `ea90baf` |
 | English isolated-acceptance repair | `876552a` |
@@ -25,6 +25,7 @@
 | AnalysisPackage subprocess terminal repair | `bf70b78` |
 | Cached stage-progress transition repair | `37e5050` |
 | AnalysisPackage Provider closure-set repair | `b65dbd4` |
+| AnalysisPackage MCP transcript closure repair | `7094110` |
 | Shared MCP `main` | `37eab4e6638fabd6be15e31f0f278c8b6651dcf9` |
 | Math canonical `main` | `8dfe49dcb6e0784a716ac87248039212737ed63b` |
 | CS408 canonical `main` | `09e811e97f7e99ece7cab1751aca86ec92a7c41e` |
@@ -132,19 +133,19 @@ Git or the handoff.
 
 | Suite | Passed | Failed | Skipped | Duration |
 |---|---:|---:|---:|---:|
-| Backend Core full discovery | 1220 | 0 | 0 | 834.491 s |
-| Dashboard full discovery | 129 | 0 | 0 | 4.450 s |
+| Backend Core full discovery | 1220 | 0 | 0 | 812.061 s |
+| Dashboard full discovery | 129 | 0 | 0 | 4.501 s |
 | Frontend view-model | 18 assertions | 0 | 0 | 0.110 s |
 | Math Producer full | 75 | 0 | 0 | 0.748 s |
 | CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.166 s |
 | English Producer full | 61 | 0 | 0 | 1.559 s |
 | Shared MCP full | 78 | 0 | 0 | 8.971 s |
-| AnalysisPackage subprocess affected set | 27 | 0 | 0 | 3.706 s |
+| AnalysisPackage subprocess affected set | 27 | 0 | 0 | 3.622 s |
 | Inline artifact affected set | 127 | 0 | 0 | 33.748 s |
 | Final affected combined | 144 | 0 | 0 | 74.108 s |
 | Final ordinary/canary combined | 59 | 0 | 0 | 8.872 s |
-| Actual production-byte zero-model | 3 | 0 | 0 | 1.901 s |
-| Source-only exact run-once | 1 | 0 | 0 | 0.047 s |
+| Actual production-byte zero-model | 3 | 0 | 0 | 1.920 s |
+| Source-only exact run-once | 1 | 0 | 0 | 0.053 s |
 
 Shared MCP used its existing 3.13 dependency runtime with the editable source
 pointer temporarily rebound to the canonical checkout. The original pointer
@@ -192,8 +193,8 @@ PROTECTED_PRODUCTION_SURFACES_UNCHANGED=true
 ```
 
 After immutable candidates were built, the isolated synthetic acceptance lane
-completed 11 non-production model calls: eight Terra and three Luna. It observed
-59 MCP attempts: 57 succeeded and two returned business-level `NOT_FOUND`
+completed 14 non-production model calls: 10 Terra and four Luna. It observed
+73 MCP attempts: 71 succeeded and two returned business-level `NOT_FOUND`
 against an initially incomplete synthetic catalog. Every artifact remained
 below an ephemeral isolated runtime, formal writes stayed zero, and production
 Provider, MCP, Capture, task, package, report, and formal surfaces remained
@@ -299,7 +300,26 @@ the valid `english_luna_analysis` process as an unexpected extra closure. Commit
 stage order while leaving ordinary two-stage closure validation unchanged.
 Candidate `4fc752b5...` is rejected; a seventh immutable candidate is required.
 
-The feature worktree is ready to be pushed and built as a seventh immutable candidate.
+The seventh candidate
+`9129a471c9e2177f51436802ec8ed76e8573735635d0e0b0555125dbd0004264`
+was built from feature HEAD `3232a7c`, passed strict immutable verification,
+Core 147/147, Dashboard 129/129, and the authorized formal-surface gate, and was
+never activated. Its release manifest SHA-256 is
+`d63869a86ef06da69762d4443fa7bf4cd69280d5e9caed50349becacb256b755`
+and config SHA-256 is
+`f8b828d43e33fec3d3b57e3092a896be82795a8d29af143da4473612d74cf2d4`.
+
+Its isolated English task completed successfully with a sealed completion,
+package, receipt, task supervisor, and all three Provider closures. Stage MCP
+counts were 5, 4, and 5. Projection into the frozen SubjectSol v2 batch failed
+only during restricted needs-review reopen because the outer analysis and
+critical runtime omitted their MCP transcript refs, even though all three
+semantic-stage transcripts existed. Commit `7094110` validates and preserves
+every AnalysisPackage transcript and maps the first and final Terra transcripts
+to the outer review runtime without dropping the Luna transcript. Candidate
+`9129a471...` is rejected; an eighth immutable candidate is required.
+
+The feature worktree is ready to be pushed and built as an eighth immutable candidate.
 Build must use the frozen authorized formal baseline, explicit production
 Math/CS408/English roots, the current immutable Shared MCP release, and the
 repository-owned `release_manager.py`. It must not switch `current`, change
