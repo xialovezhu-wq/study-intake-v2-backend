@@ -16,13 +16,14 @@
 |---|---|
 | Feature branch | `codex/local-backend-validation-reduction-phase1-20260822` |
 | Recovery starting HEAD | `ef479c7a2792e63cfd0a0e01e603f6fcd583af85` |
-| Tested code HEAD after isolated-acceptance repairs | `bf70b7886a382c60a1666d2ef8154e6d41e9a652` |
+| Tested code HEAD after isolated-acceptance repairs | `37e50504100fdf409ffdd90d90854411acf68dfe` |
 | Implementation commit | `791fe66` |
 | Portable regression commit | `ea90baf` |
 | English isolated-acceptance repair | `876552a` |
 | Inline artifact canonical LF repair | `e341cb8` |
 | Three-stage task supervisor event repair | `d69d1f0` |
 | AnalysisPackage subprocess terminal repair | `bf70b78` |
+| Cached stage-progress transition repair | `37e5050` |
 | Shared MCP `main` | `37eab4e6638fabd6be15e31f0f278c8b6651dcf9` |
 | Math canonical `main` | `8dfe49dcb6e0784a716ac87248039212737ed63b` |
 | CS408 canonical `main` | `09e811e97f7e99ece7cab1751aca86ec92a7c41e` |
@@ -130,19 +131,19 @@ Git or the handoff.
 
 | Suite | Passed | Failed | Skipped | Duration |
 |---|---:|---:|---:|---:|
-| Backend Core full discovery | 1218 | 0 | 0 | 879.638 s |
-| Dashboard full discovery | 129 | 0 | 0 | 4.062 s |
-| Frontend view-model | 18 assertions | 0 | 0 | 0.037 s |
-| Math Producer full | 75 | 0 | 0 | 1.089 s |
-| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.582 s |
-| English Producer full | 61 | 0 | 0 | 2.064 s |
+| Backend Core full discovery | 1219 | 0 | 0 | 863.938 s |
+| Dashboard full discovery | 129 | 0 | 0 | 4.537 s |
+| Frontend view-model | 18 assertions | 0 | 0 | 0.110 s |
+| Math Producer full | 75 | 0 | 0 | 1.010 s |
+| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 2.165 s |
+| English Producer full | 61 | 0 | 0 | 2.554 s |
 | Shared MCP full | 78 | 0 | 0 | 8.971 s |
-| AnalysisPackage subprocess affected set | 25 | 0 | 0 | 3.800 s |
+| AnalysisPackage subprocess affected set | 26 | 0 | 0 | 3.782 s |
 | Inline artifact affected set | 127 | 0 | 0 | 33.748 s |
 | Final affected combined | 144 | 0 | 0 | 74.108 s |
 | Final ordinary/canary combined | 59 | 0 | 0 | 8.872 s |
-| Actual production-byte zero-model | 3 | 0 | 0 | 2.015 s |
-| Source-only exact run-once | 1 | 0 | 0 | 0.050 s |
+| Actual production-byte zero-model | 3 | 0 | 0 | 1.929 s |
+| Source-only exact run-once | 1 | 0 | 0 | 0.051 s |
 
 Shared MCP used its existing 3.13 dependency runtime with the editable source
 pointer temporarily rebound to the canonical checkout. The original pointer
@@ -190,8 +191,8 @@ PROTECTED_PRODUCTION_SURFACES_UNCHANGED=true
 ```
 
 After immutable candidates were built, the isolated synthetic acceptance lane
-completed five non-production model calls: four Terra and one Luna. It observed
-27 MCP attempts: 25 succeeded and two returned business-level `NOT_FOUND`
+completed eight non-production model calls: six Terra and two Luna. It observed
+40 MCP attempts: 38 succeeded and two returned business-level `NOT_FOUND`
 against an initially incomplete synthetic catalog. Every artifact remained
 below an ephemeral isolated runtime, formal writes stayed zero, and production
 Provider, MCP, Capture, task, package, report, and formal surfaces remained
@@ -258,7 +259,28 @@ inside the subprocess runner, bypasses the legacy subject publisher for this
 mode, and validates a three-stage review terminal. Candidate `0e19d9bf...` is
 rejected; a fifth immutable candidate is required.
 
-The feature worktree is ready to be pushed and built as a fifth immutable candidate.
+The fifth candidate
+`14498e1b6fa5de8d9ff3534fb323366471640c5c6887200c0824d52c1416157a`
+was built from feature HEAD `6b6bd12`, passed strict immutable verification,
+Core 147/147, Dashboard 129/129, and the authorized formal-surface gate, and was
+never activated. Its release manifest SHA-256 is
+`66ac37e96a036de8ed55ee0a018575d9a8b4b932f2fa03a5976796ebad46ae14`,
+config SHA-256 is
+`96932405fa0fe203092f4550f44d419ff39de4003c8d5bef351b09f54c701b3d`,
+and component-lock SHA-256 remains
+`098247f44fed39a153f04574b47a0f7105286d54e815ae7a65115b2e80d669d1`.
+
+Its isolated English transaction again completed all three Provider stages with
+zero return codes and sealed process closure; the stage MCP counts were 4, 4,
+and 5. The task supervisor also returned zero. Terminal publication then failed
+with `stage_progress_counter_regression`: the inner Terra-final Provider had
+already recorded nonzero progress for `english_critical_review`, while the outer
+dispatcher attempted to append a synthetic zero-counter transition for the same
+stage and fence. Commit `37e5050` preserves the existing authenticated progress
+head instead of writing a false zero start. Candidate `14498e1b...` is rejected;
+a sixth immutable candidate is required.
+
+The feature worktree is ready to be pushed and built as a sixth immutable candidate.
 Build must use the frozen authorized formal baseline, explicit production
 Math/CS408/English roots, the current immutable Shared MCP release, and the
 repository-owned `release_manager.py`. It must not switch `current`, change
