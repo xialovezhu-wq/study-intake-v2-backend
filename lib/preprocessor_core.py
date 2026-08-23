@@ -1456,6 +1456,29 @@ def _validate_profile_stall_config(profile: Mapping[str, Any]) -> None:
             raise PreprocessorError(f"config_{key}_invalid")
 
 
+def _assert_cs408_private_root_consistency(config: Mapping[str, Any]) -> None:
+    private_evidence = config.get("private_evidence")
+    adapters = config.get("adapters")
+    if not isinstance(private_evidence, Mapping) or not isinstance(adapters, Mapping):
+        return
+    top_level_root = private_evidence.get("current_question_root")
+    cs408_config = adapters.get("cs408")
+    if not isinstance(top_level_root, str) or not isinstance(cs408_config, Mapping):
+        return
+    adapter_root = cs408_config.get("private_current_question_root")
+    if adapter_root is None:
+        return
+    if not isinstance(adapter_root, str) or not adapter_root.strip():
+        raise PreprocessorError("config_cs408_private_current_question_root_invalid")
+    if (
+        Path(adapter_root).expanduser().resolve()
+        != Path(top_level_root).expanduser().resolve()
+    ):
+        raise PreprocessorError(
+            "config_cs408_private_current_question_root_mismatch"
+        )
+
+
 def _materialize_legacy_fixture_v2_config(
     config: dict[str, Any], *, config_path: Path
 ) -> dict[str, Any]:
@@ -1941,6 +1964,7 @@ def load_config(path: Path) -> dict[str, Any]:
             raise PreprocessorError("config_private_evidence_missing")
         if not isinstance(private_evidence.get("current_question_root"), str):
             raise PreprocessorError("config_private_evidence_root_invalid")
+        _assert_cs408_private_root_consistency(config)
         if not isinstance(private_evidence.get("max_bundle_bytes"), int) or not (
             4096 <= int(private_evidence["max_bundle_bytes"]) <= 2 * 1024 * 1024
         ):
@@ -11147,6 +11171,7 @@ def make_adapters(config: Mapping[str, Any]) -> dict[str, BaseAdapter]:
         cs408_config = dict(config["adapters"]["cs408"])
         processing_contract = cs408_processing_contract(config)
         if processing_contract is not None:
+            _assert_cs408_private_root_consistency(config)
             private_evidence = config["private_evidence"]
             cs408_config.update(
                 {

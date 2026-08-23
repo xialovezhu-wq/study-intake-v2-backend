@@ -682,6 +682,83 @@ class PreprocessorTests(unittest.TestCase):
             ):
                 worker._assert_current_candidate_generation(original)
 
+    def test_cs408_private_root_conflict_fails_config_load(self) -> None:
+        config = self.make_v2_config()
+        adapter_root = self.runtime / "private/attempt-current-question-evidence"
+        adapter_root.mkdir(parents=True, mode=0o700)
+        adapter_root.chmod(0o700)
+        config["adapters"]["cs408"]["private_current_question_root"] = str(
+            adapter_root
+        )
+        atomic_write_json(self.config_path, config)
+
+        with self.assertRaisesRegex(
+            PreprocessorError,
+            "config_cs408_private_current_question_root_mismatch",
+        ):
+            load_config(self.config_path)
+
+    def test_cs408_same_private_root_rebuild_preserves_generation(self) -> None:
+        config = self.make_v2_config()
+        private_root = config["private_evidence"]["current_question_root"]
+        config["adapters"]["cs408"]["private_current_question_root"] = private_root
+        atomic_write_json(self.config_path, config)
+        loaded = load_config(self.config_path)
+        parent = Worker(loaded, model_runner=FakeV2Runner())
+        statuses = parent.scan_statuses("2026-08-04", only_subject="cs408")
+        original = next(
+            candidate
+            for candidate in parent.candidates(statuses, subject="cs408")
+            if candidate.capture_id == self.cs_capture
+        )
+        for relative in (
+            "dispatch/model-stage-raw-outputs/task.json",
+            "dispatch/analysis-packages/task.json",
+            "dispatch/packages/task.json",
+            "dispatch/receipts/task.json",
+        ):
+            atomic_write_json(
+                self.runtime / relative,
+                {"task_generated": True, "formal_write_count": 0},
+            )
+        rebuilt = Worker(loaded, model_runner=FakeV2Runner())
+        current = next(
+            candidate
+            for candidate in rebuilt.candidates(
+                rebuilt.scan_statuses("2026-08-04", only_subject="cs408"),
+                subject="cs408",
+            )
+            if candidate.capture_id == self.cs_capture
+        )
+
+        self.assertEqual(current.study_date, original.study_date)
+        self.assertEqual(current.input_fingerprint, original.input_fingerprint)
+        self.assertEqual(current.input_binding, original.input_binding)
+        rebuilt._assert_current_candidate_generation(original)
+
+    def test_cs408_real_producer_payload_change_trips_generation_fence(
+        self,
+    ) -> None:
+        config = self.make_v2_config()
+        atomic_write_json(self.config_path, config)
+        worker = Worker(load_config(self.config_path), model_runner=FakeV2Runner())
+        original = next(
+            candidate
+            for candidate in worker.candidates(
+                worker.scan_statuses("2026-08-04", only_subject="cs408"),
+                subject="cs408",
+            )
+            if candidate.capture_id == self.cs_capture
+        )
+        mutated = load_json(self.cs_status_path)
+        mutated["captures"][self.cs_capture]["payload_sha256"] = "6" * 64
+        atomic_write_json(self.cs_status_path, mutated)
+
+        with self.assertRaisesRegex(
+            PreprocessorError, "stale_input_superseded"
+        ):
+            worker._assert_current_candidate_generation(original)
+
     def make_v2_config(self) -> dict:
         config = copy.deepcopy(self.config)
         config["adapters"]["math"]["enabled"] = False
