@@ -55,7 +55,9 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
             "scripts/sealed_launcher.py": b"# sealed\n",
             "src/study_read_mcp/__init__.py": b"__version__='1'\n",
             "src/study_read_mcp/server.py": b"SERVER=True\n",
-            "tests/helpers.py": b"HELPER=True\n",
+            "tests/helpers.py": (
+                b"from study_read_mcp import __version__\nHELPER=True\n"
+            ),
         }
         for relative, payload in files.items():
             path = root / relative
@@ -380,6 +382,18 @@ class SourceSubjectProviderAcceptanceTests(unittest.TestCase):
             acceptance.load_bound_module(
                 "bound_test_driver_drift", driver, "0" * 64
             )
+
+    def test_bound_mcp_helper_imports_only_from_canonical_source_root(self) -> None:
+        source = self._mcp_source()
+        helper = source / "tests/helpers.py"
+        module = acceptance.load_bound_module(
+            "bound_mcp_helper",
+            helper,
+            acceptance.sha256_file(helper),
+            import_root=source / "src",
+        )
+        self.assertTrue(module.HELPER)
+        self.assertEqual(module.__version__, "1")
 
     def test_execution_evidence_uses_physical_hashes_and_real_pids(self) -> None:
         root = self.evidence / "retained/trial/runtime"

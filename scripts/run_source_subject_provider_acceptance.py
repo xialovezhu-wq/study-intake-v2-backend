@@ -446,13 +446,30 @@ def materialize_canonical_closures(
     return roots, heads
 
 
-def load_bound_module(name: str, path: Path, digest: object) -> Any:
+def load_bound_module(
+    name: str,
+    path: Path,
+    digest: object,
+    *,
+    import_root: Path | None = None,
+) -> Any:
     verify_file_binding(path, digest, f"{name}_hash_mismatch")
     module_spec = importlib.util.spec_from_file_location(name, path)
     if module_spec is None or module_spec.loader is None:
         raise AcceptanceError(f"{name}_load_failed")
     module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    inserted: str | None = None
+    if import_root is not None:
+        root = import_root.resolve(strict=True)
+        if root.is_symlink() or not root.is_dir():
+            raise AcceptanceError(f"{name}_import_root_invalid")
+        inserted = str(root)
+        sys.path.insert(0, inserted)
+    try:
+        module_spec.loader.exec_module(module)
+    finally:
+        if inserted is not None and sys.path and sys.path[0] == inserted:
+            sys.path.pop(0)
     return module
 
 
@@ -536,6 +553,7 @@ def build_portable_fixture(
         "source_acceptance_mcp_helpers",
         Path(mcp["canonical_helpers_path"]),
         mcp["canonical_helpers_sha256"],
+        import_root=Path(mcp["canonical_source_root"]) / "src",
     )
     repositories = helper.make_fixture(base / "subject-data")
     subject_roots = {
