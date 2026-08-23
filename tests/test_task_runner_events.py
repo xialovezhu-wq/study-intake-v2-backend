@@ -185,6 +185,30 @@ class TaskRunnerEventTests(unittest.TestCase):
             ["process_started", "critical_started"],
         )
 
+    def test_records_three_stage_luna_analysis_boundary(self) -> None:
+        calls = []
+
+        class Runner:
+            def _execute_prompt(inner_self, **kwargs):
+                calls.append(kwargs["stage_name"])
+                return {"stage": kwargs["stage_name"]}
+
+        recorder = _StageEventRecorder(
+            Runner(), task=self.task, lease=self.lease, store=self.store
+        )
+        stage_names = [
+            "english_luna_analysis",
+            "math_luna_analysis",
+            "cs408_luna_analysis",
+        ]
+        for stage_name in stage_names:
+            recorder(stage_name=stage_name)
+        self.assertEqual(calls, stage_names)
+        self.assertEqual(
+            [row["event"] for row in self._events()],
+            ["process_started", *("model_submitted" for _ in stage_names)],
+        )
+
     def test_stale_fence_cannot_write_core_analysis_checkpoint(self) -> None:
         calls = []
 

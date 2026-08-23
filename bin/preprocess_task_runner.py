@@ -403,10 +403,13 @@ class _StageEventRecorder:
 
     _EVENTS = {
         "english_analysis": ("analysis_submitted", None),
+        "english_luna_analysis": ("model_submitted", None),
         "english_critical_review": ("critical_started", "critical_completed"),
         "math_analysis": ("analysis_submitted", None),
+        "math_luna_analysis": ("model_submitted", None),
         "math_critical_review": ("critical_started", "critical_completed"),
         "cs408_analysis": ("analysis_submitted", None),
+        "cs408_luna_analysis": ("model_submitted", None),
         "cs408_critical_review": ("critical_started", "critical_completed"),
     }
 
