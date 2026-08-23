@@ -25,13 +25,65 @@ def canonical_file(value: object) -> bytes:
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
+            allow_nan=False,
         )
         + "\n"
     ).encode("utf-8")
 
 
-def publish(root: Path, value: dict[str, object]) -> tuple[str, Path]:
-    payload = canonical_file(value)
+def publish(
+    root: Path,
+    value: dict[str, object],
+    *,
+    serialization: str = "compact",
+) -> tuple[str, Path]:
+    if serialization == "compact":
+        payload = canonical_file(value)
+    elif serialization == "pretty":
+        payload = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    elif serialization == "missing_lf":
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    elif serialization == "double_lf":
+        payload = canonical_file(value) + b"\n"
+    elif serialization == "wrong_indentation":
+        payload = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                indent=4,
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    elif serialization == "wrong_key_order":
+        payload = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    else:
+        raise SystemExit("invalid transcript serialization fixture")
     digest = hashlib.sha256(payload).hexdigest()
     path = root / "sha256" / digest[:2] / f"{digest}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,9 +175,14 @@ def build_stage(stage_role: str, *, has_finding: bool) -> dict[str, object]:
         "model_call_count": 1,
         "formal_write_count": 0,
     }
+    if frozen.get("test_transcript_schema_invalid"):
+        transcript["schema_version"] = "invalid-transcript-schema"
     transcript_sha256, _transcript_path = publish(
         runtime_root / "private" / "reports" / "mcp-stage-transcripts",
         transcript,
+        serialization=str(
+            frozen.get("test_transcript_serialization") or "pretty"
+        ),
     )
     warnings = (
         [

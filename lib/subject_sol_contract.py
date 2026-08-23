@@ -352,6 +352,22 @@ def _json_file_bytes(value: Any) -> bytes:
     return _canonical_bytes(value) + b"\n"
 
 
+def _pretty_json_file_bytes(value: Any) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    except (TypeError, ValueError) as exc:
+        raise SubjectSolContractError("control_value_not_canonical") from exc
+
+
 def _value_sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
@@ -3242,7 +3258,12 @@ class SubjectSolRuntimeStore:
         return hashlib.sha256(self._authority_key(create=True)).hexdigest()
 
     def _read_content_addressed(
-        self, root: Path, digest: str, label: str
+        self,
+        root: Path,
+        digest: str,
+        label: str,
+        *,
+        allow_pretty_json: bool = False,
     ) -> dict[str, Any]:
         checked = _sha256(digest, f"{label}_sha256")
         path = root / "sha256" / checked[:2] / f"{checked}.json"
@@ -3253,13 +3274,340 @@ class SubjectSolRuntimeStore:
             raise SubjectSolContractError(f"{label}_missing") from exc
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise SubjectSolContractError(f"{label}_unreadable") from exc
+        allowed_serializations = (
+            {_json_file_bytes(value), _pretty_json_file_bytes(value)}
+            if allow_pretty_json and isinstance(value, Mapping)
+            else {_json_file_bytes(value)}
+            if isinstance(value, Mapping)
+            else set()
+        )
         if (
             hashlib.sha256(payload).hexdigest() != checked
             or not isinstance(value, Mapping)
-            or _json_file_bytes(value) != payload
+            or payload not in allowed_serializations
         ):
             raise SubjectSolContractError(f"{label}_hash_mismatch")
         return dict(value)
+
+    def _read_nested_content_addressed(
+        self,
+        root: Path,
+        digest: str,
+        label: str,
+        *,
+        allow_pretty_json: bool = False,
+    ) -> dict[str, Any]:
+        checked = _sha256(digest, f"{label}_sha256")
+        matches = [
+            path
+            for path in root.rglob(f"{checked}.json")
+            if path.is_file()
+            and not path.is_symlink()
+            and path.parent.name == checked[:2]
+            and path.parent.parent.name == "sha256"
+        ]
+        if len(matches) != 1:
+            raise SubjectSolContractError(f"{label}_missing")
+        try:
+            payload = matches[0].read_bytes()
+            value = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SubjectSolContractError(f"{label}_unreadable") from exc
+        allowed_serializations = (
+            {_json_file_bytes(value), _pretty_json_file_bytes(value)}
+            if allow_pretty_json and isinstance(value, Mapping)
+            else {_json_file_bytes(value)}
+            if isinstance(value, Mapping)
+            else set()
+        )
+        if (
+            hashlib.sha256(payload).hexdigest() != checked
+            or not isinstance(value, Mapping)
+            or payload not in allowed_serializations
+        ):
+            raise SubjectSolContractError(f"{label}_hash_mismatch")
+        return dict(value)
+
+    def _reopen_analysis_package_stage_artifacts(
+        self,
+        *,
+        report: Mapping[str, Any],
+        dispatch_package: Mapping[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, dict[str, dict[str, Any]]]]:
+        analysis = dispatch_package.get("analysis")
+        runtime = dispatch_package.get("stage_runtime")
+        analysis_runtime = (
+            runtime.get("analysis") if isinstance(runtime, Mapping) else None
+        )
+        authority = (
+            analysis.get("analysis_package_authority")
+            if isinstance(analysis, Mapping)
+            else None
+        )
+        stages = (
+            analysis_runtime.get("analysis_package_stages")
+            if isinstance(analysis_runtime, Mapping)
+            else None
+        )
+        package_digest = (
+            analysis.get("analysis_package_sha256")
+            if isinstance(analysis, Mapping)
+            else None
+        )
+        package_ref = (
+            analysis.get("analysis_package_ref")
+            if isinstance(analysis, Mapping)
+            else None
+        )
+        present = tuple(
+            value is not None
+            for value in (authority, stages, package_digest, package_ref)
+        )
+        if not any(present):
+            return None, {}
+        if not all(present):
+            raise SubjectSolContractError(
+                "analysis_package_reopen_binding_invalid"
+            )
+        checked_package_digest = _sha256(
+            package_digest, "analysis_package_sha256"
+        )
+        if package_ref != (
+            "study-intake-analysis-package://sha256/" + checked_package_digest
+        ):
+            raise SubjectSolContractError(
+                "analysis_package_reopen_binding_invalid"
+            )
+        if (
+            not isinstance(authority, Mapping)
+            or not isinstance(stages, list)
+            or authority.get("stages") != stages
+            or authority.get("analysis_package_sha256")
+            != checked_package_digest
+            or authority.get("analysis_package_ref") != package_ref
+            or authority.get("formal_write_count") != 0
+        ):
+            raise SubjectSolContractError(
+                "analysis_package_reopen_binding_invalid"
+            )
+        expected_stages = (
+            ("terra_analysis", "analysis", "analysis"),
+            ("luna_analysis", "analysis", "luna_analysis"),
+            ("terra_final", "critical_review", "critical_review"),
+        )
+        if [row.get("stage") for row in stages if isinstance(row, Mapping)] != [
+            stage for stage, _semantic, _provider in expected_stages
+        ]:
+            raise SubjectSolContractError(
+                "analysis_package_stage_order_invalid"
+            )
+        physical_package = self._read_content_addressed(
+            self.dispatch_root / "analysis-packages",
+            checked_package_digest,
+            "analysis_package",
+        )
+        physical_stages = physical_package.get("stages")
+        if (
+            physical_package.get("schema_version")
+            != "study-intake-analysis-package-v1"
+            or physical_package.get("subject") != report.get("subject")
+            or physical_package.get("capture_id") != report.get("capture_id")
+            or physical_package.get("stage_order")
+            != [
+                stage
+                for stage, _semantic, _provider in expected_stages
+            ]
+            or not isinstance(physical_stages, list)
+            or len(physical_stages) != len(expected_stages)
+            or physical_package.get("formal_write_count") != 0
+        ):
+            raise SubjectSolContractError("analysis_package_invalid")
+
+        artifact_specs = (
+            (
+                "raw_output",
+                "raw_output_sha256",
+                self.dispatch_root / "model-stage-raw-outputs",
+                True,
+                (
+                    "study-intake-model-stage-raw-output-v1",
+                    "study-intake-model-stage-raw-output-v2",
+                ),
+            ),
+            (
+                "report",
+                "report_sha256",
+                self.dispatch_root / "analysis-stage-reports",
+                False,
+                "study-intake-analysis-stage-report-v2",
+            ),
+            (
+                "analysis_execution_receipt",
+                "analysis_execution_receipt_sha256",
+                self.dispatch_root / "analysis-stage-execution-receipts",
+                False,
+                "study-intake-analysis-stage-execution-receipt-v1",
+            ),
+            (
+                "analysis_normalization_receipt",
+                "analysis_normalization_receipt_sha256",
+                self.dispatch_root / "analysis-stage-normalization-receipts",
+                False,
+                "study-intake-analysis-stage-normalization-receipt-v1",
+            ),
+            (
+                "stage_execution_receipt",
+                "stage_execution_receipt_sha256",
+                self.dispatch_root / "model-stage-execution-receipts",
+                True,
+                "study-intake-model-stage-execution-receipt-v2",
+            ),
+            (
+                "stage_normalization_receipt",
+                "stage_normalization_receipt_sha256",
+                self.dispatch_root / "model-stage-normalization-receipts",
+                True,
+                (
+                    "study-intake-model-stage-normalization-receipt-v1",
+                    "study-intake-model-stage-normalization-receipt-v2",
+                ),
+            ),
+            (
+                "mcp_transcript",
+                "mcp_transcript_sha256",
+                self.runtime_root / "private/reports/mcp-stage-transcripts",
+                False,
+                "model-driven-mcp-stage-transcript-v1",
+            ),
+        )
+        reopened: dict[str, dict[str, dict[str, Any]]] = {}
+        for (
+            stage_name,
+            semantic_name,
+            provider_suffix,
+        ), authority_row, physical_row in zip(
+            expected_stages, stages, physical_stages
+        ):
+            if not isinstance(authority_row, Mapping) or not isinstance(
+                physical_row, Mapping
+            ):
+                raise SubjectSolContractError(
+                    "analysis_package_stage_binding_invalid"
+                )
+            receipt = physical_row.get("receipt")
+            if (
+                not isinstance(receipt, Mapping)
+                or physical_row.get("stage") != stage_name
+                or physical_row.get("report_sha256")
+                != authority_row.get("report_sha256")
+                or physical_row.get("raw_output_sha256")
+                != authority_row.get("raw_output_sha256")
+                or physical_row.get("execution_receipt_sha256")
+                != authority_row.get("analysis_execution_receipt_sha256")
+                or physical_row.get("normalization_receipt_sha256")
+                != authority_row.get("analysis_normalization_receipt_sha256")
+                or receipt.get("stage_execution_receipt_sha256")
+                != authority_row.get("stage_execution_receipt_sha256")
+                or receipt.get("stage_normalization_receipt_sha256")
+                != authority_row.get("stage_normalization_receipt_sha256")
+                or receipt.get("mcp_transcript_sha256")
+                != authority_row.get("mcp_transcript_sha256")
+            ):
+                raise SubjectSolContractError(
+                    "analysis_package_stage_binding_invalid"
+                )
+            provider_stage_name = f"{report.get('subject')}_{provider_suffix}"
+            stage_artifacts: dict[str, dict[str, Any]] = {}
+            for (
+                artifact_name,
+                digest_key,
+                root,
+                nested,
+                schema_version,
+            ) in artifact_specs:
+                digest = _sha256(
+                    authority_row.get(digest_key),
+                    f"analysis_package_{stage_name}_{artifact_name}_sha256",
+                )
+                label = f"analysis_package_{stage_name}_{artifact_name}"
+                if artifact_name == "mcp_transcript":
+                    value = self._read_content_addressed(
+                        root,
+                        digest,
+                        label,
+                        allow_pretty_json=True,
+                    )
+                elif nested:
+                    value = self._read_nested_content_addressed(
+                        root, digest, label
+                    )
+                else:
+                    value = self._read_content_addressed(root, digest, label)
+                allowed_schemas = (
+                    schema_version
+                    if isinstance(schema_version, tuple)
+                    else (schema_version,)
+                )
+                if (
+                    value.get("schema_version") not in allowed_schemas
+                    or value.get("formal_write_count") != 0
+                ):
+                    raise SubjectSolContractError(f"{label}_invalid")
+                if artifact_name in {
+                    "report",
+                    "analysis_execution_receipt",
+                    "analysis_normalization_receipt",
+                } and (
+                    value.get("stage") != stage_name
+                    or value.get("subject") != report.get("subject")
+                    or value.get("capture_id") != report.get("capture_id")
+                ):
+                    raise SubjectSolContractError(f"{label}_invalid")
+                if artifact_name in {
+                    "raw_output",
+                    "stage_execution_receipt",
+                    "stage_normalization_receipt",
+                } and (
+                    value.get("stage_name") != semantic_name
+                    or value.get("provider_stage_name", provider_stage_name)
+                    != provider_stage_name
+                ):
+                    raise SubjectSolContractError(f"{label}_invalid")
+                if artifact_name == "mcp_transcript" and value.get(
+                    "stage_name"
+                ) != provider_stage_name:
+                    raise SubjectSolContractError(f"{label}_invalid")
+                if artifact_name == "raw_output":
+                    try:
+                        raw_payload = base64.b64decode(
+                            str(value.get("raw_output_base64") or ""),
+                            validate=True,
+                        )
+                    except (ValueError, binascii.Error) as exc:
+                        raise SubjectSolContractError(
+                            f"{label}_invalid"
+                        ) from exc
+                    if (
+                        value.get("raw_output_encoding") != "base64"
+                        or value.get("raw_output_size") != len(raw_payload)
+                        or value.get("raw_output_sha256")
+                        != hashlib.sha256(raw_payload).hexdigest()
+                    ):
+                        raise SubjectSolContractError(f"{label}_invalid")
+                if artifact_name == "mcp_transcript":
+                    calls = value.get("calls")
+                    if (
+                        value.get("subject") != report.get("subject")
+                        or not isinstance(calls, list)
+                        or not calls
+                        or value.get("mcp_tool_call_count") != len(calls)
+                        or value.get("model_call_count") != 1
+                        or value.get("provider_request_count") != len(calls) + 1
+                    ):
+                        raise SubjectSolContractError(f"{label}_invalid")
+                stage_artifacts[artifact_name] = value
+            reopened[stage_name] = stage_artifacts
+        return physical_package, reopened
 
     def read_verified_sol_task_handoff(
         self,
@@ -3419,6 +3767,12 @@ class SubjectSolRuntimeStore:
             raise SubjectSolContractError(
                 "restricted_sol_review_runtime_invalid"
             )
+        analysis_package, analysis_package_stages = (
+            self._reopen_analysis_package_stage_artifacts(
+                report=report,
+                dispatch_package=package,
+            )
+        )
         raw_outputs: dict[str, dict[str, Any]] = {}
         mcp_transcripts: dict[str, dict[str, Any]] = {}
         raw_root = self.dispatch_root / "model-stage-raw-outputs"
@@ -3458,6 +3812,7 @@ class SubjectSolRuntimeStore:
                 transcript_root,
                 transcript_digest,
                 f"{stage_name}_review_mcp_transcript",
+                allow_pretty_json=True,
             )
             calls = transcript.get("calls")
             if (
@@ -3531,6 +3886,8 @@ class SubjectSolRuntimeStore:
             "formal_write_eligible": False,
             "report": copy.deepcopy(report),
             "package": copy.deepcopy(package),
+            "analysis_package": analysis_package,
+            "analysis_package_stages": analysis_package_stages,
             "raw_outputs": raw_outputs,
             "mcp_transcripts": mcp_transcripts,
             "review_result": copy.deepcopy(report["review_result"]),

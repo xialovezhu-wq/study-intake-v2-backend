@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import hashlib
 import importlib.util
@@ -57,6 +59,10 @@ from tests.test_foreground_skill_binding_v3 import (  # noqa: E402
     _build_subject_fixture,
 )
 from tests.test_concurrent_dispatch import core_candidate  # noqa: E402
+from subject_sol_contract import (  # noqa: E402
+    SubjectSolContractError,
+    SubjectSolRuntimeStore,
+)
 
 
 RELEASE_ID = "a" * 64
@@ -1111,9 +1117,44 @@ class OrdinaryLocalSubmitTests(unittest.TestCase):
 
 class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
     class FakeAnalysisPackageRunner:
-        def __init__(self) -> None:
+        def __init__(self, runtime_root: Path | None = None) -> None:
             self._dispatch_process_lifecycle = None
             self.config: dict[str, object] = {}
+            self.runtime_root = runtime_root
+
+        def _publish(
+            self,
+            root: Path,
+            value: dict[str, object],
+            *,
+            pretty: bool = False,
+        ) -> tuple[str, str]:
+            payload = (
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+                + b"\n"
+                if pretty
+                else (
+                    json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            digest = hashlib.sha256(payload).hexdigest()
+            path = root / "sha256" / digest[:2] / f"{digest}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            return digest, str(path)
 
         def bind_dispatch_process_lifecycle(
             self, *, task: object, lease: object, lease_store: object
@@ -1148,6 +1189,118 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                 mcp_transcript_digest = digest("mcp-transcript")
                 process_identity_digest = digest("process-identity")
                 process_exit_digest = digest("process-exit")
+                semantic_stage = {
+                    "terra_analysis": "analysis",
+                    "luna_analysis": "analysis",
+                    "terra_final": "critical_review",
+                }[stage]
+                provider_suffix = {
+                    "terra_analysis": "analysis",
+                    "luna_analysis": "luna_analysis",
+                    "terra_final": "critical_review",
+                }[stage]
+                provider_stage = f"{candidate_value.subject}_{provider_suffix}"
+                if self.runtime_root is not None:
+                    raw_payload = b'{"synthetic":true}\n'
+                    raw_digest, _ = self._publish(
+                        self.runtime_root
+                        / "dispatch/model-stage-raw-outputs/synthetic",
+                        {
+                            "schema_version": (
+                                "study-intake-model-stage-raw-output-v1"
+                            ),
+                            "stage_name": semantic_stage,
+                            "provider_stage_name": provider_stage,
+                            "raw_output_encoding": "base64",
+                            "raw_output_base64": base64.b64encode(
+                                raw_payload
+                            ).decode("ascii"),
+                            "raw_output_size": len(raw_payload),
+                            "raw_output_sha256": hashlib.sha256(
+                                raw_payload
+                            ).hexdigest(),
+                            "formal_write_count": 0,
+                        },
+                    )
+                    report_digest, _ = self._publish(
+                        self.runtime_root / "dispatch/analysis-stage-reports",
+                        {
+                            "schema_version": (
+                                "study-intake-analysis-stage-report-v2"
+                            ),
+                            "stage": stage,
+                            "subject": candidate_value.subject,
+                            "capture_id": candidate_value.capture_id,
+                            "formal_write_count": 0,
+                        },
+                    )
+                    execution_digest, _ = self._publish(
+                        self.runtime_root
+                        / "dispatch/analysis-stage-execution-receipts",
+                        {
+                            "schema_version": (
+                                "study-intake-analysis-stage-execution-receipt-v1"
+                            ),
+                            "stage": stage,
+                            "subject": candidate_value.subject,
+                            "capture_id": candidate_value.capture_id,
+                            "formal_write_count": 0,
+                        },
+                    )
+                    normalization_digest, _ = self._publish(
+                        self.runtime_root
+                        / "dispatch/analysis-stage-normalization-receipts",
+                        {
+                            "schema_version": (
+                                "study-intake-analysis-stage-normalization-receipt-v1"
+                            ),
+                            "stage": stage,
+                            "subject": candidate_value.subject,
+                            "capture_id": candidate_value.capture_id,
+                            "formal_write_count": 0,
+                        },
+                    )
+                    stage_execution_digest, _ = self._publish(
+                        self.runtime_root
+                        / "dispatch/model-stage-execution-receipts/synthetic",
+                        {
+                            "schema_version": (
+                                "study-intake-model-stage-execution-receipt-v2"
+                            ),
+                            "stage_name": semantic_stage,
+                            "provider_stage_name": provider_stage,
+                            "formal_write_count": 0,
+                        },
+                    )
+                    stage_normalization_digest, _ = self._publish(
+                        self.runtime_root
+                        / "dispatch/model-stage-normalization-receipts/synthetic",
+                        {
+                            "schema_version": (
+                                "study-intake-model-stage-normalization-receipt-v1"
+                            ),
+                            "stage_name": semantic_stage,
+                            "provider_stage_name": provider_stage,
+                            "formal_write_count": 0,
+                        },
+                    )
+                    mcp_transcript_digest, _ = self._publish(
+                        self.runtime_root
+                        / "private/reports/mcp-stage-transcripts",
+                        {
+                            "schema_version": (
+                                "model-driven-mcp-stage-transcript-v1"
+                            ),
+                            "stage_name": provider_stage,
+                            "subject": candidate_value.subject,
+                            "calls": [{"tool": "synthetic-read"}],
+                            "mcp_tool_call_count": 1,
+                            "model_call_count": 1,
+                            "provider_request_count": 2,
+                            "formal_write_count": 0,
+                        },
+                        pretty=True,
+                    )
                 normalization_status = (
                     "incomplete" if stage == "luna_analysis" else "complete"
                 )
@@ -1263,16 +1416,12 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                         "formal_write_count": 0,
                     }
                 )
-            package = {
+            package_core = {
                 "schema_version": "study-intake-analysis-package-v1",
                 "package_id": "ANPKG-LOCAL-TERMINAL-001",
                 "capture_id": candidate_value.capture_id,
                 "subject": candidate_value.subject,
                 "study_date": candidate_value.study_date,
-                "package_sha256": "7" * 64,
-                "package_ref": (
-                    "study-intake-analysis-package://sha256/" + "7" * 64
-                ),
                 "stage_order": [
                     "terra_analysis",
                     "luna_analysis",
@@ -1282,6 +1431,21 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                 "warnings": ["synthetic_luna_incomplete"],
                 "status": "ready_for_nightly",
                 "formal_write_count": 0,
+            }
+            if self.runtime_root is None:
+                package_sha256 = "7" * 64
+            else:
+                package_sha256, _ = self._publish(
+                    self.runtime_root / "dispatch/analysis-packages",
+                    package_core,
+                )
+            package = {
+                **package_core,
+                "package_sha256": package_sha256,
+                "package_ref": (
+                    "study-intake-analysis-package://sha256/"
+                    + package_sha256
+                ),
             }
             return ModelResult(
                 analysis=package,
@@ -1309,10 +1473,16 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
             )
 
     class FakeWorker:
-        def __init__(self, release_id: str) -> None:
+        def __init__(
+            self,
+            release_id: str,
+            runtime_root: Path | None = None,
+        ) -> None:
             self.release_id = release_id
             self.runner = (
-                AnalysisPackageTerminalBridgeTests.FakeAnalysisPackageRunner()
+                AnalysisPackageTerminalBridgeTests.FakeAnalysisPackageRunner(
+                    runtime_root
+                )
             )
 
     def test_cached_critical_reuses_existing_provider_progress(self) -> None:
@@ -1562,6 +1732,163 @@ class AnalysisPackageTerminalBridgeTests(unittest.TestCase):
                 duplicate.completion["package_ref"],
                 result.completion["package_ref"],
             )
+
+    def _physical_analysis_package_terminal(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime = Path(temporary.name).resolve() / "runtime"
+        candidate_value = candidate(
+            "math",
+            "MFI-CAP-ANALYSIS-PACKAGE-PHYSICAL-001",
+            "2026-08-22T12:45:00+08:00",
+        )
+        rule = dispatch_rule_binding(
+            release_id=RELEASE_ID,
+            subject="math",
+            subject_processing_contract_sha256=PROCESSING_CONTRACT,
+        )
+        payload = dict(FrozenTask.from_candidate(candidate_value).frozen_payload)
+        payload["dispatch_contract"] = {
+            "schema_version": "study-intake-dispatch-release-binding-v1",
+            **rule,
+            "loaded_core_sha256": "8" * 64,
+            "dispatch_reason": "actual_foreground_capture",
+            "requested_service_tier": None,
+            "fast_mode_requested": False,
+            "fast_mode_effective": "not_requested",
+        }
+        task = FrozenTask(payload)
+        config = {
+            "execution_mode": "live_authorized",
+            "runtime_root": str(runtime),
+            "model": {
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+            },
+            "consumer_stage_chain": {"enabled": True},
+            "analysis_package_v1": {"enabled": True},
+        }
+        dispatcher = ConcurrentDispatcher(
+            runtime,
+            lambda _task, _context: CoreCandidateRunner(
+                config,
+                candidate_value,
+                "actual_foreground_capture",
+                LeaseStore(runtime),
+                worker_factory=lambda _config: self.FakeWorker(
+                    RELEASE_ID, runtime
+                ),
+            ),
+        )
+        result = dispatcher.submit(task).wait(5)
+        self.assertEqual(result.outcome, "succeeded", result.error_code)
+        self.assertIsNotNone(result.completion)
+        return runtime, result
+
+    def test_subject_sol_reopens_all_analysis_package_stage_artifacts(self) -> None:
+        runtime, result = self._physical_analysis_package_terminal()
+        view = SubjectSolRuntimeStore(runtime).read_restricted_sol_review_candidate(
+            str(result.completion["report_json_sha256"])
+        )
+
+        stages = view["analysis_package_stages"]
+        self.assertEqual(
+            list(stages), ["terra_analysis", "luna_analysis", "terra_final"]
+        )
+        for stage_name, artifacts in stages.items():
+            with self.subTest(stage=stage_name):
+                self.assertEqual(
+                    set(artifacts),
+                    {
+                        "raw_output",
+                        "report",
+                        "analysis_execution_receipt",
+                        "analysis_normalization_receipt",
+                        "stage_execution_receipt",
+                        "stage_normalization_receipt",
+                        "mcp_transcript",
+                    },
+                )
+                self.assertTrue(
+                    all(
+                        value["formal_write_count"] == 0
+                        for value in artifacts.values()
+                    )
+                )
+
+    def test_subject_sol_rejects_each_nested_stage_artifact_byte_tamper(
+        self,
+    ) -> None:
+        runtime, result = self._physical_analysis_package_terminal()
+        package = json.loads(
+            Path(result.completion["package_path"]).read_text(encoding="utf-8")
+        )
+        stages = package["stage_runtime"]["analysis"][
+            "analysis_package_stages"
+        ]
+        artifact_roots = (
+            (
+                "raw_output",
+                "raw_output_sha256",
+                runtime / "dispatch/model-stage-raw-outputs",
+            ),
+            (
+                "report",
+                "report_sha256",
+                runtime / "dispatch/analysis-stage-reports",
+            ),
+            (
+                "analysis_execution_receipt",
+                "analysis_execution_receipt_sha256",
+                runtime / "dispatch/analysis-stage-execution-receipts",
+            ),
+            (
+                "analysis_normalization_receipt",
+                "analysis_normalization_receipt_sha256",
+                runtime / "dispatch/analysis-stage-normalization-receipts",
+            ),
+            (
+                "stage_execution_receipt",
+                "stage_execution_receipt_sha256",
+                runtime / "dispatch/model-stage-execution-receipts",
+            ),
+            (
+                "stage_normalization_receipt",
+                "stage_normalization_receipt_sha256",
+                runtime / "dispatch/model-stage-normalization-receipts",
+            ),
+            (
+                "mcp_transcript",
+                "mcp_transcript_sha256",
+                runtime / "private/reports/mcp-stage-transcripts",
+            ),
+        )
+        for stage in stages:
+            for artifact_name, digest_key, root in artifact_roots:
+                with self.subTest(
+                    stage=stage["stage"], artifact=artifact_name
+                ):
+                    digest = stage[digest_key]
+                    matches = list(root.rglob(f"{digest}.json"))
+                    self.assertEqual(len(matches), 1)
+                    path = matches[0]
+                    original = path.read_bytes()
+                    path.write_bytes(original + b" ")
+                    try:
+                        with self.assertRaisesRegex(
+                            SubjectSolContractError,
+                            (
+                                f"analysis_package_{stage['stage']}_"
+                                f"{artifact_name}_hash_mismatch"
+                            ),
+                        ):
+                            SubjectSolRuntimeStore(
+                                runtime
+                            ).read_restricted_sol_review_candidate(
+                                str(result.completion["report_json_sha256"])
+                            )
+                    finally:
+                        path.write_bytes(original)
 
     def test_analysis_package_rejects_missing_authority_and_count_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

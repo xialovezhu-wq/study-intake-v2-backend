@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -18,6 +19,19 @@ from synthetic_a03_a04_fixture import (  # noqa: E402
 
 def physical_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def compact_transcript_bytes(value: dict) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 class A03EnglishTranscriptReplayTests(unittest.TestCase):
@@ -71,6 +85,12 @@ class A03EnglishTranscriptReplayTests(unittest.TestCase):
         self.assertEqual(transcript_path.stem, transcript_sha256)
         self.assertEqual(physical_sha256(transcript_path), transcript_sha256)
         self.assertEqual(
+            transcript_path.read_bytes(),
+            compact_transcript_bytes(self.fixture.transcripts["analysis"]),
+        )
+        self.assertTrue(transcript_path.read_bytes().endswith(b"\n"))
+        self.assertFalse(transcript_path.read_bytes().endswith(b"\n\n"))
+        self.assertEqual(
             len(self.fixture.transcripts["analysis"]["calls"]),
             self.scenario["tool_call_count"]["analysis"],
         )
@@ -122,6 +142,12 @@ class A03EnglishTranscriptReplayTests(unittest.TestCase):
         transcript_sha256 = stage_receipt["mcp_transcript_sha256"]
         self.assertEqual(transcript_path.stem, transcript_sha256)
         self.assertEqual(physical_sha256(transcript_path), transcript_sha256)
+        self.assertEqual(
+            transcript_path.read_bytes(),
+            compact_transcript_bytes(
+                self.fixture.transcripts["critical_review"]
+            ),
+        )
         self.assertEqual(
             len(self.fixture.transcripts["critical_review"]["calls"]),
             self.scenario["tool_call_count"]["critical_review"],

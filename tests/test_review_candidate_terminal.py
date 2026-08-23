@@ -19,7 +19,10 @@ from concurrent_dispatch import ConcurrentDispatcher, FrozenTask, LeaseStore  # 
 from core_dispatch_bridge import CoreCandidateSubprocessRunner  # noqa: E402
 import dashboard_projection as projection  # noqa: E402
 import server as dashboard  # noqa: E402
-from subject_sol_contract import SubjectSolRuntimeStore  # noqa: E402
+from subject_sol_contract import (  # noqa: E402
+    SubjectSolContractError,
+    SubjectSolRuntimeStore,
+)
 from test_production_canary_admission import authority, canary_task  # noqa: E402
 from test_successor_schema_roundtrip import schema_results  # noqa: E402
 
@@ -48,6 +51,8 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
         exact_math_first: bool = False,
         restricted_reopen_error: bool = False,
         review_stage_count: int | None = None,
+        transcript_serialization: str | None = None,
+        transcript_schema_invalid: bool = False,
     ) -> tuple[Path, FrozenTask, object]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -66,6 +71,10 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
         payload["test_report_disposition"] = disposition
         if review_stage_count is not None:
             payload["test_review_stage_count"] = review_stage_count
+        if transcript_serialization is not None:
+            payload["test_transcript_serialization"] = transcript_serialization
+        if transcript_schema_invalid:
+            payload["test_transcript_schema_invalid"] = True
         if exact_math_first:
             payload["math_exact_smoke_binding"] = {
                 "formal_id": "GS-269",
@@ -107,10 +116,20 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
         return runtime, task, result
 
     @staticmethod
+    def _reopen_result(runtime: Path, result: object) -> dict[str, object]:
+        completion = result.completion
+        assert completion is not None
+        return SubjectSolRuntimeStore(
+            runtime
+        ).read_restricted_sol_review_candidate(
+            str(completion["report_json_sha256"])
+        )
+
+    @staticmethod
     def _dashboard_decision(task: FrozenTask) -> dict[str, object]:
         frozen = task.frozen_payload
         return {
-            "subject": "math",
+            "subject": frozen["subject"],
             "capture_id": frozen["capture_id"],
             "study_date": frozen["study_date"],
             "target_label": frozen["target_label"],
@@ -302,6 +321,156 @@ class ReviewCandidateTerminalTests(unittest.TestCase):
 
     def test_english_quality_findings_keep_execution_succeeded(self) -> None:
         self._assert_subject_quality_success("english")
+
+    def test_english_transcript_accepts_only_exact_writer_serializations(
+        self,
+    ) -> None:
+        for serialization in ("compact", "pretty"):
+            with self.subTest(serialization=serialization):
+                runtime, _task, result = self._run_terminal(
+                    "needs_sol_review",
+                    subject="english",
+                    transcript_serialization=serialization,
+                )
+                self.assertEqual(result.status, "completed")
+                reopened = self._reopen_result(runtime, result)
+                self.assertEqual(
+                    reopened["mcp_transcripts"]["analysis"]["subject"],
+                    "english",
+                )
+
+    def test_english_pretty_transcript_canary_projects_as_reopen_verified(
+        self,
+    ) -> None:
+        runtime, task, result = self._run_terminal(
+            "needs_sol_review",
+            subject="english",
+            transcript_serialization="pretty",
+        )
+        self.assertEqual(result.status, "completed")
+        state = LeaseStore(runtime).production_canary_status("english")
+        self.assertEqual(state["last_report_status"], "reopen_verified")
+        item = projection._item_from_decision(
+            runtime,
+            self._dashboard_decision(task),
+            subject="english",
+            generated_at="2026-08-11T00:01:00Z",
+        )
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item["luna_status"], "succeeded")
+        self.assertTrue(item["report_available"])
+        self.assertEqual(item["sol_review_status"], "pending")
+
+    def test_english_transcript_rejects_nonwriter_json_bytes(self) -> None:
+        for serialization in (
+            "missing_lf",
+            "double_lf",
+            "wrong_indentation",
+            "wrong_key_order",
+        ):
+            with self.subTest(serialization=serialization):
+                runtime, _task, result = self._run_terminal(
+                    "needs_sol_review",
+                    subject="english",
+                    transcript_serialization=serialization,
+                )
+                with self.assertRaisesRegex(
+                    SubjectSolContractError,
+                    "analysis_review_mcp_transcript_hash_mismatch",
+                ):
+                    self._reopen_result(runtime, result)
+
+    def test_english_transcript_rejects_schema_invalid_pretty_json(self) -> None:
+        runtime, _task, result = self._run_terminal(
+            "needs_sol_review",
+            subject="english",
+            transcript_schema_invalid=True,
+        )
+        with self.assertRaisesRegex(
+            SubjectSolContractError,
+            "restricted_sol_review_mcp_transcript_invalid",
+        ):
+            self._reopen_result(runtime, result)
+
+    def test_english_transcript_rejects_physical_byte_tamper(self) -> None:
+        runtime, _task, result = self._run_terminal(
+            "needs_sol_review", subject="english"
+        )
+        completion = result.completion
+        assert completion is not None
+        package = json.loads(
+            Path(completion["package_path"]).read_text(encoding="utf-8")
+        )
+        digest = package["stage_runtime"]["analysis"][
+            "review_mcp_transcript_sha256"
+        ]
+        path = (
+            runtime
+            / "private/reports/mcp-stage-transcripts/sha256"
+            / digest[:2]
+            / f"{digest}.json"
+        )
+        path.write_bytes(path.read_bytes() + b" ")
+        with self.assertRaisesRegex(
+            SubjectSolContractError,
+            "analysis_review_mcp_transcript_hash_mismatch",
+        ):
+            self._reopen_result(runtime, result)
+
+    def test_content_addressed_filename_digest_and_control_pretty_fail_closed(
+        self,
+    ) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "objects"
+        value = {"b": 2, "a": 1}
+        pretty = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        physical_sha256 = hashlib.sha256(pretty).hexdigest()
+        wrong_filename_digest = "f" * 64
+        wrong_path = (
+            root
+            / "sha256"
+            / wrong_filename_digest[:2]
+            / f"{wrong_filename_digest}.json"
+        )
+        wrong_path.parent.mkdir(parents=True, exist_ok=True)
+        wrong_path.write_bytes(pretty)
+        self.assertNotEqual(physical_sha256, wrong_path.stem)
+        store = SubjectSolRuntimeStore(Path(temporary.name) / "runtime")
+        with self.assertRaisesRegex(
+            SubjectSolContractError, "synthetic_transcript_hash_mismatch"
+        ):
+            store._read_content_addressed(
+                root,
+                wrong_filename_digest,
+                "synthetic_transcript",
+                allow_pretty_json=True,
+            )
+
+        exact_path = (
+            root
+            / "sha256"
+            / physical_sha256[:2]
+            / f"{physical_sha256}.json"
+        )
+        exact_path.parent.mkdir(parents=True, exist_ok=True)
+        exact_path.write_bytes(pretty)
+        with self.assertRaisesRegex(
+            SubjectSolContractError, "synthetic_control_hash_mismatch"
+        ):
+            store._read_content_addressed(
+                root, physical_sha256, "synthetic_control"
+            )
 
     def test_cs408_quality_findings_keep_execution_succeeded(self) -> None:
         self._assert_subject_quality_success("cs408")
