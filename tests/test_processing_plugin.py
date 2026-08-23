@@ -33,8 +33,11 @@ class ProcessingPluginHostTests(unittest.TestCase):
             )
         ).resolve()
         venv_root = Path(cls._dependency_temp.name) / "venv"
+        bootstrap_python = os.environ.get(
+            "STUDY_READ_MCP_TEST_PYTHON", sys.executable
+        )
         commands = [
-            [sys.executable, "-m", "venv", str(venv_root)],
+            [bootstrap_python, "-m", "venv", str(venv_root)],
             [
                 str(venv_root / "bin/python"),
                 "-m",

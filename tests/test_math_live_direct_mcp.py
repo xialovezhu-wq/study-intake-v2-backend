@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 import sys
@@ -68,8 +69,11 @@ def _replace_markers(value: object, replacements: dict[str, str]) -> object:
 
 def _prepare_mcp_python(base: Path, mcp_source: Path) -> Path:
     venv_root = base / "mcp-venv"
+    bootstrap_python = os.environ.get(
+        "STUDY_READ_MCP_TEST_PYTHON", sys.executable
+    )
     commands = [
-        [sys.executable, "-m", "venv", str(venv_root)],
+        [bootstrap_python, "-m", "venv", str(venv_root)],
         [
             str(venv_root / "bin/python"),
             "-m",

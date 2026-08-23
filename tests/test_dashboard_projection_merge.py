@@ -1995,7 +1995,7 @@ class DashboardProjectionMergeIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     task_detail["stage_receipts"]["analysis"]["runtime_identity_status"],
-                    "requested_unverified",
+                    "confirmed",
                 )
                 self.assertNotIn("model_call_count", detail)
                 self.assertNotIn("formal_write_count", detail)

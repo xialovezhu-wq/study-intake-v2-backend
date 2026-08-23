@@ -93,8 +93,11 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _prepare_mcp_python(base: Path, mcp_source: Path) -> Path:
     venv_root = base / "mcp-venv"
+    bootstrap_python = os.environ.get(
+        "STUDY_READ_MCP_TEST_PYTHON", sys.executable
+    )
     commands = [
-        [sys.executable, "-m", "venv", str(venv_root)],
+        [bootstrap_python, "-m", "venv", str(venv_root)],
         [
             str(venv_root / "bin/python"),
             "-m",

@@ -15,6 +15,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 
@@ -58,8 +59,8 @@ def register_process(
             time.sleep(0.005)
             continue
         launch_identity, current_command = _read_process_snapshot(pid)
-        command_ready = (
-            not expected_command or expected_command in current_command
+        command_ready = _command_identity_matches(
+            expected_command, current_command
         )
         group_ready = not require_private_group or pgid == pid
         if pgid > 0 and launch_identity and command_ready and group_ready:
@@ -74,7 +75,7 @@ def register_process(
         raise AssertionError(
             f"child start identity changed at registration: pid={pid}"
         )
-    if expected_command and expected_command not in current_command:
+    if not _command_identity_matches(expected_command, current_command):
         raise AssertionError(
             f"child command identity mismatch at registration: pid={pid}"
         )
@@ -100,6 +101,22 @@ def _expected_command(process: subprocess.Popen[Any]) -> str:
     if isinstance(args, str):
         return args.split()[0] if args.split() else ""
     return ""
+
+
+def _command_identity_matches(expected: str, current: str) -> bool:
+    if not expected or expected in current:
+        return True
+    try:
+        resolved = Path(expected).resolve(strict=True)
+    except OSError:
+        return False
+    if str(resolved) in current:
+        return True
+    framework_python = (
+        resolved.parent.parent
+        / "Resources/Python.app/Contents/MacOS/Python"
+    )
+    return framework_python.is_file() and str(framework_python) in current
 
 
 def _read_process_snapshot(pid: int) -> tuple[str, str]:
@@ -147,8 +164,9 @@ def _assert_signal_identity(registration: ProcessRegistration) -> None:
     if (
         current_identity != registration.launch_identity
         or (
-            registration.expected_command
-            and registration.expected_command not in current_command
+            not _command_identity_matches(
+                registration.expected_command, current_command
+            )
         )
     ):
         raise AssertionError(

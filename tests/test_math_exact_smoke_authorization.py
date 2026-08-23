@@ -60,6 +60,13 @@ from test_production_canary_admission import (  # noqa: E402
 )
 
 REVIEW_FIXTURE = ROOT / "tests/fixtures/review_candidate_task_runner.py"
+LEGACY_REVIEW_UNIT_SHA256 = math_exact_smoke.REVIEW_UNIT_SHA256
+SYNTHETIC_REVIEW_UNIT_BYTES = (
+    b'{"schema_version":"synthetic-review-unit-v1","units":[]}\n'
+)
+SYNTHETIC_REVIEW_UNIT_SHA256 = hashlib.sha256(
+    SYNTHETIC_REVIEW_UNIT_BYTES
+).hexdigest()
 
 
 class TailBarrierGroundedRunner(GroundedRunner):
@@ -82,6 +89,15 @@ class TailBarrierGroundedRunner(GroundedRunner):
 
 
 class MathExactSmokeAuthorizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = mock.patch.object(
+            math_exact_smoke,
+            "REVIEW_UNIT_SHA256",
+            SYNTHETIC_REVIEW_UNIT_SHA256,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_gs269_terminal_execution_uses_bound_observed_counts(self) -> None:
         terminal = {
             "model_call_count": 0,
@@ -191,8 +207,8 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
         ):
             target = repo / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            source = MATH_REPO_ROOT / relative
             if relative.endswith("快速入库事件.jsonl"):
+                source = MATH_REPO_ROOT / relative
                 ledger = source.read_bytes()
                 offset = 0
                 preimage = None
@@ -208,7 +224,7 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
                     raise AssertionError("initial exact ledger preimage missing")
                 target.write_bytes(preimage)
             else:
-                shutil.copy2(source, target)
+                target.write_bytes(SYNTHETIC_REVIEW_UNIT_BYTES)
         for binding in EXACT_SAMPLES.values():
             for relative in (
                 binding["formal_card_path"],
@@ -1211,6 +1227,12 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
             )
         }
         descriptor = self.descriptor()
+        with mock.patch.object(
+            math_exact_smoke,
+            "REVIEW_UNIT_SHA256",
+            LEGACY_REVIEW_UNIT_SHA256,
+        ):
+            legacy_descriptor = self.descriptor()
         schema = json.loads(
             (
                 ROOT
@@ -1229,7 +1251,9 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
                     "Draft202012Validator(v['schema']).validate(v['instance'])"
                 ),
             ],
-            input=json.dumps({"schema": schema, "instance": descriptor}),
+            input=json.dumps(
+                {"schema": schema, "instance": legacy_descriptor}
+            ),
             text=True,
             capture_output=True,
             check=False,
@@ -1428,7 +1452,10 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
             ):
                 target = repo / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(MATH_REPO_ROOT / relative, target)
+                if relative.endswith("快速入库事件.jsonl"):
+                    shutil.copy2(MATH_REPO_ROOT / relative, target)
+                else:
+                    target.write_bytes(SYNTHETIC_REVIEW_UNIT_BYTES)
 
             sample_path = smoke / "GS-269/sample.json"
             sample_path.write_bytes(sample_path.read_bytes() + b"\n")
