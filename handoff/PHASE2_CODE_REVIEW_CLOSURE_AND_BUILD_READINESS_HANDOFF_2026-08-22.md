@@ -16,9 +16,10 @@
 |---|---|
 | Feature branch | `codex/local-backend-validation-reduction-phase1-20260822` |
 | Recovery starting HEAD | `ef479c7a2792e63cfd0a0e01e603f6fcd583af85` |
-| Tested code HEAD before this handoff commit | `ea90bafbe1153c3797ef9f390b7ab38327343922` |
+| Tested code HEAD after isolated-acceptance repair | `876552a913f6666ec4512b6ae30fdb5020a880f4` |
 | Implementation commit | `791fe66` |
 | Portable regression commit | `ea90baf` |
+| English isolated-acceptance repair | `876552a` |
 | Shared MCP `main` | `37eab4e6638fabd6be15e31f0f278c8b6651dcf9` |
 | Math canonical `main` | `8dfe49dcb6e0784a716ac87248039212737ed63b` |
 | CS408 canonical `main` | `09e811e97f7e99ece7cab1751aca86ec92a7c41e` |
@@ -126,13 +127,14 @@ Git or the handoff.
 
 | Suite | Passed | Failed | Skipped | Duration |
 |---|---:|---:|---:|---:|
-| Backend Core full discovery | 1215 | 0 | 0 | 812.971 s |
-| Dashboard full discovery | 129 | 0 | 0 | 8.085 s |
-| Frontend view-model | 18 assertions | 0 | 0 | 0.079 s |
-| Math Producer full | 75 | 0 | 0 | 0.906 s |
-| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.466 s |
-| English Producer full | 61 | 0 | 0 | 1.719 s |
-| Shared MCP full | 78 | 0 | 0 | 9.259 s |
+| Backend Core full discovery | 1215 | 0 | 0 | 836.813 s |
+| Dashboard full discovery | 129 | 0 | 0 | 8.190 s |
+| Frontend view-model | 18 assertions | 0 | 0 | 0.093 s |
+| Math Producer full | 75 | 0 | 0 | 0.929 s |
+| CS408 Producer full from clean `main` archive | 115 | 0 | 0 | 1.505 s |
+| English Producer full | 61 | 0 | 0 | 1.782 s |
+| Shared MCP full | 78 | 0 | 0 | 9.494 s |
+| English isolated-acceptance affected set | 81 | 0 | 0 | 32.637 s |
 | Final affected combined | 144 | 0 | 0 | 74.108 s |
 | Final ordinary/canary combined | 59 | 0 | 0 | 8.872 s |
 | Actual production-byte zero-model | 3 | 0 | 0 | 2.030 s |
@@ -184,6 +186,17 @@ PROTECTED_PRODUCTION_SURFACES_UNCHANGED=true
 ```
 
 ## Build readiness
+
+The first immutable candidate
+`3127bf2c91bf953400cfe7b9700cb35dbb5954f6cde0373696183ec731af5bb7`
+was strictly verified but rejected during the first English isolated synthetic
+Capture. The actual Producer reached the candidate dispatcher and failed before
+Provider or MCP invocation because the English inline article artifact used
+`source_text` while the ProcessingPlugin contract accepts `article_text`.
+Candidate `3127bf2c...` was never activated. The minimal source correction and
+repeatable H4 temporary-runtime isolation are committed at `876552a`; Backend
+Core 1215/1215 and every final suite passed again. A new immutable candidate is
+therefore required and the rejected candidate must not be deployed.
 
 The feature worktree is ready to be pushed and built as an immutable candidate.
 Build must use the frozen authorized formal baseline, explicit production
