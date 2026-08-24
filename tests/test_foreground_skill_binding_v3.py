@@ -208,7 +208,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
                             "sha256": "3" * 64,
                         },
                         "multi-agent-read-orchestrate": {
-                            "version": "1.0.0",
+                            "version": "1.1.0",
                             "sha256": "4" * 64,
                         },
                     },
@@ -436,7 +436,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
             "foreground_capture_contracts": {"math": self.binding},
             "skills": {
                 "background-math-processing": {"version": "3.1.1", "sha256": "3" * 64},
-                "multi-agent-read-orchestrate": {"version": "1.0.0", "sha256": "4" * 64},
+                "multi-agent-read-orchestrate": {"version": "1.1.0", "sha256": "4" * 64},
             },
             "multi_agent": {
                 "roles": {
@@ -549,7 +549,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
                                     "sha256": "a" * 64,
                                 },
                                 "multi-agent-read-orchestrate": {
-                                    "version": "1.0.0",
+                                    "version": "1.1.0",
                                     "sha256": "b" * 64,
                                 },
                             },

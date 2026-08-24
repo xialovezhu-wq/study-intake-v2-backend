@@ -21,6 +21,16 @@ SOL_ACTIONS = ("adopt", "modify", "reject", "request_more_evidence")
 CONFIDENCE_LEVELS = frozenset({"high", "medium", "low", "unknown"})
 LUNA_REF_PREFIX = "study-intake-luna-investigation-report://sha256/"
 TERRA_REF_PREFIX = "study-intake-terra-final-report://sha256/"
+DIAGNOSTIC_REF_PREFIX = "study-intake-luna-diagnostic-record://sha256/"
+EXECUTION_ARTIFACT_KEYS = (
+    "read_session_id", "read_session_manifest_sha256",
+    "opened_session_receipt_ref", "final_session_receipt_ref",
+    "mcp_transcript_sha256", "mcp_transcript_ref",
+    "mcp_call_receipt_sha256", "mcp_call_receipt_ref",
+    "raw_output_sha256", "raw_output_ref",
+    "stage_execution_receipt_sha256", "stage_execution_receipt_ref",
+    "normalization_receipt_sha256", "normalization_receipt_ref",
+)
 
 
 class MultiAgentReportContractError(ValueError):
@@ -290,6 +300,84 @@ def validate_luna_investigation_report(
     if not _is_sha(value.get("report_sha256")) or value["report_sha256"] != sha256_value(core):
         raise MultiAgentReportContractError("luna_report_digest_invalid")
     return copy.deepcopy(dict(value))
+
+
+def _validate_execution_artifacts(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(EXECUTION_ARTIFACT_KEYS):
+        raise MultiAgentReportContractError("luna_execution_artifacts_invalid")
+    checked = copy.deepcopy(dict(value))
+    if not isinstance(checked["read_session_id"], str) or not checked["read_session_id"]:
+        raise MultiAgentReportContractError("luna_execution_artifacts_invalid")
+    for key in EXECUTION_ARTIFACT_KEYS:
+        item = checked[key]
+        if key.endswith("_sha256") and not _is_sha(item):
+            raise MultiAgentReportContractError("luna_execution_artifacts_invalid")
+        if key.endswith("_ref") and item is not None and (
+            not isinstance(item, str) or not item
+        ):
+            raise MultiAgentReportContractError("luna_execution_artifacts_invalid")
+    for stem in (
+        "mcp_transcript", "mcp_call_receipt", "raw_output",
+        "stage_execution_receipt", "normalization_receipt",
+    ):
+        if not str(checked[f"{stem}_ref"]).endswith(
+            "/" + checked[f"{stem}_sha256"]
+        ):
+            raise MultiAgentReportContractError("luna_execution_artifacts_invalid")
+    return checked
+
+
+def build_luna_investigation_report_v2(
+    *, plan: Mapping[str, Any], read_bundle: Mapping[str, Any],
+    branch_result: Mapping[str, Any], summary: str, confidence: str,
+    execution_artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    legacy = build_luna_investigation_report(
+        plan=plan, read_bundle=read_bundle, branch_result=branch_result,
+        summary=summary, confidence=confidence,
+    )
+    core = {
+        **{
+            key: copy.deepcopy(item) for key, item in legacy.items()
+            if key not in {"schema_version", "report_sha256"}
+        },
+        "schema_version": "luna_investigation_report_v2",
+        "execution_artifacts": _validate_execution_artifacts(
+            execution_artifacts
+        ),
+    }
+    return {**core, "report_sha256": sha256_value(core)}
+
+
+def validate_luna_investigation_report_v2(
+    value: Mapping[str, Any], *, plan: Mapping[str, Any],
+    read_bundle: Mapping[str, Any], branch_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    legacy = {
+        key: copy.deepcopy(item) for key, item in value.items()
+        if key != "execution_artifacts"
+    }
+    legacy["schema_version"] = "luna_investigation_report_v1"
+    legacy_core = {
+        key: copy.deepcopy(item) for key, item in legacy.items()
+        if key != "report_sha256"
+    }
+    legacy["report_sha256"] = sha256_value(legacy_core)
+    validate_luna_investigation_report(
+        legacy, plan=plan, read_bundle=read_bundle,
+        branch_result=branch_result,
+    )
+    artifacts = _validate_execution_artifacts(value.get("execution_artifacts"))
+    core = {
+        key: copy.deepcopy(item) for key, item in value.items()
+        if key != "report_sha256"
+    }
+    if (
+        value.get("schema_version") != "luna_investigation_report_v2"
+        or value.get("report_sha256") != sha256_value(core)
+    ):
+        raise MultiAgentReportContractError("luna_report_v2_digest_invalid")
+    return {**copy.deepcopy(dict(value)), "execution_artifacts": artifacts}
 
 
 def _ordered_luna_reports(
@@ -631,10 +719,284 @@ def validate_sol_handoff_v2(
     return copy.deepcopy(dict(value))
 
 
+def _validate_diagnostic_record(
+    value: Mapping[str, Any], *, plan: Mapping[str, Any]
+) -> dict[str, Any]:
+    core = {
+        key: copy.deepcopy(item) for key, item in value.items()
+        if key != "result_sha256"
+    }
+    if (
+        value.get("schema_version") != "read_branch_result_v1"
+        or value.get("plan_sha256") != plan.get("plan_sha256")
+        or value.get("subject") != plan.get("subject")
+        or value.get("capture_id") != plan.get("capture_id")
+        or value.get("branch_id") not in {
+            row["branch_id"] for row in plan.get("branches", [])
+        }
+        or value.get("status") not in {"failed", "cancelled", "timed_out"}
+        or value.get("formal_write_count") != 0
+        or value.get("result_sha256") != sha256_value(core)
+    ):
+        raise MultiAgentReportContractError("luna_diagnostic_record_invalid")
+    return copy.deepcopy(dict(value))
+
+
+def build_terra_final_input_v2(
+    *, plan: Mapping[str, Any], read_bundle: Mapping[str, Any],
+    branch_results: Sequence[Mapping[str, Any]],
+    luna_reports: Sequence[Mapping[str, Any]],
+    diagnostic_records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    checked = validate_dual_report_plan(plan)
+    _validate_read_bundle(
+        read_bundle, plan=plan, branch_results=branch_results
+    )
+    results = {row.get("branch_id"): row for row in branch_results}
+    reports = {row.get("branch_id"): row for row in luna_reports}
+    diagnostics = {row.get("branch_id"): row for row in diagnostic_records}
+    branch_ids = [row["branch_id"] for row in checked["branches"]]
+    if (
+        not reports
+        or len(results) != len(branch_results)
+        or len(reports) != len(luna_reports)
+        or len(diagnostics) != len(diagnostic_records)
+        or set(results) != set(branch_ids)
+        or set(reports) & set(diagnostics)
+        or set(reports) | set(diagnostics) != set(branch_ids)
+    ):
+        raise MultiAgentReportContractError("terra_final_v2_branch_coverage_invalid")
+    ordered_reports: list[dict[str, Any]] = []
+    ordered_diagnostics: list[dict[str, Any]] = []
+    coverage: list[dict[str, str]] = []
+    for branch_id in branch_ids:
+        if branch_id in reports:
+            report = (
+                validate_luna_investigation_report_v2(
+                    reports[branch_id], plan=plan, read_bundle=read_bundle,
+                    branch_result=results[branch_id],
+                )
+                if reports[branch_id].get("schema_version")
+                == "luna_investigation_report_v2"
+                else validate_luna_investigation_report(
+                    reports[branch_id], plan=plan, read_bundle=read_bundle,
+                    branch_result=results[branch_id],
+                )
+            )
+            ordered_reports.append(report)
+            coverage.append({"branch_id": branch_id, "outcome": "report"})
+        else:
+            diagnostic = _validate_diagnostic_record(
+                diagnostics[branch_id], plan=plan
+            )
+            if diagnostic.get("result_sha256") != results[branch_id].get(
+                "result_sha256"
+            ):
+                raise MultiAgentReportContractError(
+                    "terra_final_v2_diagnostic_binding_invalid"
+                )
+            ordered_diagnostics.append(diagnostic)
+            coverage.append({"branch_id": branch_id, "outcome": "diagnostic"})
+    return {
+        "subject": checked["subject"], "capture_id": checked["capture_id"],
+        "plan_sha256": checked["plan_sha256"],
+        "read_bundle_sha256": read_bundle["read_bundle_sha256"],
+        "branch_coverage": coverage,
+        "luna_reports": ordered_reports,
+        "luna_diagnostics": ordered_diagnostics,
+        "formal_write_count": 0,
+    }
+
+
+def _diagnostic_bindings(
+    diagnostics: Sequence[Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    return [
+        {
+            "branch_id": str(row["branch_id"]),
+            "diagnostic_sha256": str(row["result_sha256"]),
+            "diagnostic_ref": DIAGNOSTIC_REF_PREFIX
+            + str(row["result_sha256"]),
+            "status": str(row["status"]),
+        }
+        for row in diagnostics
+    ]
+
+
+def _luna_bindings_v2(
+    reports: Sequence[Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    if not 1 <= len(reports) <= 4:
+        raise MultiAgentReportContractError("terra_final_v2_reports_invalid")
+    bindings: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for report in reports:
+        branch_id = report.get("branch_id")
+        digest = report.get("report_sha256")
+        core = {
+            key: copy.deepcopy(item) for key, item in report.items()
+            if key != "report_sha256"
+        }
+        if (
+            report.get("schema_version") not in {
+                "luna_investigation_report_v1", "luna_investigation_report_v2"
+            }
+            or not isinstance(branch_id, str) or not branch_id
+            or branch_id in seen or not _is_sha(digest)
+            or digest != sha256_value(core)
+        ):
+            raise MultiAgentReportContractError("terra_final_v2_reports_invalid")
+        seen.add(branch_id)
+        bindings.append({
+            "branch_id": branch_id, "report_sha256": digest,
+            "report_ref": LUNA_REF_PREFIX + digest,
+        })
+    return bindings
+
+
+def build_terra_final_report_v2(
+    *, terra_input: Mapping[str, Any], summary: str,
+    branch_assessments: Sequence[Mapping[str, Any]],
+    subject_analysis: Mapping[str, Any], proposals: Sequence[Mapping[str, Any]] = (),
+    conflicts: Sequence[Mapping[str, Any]] = (), evidence_gaps: Sequence[str] = (),
+    sol_checklist: Sequence[str] = (), warnings: Sequence[str] = (),
+) -> dict[str, Any]:
+    coverage = terra_input.get("branch_coverage")
+    assessments = copy.deepcopy(list(branch_assessments))
+    if (
+        not isinstance(coverage, list)
+        or not isinstance(summary, str) or not summary.strip()
+        or [row.get("branch_id") for row in assessments]
+        != [row.get("branch_id") for row in coverage]
+        or any(
+            not isinstance(row, Mapping)
+            or set(row) != {"branch_id", "outcome", "disposition", "rationale"}
+            or row.get("outcome") != coverage[index].get("outcome")
+            or row.get("disposition") not in {
+                "adopt", "modify", "reject", "uncertain", "diagnostic_only"
+            }
+            or not isinstance(row.get("rationale"), str) or not row["rationale"]
+            for index, row in enumerate(assessments)
+        )
+    ):
+        raise MultiAgentReportContractError("terra_final_v2_assessments_invalid")
+    core = {
+        "schema_version": "terra_final_report_v2",
+        "subject": terra_input["subject"], "capture_id": terra_input["capture_id"],
+        "plan_sha256": terra_input["plan_sha256"],
+        "read_bundle_sha256": terra_input["read_bundle_sha256"],
+        "branch_coverage": copy.deepcopy(coverage),
+        "ordered_luna_reports": _luna_bindings_v2(terra_input["luna_reports"]),
+        "ordered_luna_diagnostics": _diagnostic_bindings(
+            terra_input["luna_diagnostics"]
+        ),
+        "branch_assessments": assessments, "summary": summary,
+        "subject_analysis": copy.deepcopy(dict(subject_analysis)),
+        "proposals": copy.deepcopy(list(proposals)),
+        "conflicts": copy.deepcopy(list(conflicts)),
+        "evidence_gaps": list(evidence_gaps), "sol_checklist": list(sol_checklist),
+        "warnings": list(warnings), "formal_write_count": 0,
+    }
+    return {**core, "report_sha256": sha256_value(core)}
+
+
+def validate_terra_final_report_v2(
+    value: Mapping[str, Any], *, terra_input: Mapping[str, Any]
+) -> dict[str, Any]:
+    expected_bindings = (
+        _luna_bindings_v2(terra_input.get("luna_reports") or []),
+        _diagnostic_bindings(terra_input.get("luna_diagnostics") or []),
+    )
+    core = {
+        key: copy.deepcopy(item) for key, item in value.items()
+        if key != "report_sha256"
+    }
+    if (
+        value.get("schema_version") != "terra_final_report_v2"
+        or value.get("subject") != terra_input.get("subject")
+        or value.get("capture_id") != terra_input.get("capture_id")
+        or value.get("plan_sha256") != terra_input.get("plan_sha256")
+        or value.get("read_bundle_sha256") != terra_input.get("read_bundle_sha256")
+        or value.get("branch_coverage") != terra_input.get("branch_coverage")
+        or value.get("ordered_luna_reports") != expected_bindings[0]
+        or value.get("ordered_luna_diagnostics") != expected_bindings[1]
+        or value.get("formal_write_count") != 0
+        or value.get("report_sha256") != sha256_value(core)
+    ):
+        raise MultiAgentReportContractError("terra_final_v2_binding_invalid")
+    return copy.deepcopy(dict(value))
+
+
+def build_sol_handoff_v3(
+    *, legacy_handoff: Mapping[str, Any], terra_input: Mapping[str, Any],
+    terra_final_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    terra = validate_terra_final_report_v2(
+        terra_final_report, terra_input=terra_input
+    )
+    # Reuse the v2 legacy-authority validation without treating it as apply
+    # authorization; a minimal all-success surrogate supplies only validation.
+    legacy_core = {
+        key: copy.deepcopy(item) for key, item in legacy_handoff.items()
+        if key != "handoff_sha256"
+    }
+    if (
+        legacy_handoff.get("schema_version") != "sol_handoff_envelope_v1"
+        or legacy_handoff.get("handoff_sha256") != sha256_value(legacy_core)
+        or legacy_handoff.get("formal_apply_authorized") is not False
+        or legacy_handoff.get("formal_write_count") != 0
+        or legacy_handoff.get("subject") != terra["subject"]
+        or legacy_handoff.get("capture_id") != terra["capture_id"]
+        or legacy_handoff.get("read_bundle_sha256") != terra["read_bundle_sha256"]
+    ):
+        raise MultiAgentReportContractError("sol_handoff_v3_legacy_invalid")
+    core = {
+        "schema_version": "sol_handoff_envelope_v3",
+        "subject": terra["subject"], "capture_id": terra["capture_id"],
+        "plan_sha256": terra["plan_sha256"],
+        "read_bundle_sha256": terra["read_bundle_sha256"],
+        "candidate_sha256": legacy_handoff.get("candidate_sha256"),
+        "review_sha256": legacy_handoff.get("review_sha256"),
+        "risk_report_sha256": legacy_handoff.get("risk_report_sha256"),
+        "sol_review_ready": legacy_handoff.get("sol_review_ready"),
+        "diagnostic_review_ready": legacy_handoff.get("diagnostic_review_ready"),
+        "quality_clean": legacy_handoff.get("quality_clean"),
+        "allowed_sol_actions": list(SOL_ACTIONS),
+        "formal_apply_authorized": False,
+        "branch_coverage": copy.deepcopy(terra["branch_coverage"]),
+        "ordered_luna_reports": copy.deepcopy(terra["ordered_luna_reports"]),
+        "ordered_luna_diagnostics": copy.deepcopy(
+            terra["ordered_luna_diagnostics"]
+        ),
+        "terra_final_report": {
+            "report_sha256": terra["report_sha256"],
+            "report_ref": TERRA_REF_PREFIX + terra["report_sha256"],
+        },
+        "formal_write_count": 0,
+    }
+    return {**core, "handoff_sha256": sha256_value(core)}
+
+
+def validate_sol_handoff_v3(
+    value: Mapping[str, Any], *, legacy_handoff: Mapping[str, Any],
+    terra_input: Mapping[str, Any], terra_final_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = build_sol_handoff_v3(
+        legacy_handoff=legacy_handoff, terra_input=terra_input,
+        terra_final_report=terra_final_report,
+    )
+    if value != expected:
+        raise MultiAgentReportContractError("sol_handoff_v3_binding_invalid")
+    return copy.deepcopy(dict(value))
+
+
 __all__ = [
     "MultiAgentReportContractError", "build_luna_investigation_report",
     "build_sol_handoff_v2", "build_terra_final_input",
     "build_terra_final_report", "canonical_bytes", "sha256_value",
     "validate_dual_report_plan", "validate_luna_investigation_report",
     "validate_sol_handoff_v2", "validate_terra_final_report",
+    "build_terra_final_input_v2", "build_terra_final_report_v2",
+    "validate_terra_final_report_v2", "build_sol_handoff_v3",
+    "validate_sol_handoff_v3",
 ]

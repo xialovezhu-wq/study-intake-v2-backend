@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/study-intake/mcp-investigation-session-receipt-v1.json",
+  "title": "Proposal-only single-Luna investigation read-session receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "phase", "subject", "branch_id", "provider_stage_name", "processing_binding_sha256", "read_session_id", "read_session_manifest_sha256", "generation", "authority_fingerprint", "mcp_call_receipt_sha256", "mcp_transcript_sha256", "model_mcp_tool_call_count", "provider_request_count", "provider_request_count_status", "pagination_coverage_complete", "opened_receipt_sha256", "proposal_only", "created_at", "formal_write_count", "hmac_key_id", "hmac_sha256"],
+  "properties": {
+    "schema_version": {"const": "mcp_investigation_session_receipt_v1"},
+    "phase": {"const": "investigation_complete"},
+    "subject": {"enum": ["math", "cs408", "english"]},
+    "branch_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"},
+    "provider_stage_name": {"enum": ["math_luna_analysis", "cs408_luna_analysis", "english_luna_analysis"]},
+    "processing_binding_sha256": {"$ref": "#/$defs/sha"},
+    "read_session_id": {"type": "string", "pattern": "^MCPRS-[A-Z0-9-]{16,80}$"},
+    "read_session_manifest_sha256": {"$ref": "#/$defs/sha"},
+    "generation": {"type": "string", "minLength": 1, "maxLength": 160},
+    "authority_fingerprint": {"$ref": "#/$defs/sha"},
+    "mcp_call_receipt_sha256": {"$ref": "#/$defs/sha"},
+    "mcp_transcript_sha256": {"$ref": "#/$defs/sha"},
+    "model_mcp_tool_call_count": {"type": "integer", "minimum": 1},
+    "provider_request_count": {"type": "integer", "minimum": 2},
+    "provider_request_count_status": {"const": "derived_from_codex_tool_loop"},
+    "pagination_coverage_complete": {"const": true},
+    "opened_receipt_sha256": {"$ref": "#/$defs/sha"},
+    "proposal_only": {"const": true},
+    "created_at": {"type": "string", "format": "date-time"},
+    "formal_write_count": {"const": 0},
+    "hmac_key_id": {"$ref": "#/$defs/sha"},
+    "hmac_sha256": {"$ref": "#/$defs/sha"}
+  },
+  "allOf": [
+    {"if": {"properties": {"subject": {"const": "math"}}}, "then": {"properties": {"provider_stage_name": {"const": "math_luna_analysis"}}}},
+    {"if": {"properties": {"subject": {"const": "cs408"}}}, "then": {"properties": {"provider_stage_name": {"const": "cs408_luna_analysis"}}}},
+    {"if": {"properties": {"subject": {"const": "english"}}}, "then": {"properties": {"provider_stage_name": {"const": "english_luna_analysis"}}}}
+  ],
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

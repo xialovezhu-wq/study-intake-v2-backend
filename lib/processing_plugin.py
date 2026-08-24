@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 SHA256_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
 UPSTREAM_ERROR_CODE_RE = __import__("re").compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+BRANCH_ID_RE = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 SUBJECTS = ("math", "cs408", "english")
 SKILL_IDS = {
     "math": "background-math-processing",
@@ -3623,6 +3624,246 @@ class ProcessingPluginHost:
                 "mcp_read_session_final_receipt_invalid"
             )
         return dict(receipt)
+
+    def finalize_investigation_read_session(
+        self,
+        *,
+        subject: str,
+        context: Mapping[str, Any],
+        branch_id: str,
+        stage_receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Close one proposal-only Luna investigation read session."""
+
+        verified = self.validate_read_session_context(
+            subject=subject, context=context
+        )
+        session = verified["mcp_read_session"]
+        if not isinstance(stage_receipt, Mapping):
+            raise ProcessingPluginError(
+                "mcp_investigation_session_finalization_invalid"
+            )
+        provider_stage_name = stage_receipt.get("provider_stage_name")
+        mcp_count = stage_receipt.get("mcp_tool_call_count")
+        provider_count = stage_receipt.get("provider_request_count")
+        if (
+            BRANCH_ID_RE.fullmatch(branch_id) is None
+            or stage_receipt.get("status") != "ready"
+            or stage_receipt.get("branch_id") != branch_id
+            or provider_stage_name != f"{subject}_luna_analysis"
+            or stage_receipt.get("read_session_id") != session["read_session_id"]
+            or stage_receipt.get("read_session_manifest_sha256")
+            != session["manifest_sha256"]
+            or stage_receipt.get("evidence_generation") != session["generation"]
+            or stage_receipt.get("evidence_authority_fingerprint")
+            != session["authority_fingerprint"]
+            or not SHA256_RE.fullmatch(
+                str(stage_receipt.get("mcp_call_receipt_sha256") or "")
+            )
+            or not SHA256_RE.fullmatch(
+                str(stage_receipt.get("mcp_transcript_sha256") or "")
+            )
+            or isinstance(mcp_count, bool)
+            or not isinstance(mcp_count, int)
+            or mcp_count < 1
+            or isinstance(provider_count, bool)
+            or not isinstance(provider_count, int)
+            or provider_count != mcp_count + 1
+            or stage_receipt.get("pagination_coverage_complete") is not True
+            or stage_receipt.get("formal_write_count") != 0
+        ):
+            raise ProcessingPluginError(
+                "mcp_investigation_session_finalization_invalid"
+            )
+        self.validate_model_mcp_call_receipt(
+            subject=subject,
+            context=verified,
+            receipt_sha256=str(stage_receipt["mcp_call_receipt_sha256"]),
+            expected_stage_name=str(provider_stage_name),
+            expected_transcript_sha256=str(
+                stage_receipt["mcp_transcript_sha256"]
+            ),
+            expected_mcp_tool_call_count=mcp_count,
+            expected_provider_request_count=provider_count,
+            require_success=True,
+        )
+        core = {
+            "schema_version": "mcp_investigation_session_receipt_v1",
+            "phase": "investigation_complete",
+            "subject": subject,
+            "branch_id": branch_id,
+            "provider_stage_name": provider_stage_name,
+            "processing_binding_sha256": verified[
+                "processing_binding_sha256"
+            ],
+            "read_session_id": session["read_session_id"],
+            "read_session_manifest_sha256": session["manifest_sha256"],
+            "generation": session["generation"],
+            "authority_fingerprint": session["authority_fingerprint"],
+            "mcp_call_receipt_sha256": stage_receipt[
+                "mcp_call_receipt_sha256"
+            ],
+            "mcp_transcript_sha256": stage_receipt[
+                "mcp_transcript_sha256"
+            ],
+            "model_mcp_tool_call_count": mcp_count,
+            "provider_request_count": provider_count,
+            "provider_request_count_status": "derived_from_codex_tool_loop",
+            "pagination_coverage_complete": True,
+            "opened_receipt_sha256": verified[
+                "mcp_read_session_receipt_sha256"
+            ],
+            "proposal_only": True,
+            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "formal_write_count": 0,
+        }
+        key = self._authority_key()
+        receipt = {
+            **core,
+            "hmac_key_id": _sha256_bytes(key),
+            "hmac_sha256": hmac.new(
+                key,
+                _canonical_bytes({
+                    "purpose": "mcp-investigation-session-receipt-v1",
+                    "payload": core,
+                }),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        digest = _sha256_value(receipt)
+        path = (
+            self.runtime_root
+            / "dispatch"
+            / "mcp-read-session-receipts"
+            / "sha256"
+            / digest[:2]
+            / f"{digest}.json"
+        )
+        _atomic_publish(path, receipt)
+        finalized = {
+            "receipt": receipt,
+            "receipt_sha256": digest,
+            "receipt_ref": (
+                "study-intake-mcp-investigation-session://sha256/" + digest
+            ),
+        }
+        self.validate_final_investigation_read_session(
+            subject=subject,
+            context=verified,
+            branch_id=branch_id,
+            finalized=finalized,
+        )
+        return finalized
+
+    def validate_final_investigation_read_session(
+        self,
+        *,
+        subject: str,
+        context: Mapping[str, Any],
+        branch_id: str,
+        finalized: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Reopen and authenticate one finalized Luna investigation receipt."""
+
+        verified = self.validate_read_session_context(
+            subject=subject, context=context
+        )
+        receipt = finalized.get("receipt")
+        digest = finalized.get("receipt_sha256")
+        if (
+            BRANCH_ID_RE.fullmatch(branch_id) is None
+            or not isinstance(receipt, Mapping)
+            or not isinstance(digest, str)
+            or SHA256_RE.fullmatch(digest) is None
+            or _sha256_value(receipt) != digest
+            or finalized.get("receipt_ref")
+            != "study-intake-mcp-investigation-session://sha256/" + digest
+        ):
+            raise ProcessingPluginError(
+                "mcp_investigation_session_receipt_invalid"
+            )
+        path = (
+            self.runtime_root / "dispatch" / "mcp-read-session-receipts"
+            / "sha256" / digest[:2] / f"{digest}.json"
+        )
+        try:
+            persisted = _load_object(path)
+        except (OSError, ProcessingPluginError) as exc:
+            raise ProcessingPluginError(
+                "mcp_investigation_session_receipt_invalid"
+            ) from exc
+        session = verified["mcp_read_session"]
+        core = {
+            key: copy.deepcopy(value)
+            for key, value in receipt.items()
+            if key not in {"hmac_key_id", "hmac_sha256"}
+        }
+        key = self._authority_key()
+        expected_hmac = hmac.new(
+            key,
+            _canonical_bytes({
+                "purpose": "mcp-investigation-session-receipt-v1",
+                "payload": core,
+            }),
+            hashlib.sha256,
+        ).hexdigest()
+        expected_keys = {
+            "schema_version", "phase", "subject", "branch_id",
+            "provider_stage_name", "processing_binding_sha256",
+            "read_session_id", "read_session_manifest_sha256", "generation",
+            "authority_fingerprint", "mcp_call_receipt_sha256",
+            "mcp_transcript_sha256", "model_mcp_tool_call_count",
+            "provider_request_count", "provider_request_count_status",
+            "pagination_coverage_complete", "opened_receipt_sha256",
+            "proposal_only", "created_at", "formal_write_count",
+            "hmac_key_id", "hmac_sha256",
+        }
+        mcp_count = receipt.get("model_mcp_tool_call_count")
+        if (
+            persisted != receipt
+            or _sha256_file(path) != digest
+            or set(receipt) != expected_keys
+            or receipt.get("schema_version")
+            != "mcp_investigation_session_receipt_v1"
+            or receipt.get("phase") != "investigation_complete"
+            or receipt.get("subject") != subject
+            or receipt.get("branch_id") != branch_id
+            or receipt.get("provider_stage_name")
+            != f"{subject}_luna_analysis"
+            or receipt.get("processing_binding_sha256")
+            != verified["processing_binding_sha256"]
+            or receipt.get("read_session_id") != session["read_session_id"]
+            or receipt.get("read_session_manifest_sha256")
+            != session["manifest_sha256"]
+            or receipt.get("generation") != session["generation"]
+            or receipt.get("authority_fingerprint")
+            != session["authority_fingerprint"]
+            or not SHA256_RE.fullmatch(
+                str(receipt.get("mcp_call_receipt_sha256") or "")
+            )
+            or not SHA256_RE.fullmatch(
+                str(receipt.get("mcp_transcript_sha256") or "")
+            )
+            or isinstance(mcp_count, bool)
+            or not isinstance(mcp_count, int)
+            or mcp_count < 1
+            or receipt.get("provider_request_count") != mcp_count + 1
+            or receipt.get("provider_request_count_status")
+            != "derived_from_codex_tool_loop"
+            or receipt.get("pagination_coverage_complete") is not True
+            or receipt.get("opened_receipt_sha256")
+            != verified["mcp_read_session_receipt_sha256"]
+            or receipt.get("proposal_only") is not True
+            or receipt.get("formal_write_count") != 0
+            or receipt.get("hmac_key_id") != _sha256_bytes(key)
+            or not hmac.compare_digest(
+                str(receipt.get("hmac_sha256") or ""), expected_hmac
+            )
+        ):
+            raise ProcessingPluginError(
+                "mcp_investigation_session_receipt_invalid"
+            )
+        return copy.deepcopy(dict(receipt))
 
     def validate_persisted_model_mcp_stage(
         self,

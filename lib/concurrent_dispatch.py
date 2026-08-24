@@ -952,6 +952,9 @@ class StageResult:
     normalization_status: str | None = None
     normalization_warning_count: int = 0
     normalization_warnings: tuple[Mapping[str, Any], ...] = ()
+    requested_model: str = REQUIRED_MODEL
+    requested_reasoning_effort: str = REQUIRED_REASONING_EFFORT
+    analysis_package_stages: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def coerce(cls, value: object) -> "StageResult":
@@ -961,6 +964,12 @@ class StageResult:
             payload = value.get("payload")
             if not isinstance(payload, Mapping):
                 raise DispatchError("stage_payload_invalid")
+            raw_package_stages = value.get("analysis_package_stages", ())
+            if (
+                not isinstance(raw_package_stages, (list, tuple))
+                or any(not isinstance(item, Mapping) for item in raw_package_stages)
+            ):
+                raise DispatchError("analysis_package_stage_runtime_invalid")
             raw_model = value.get("runtime_model")
             raw_effort = value.get("runtime_reasoning_effort")
             result = cls(
@@ -970,6 +979,15 @@ class StageResult:
                 ),
                 runtime_reasoning_effort=(
                     str(raw_effort) if isinstance(raw_effort, str) else None
+                ),
+                requested_model=str(
+                    value.get("requested_model", REQUIRED_MODEL)
+                ),
+                requested_reasoning_effort=str(
+                    value.get(
+                        "requested_reasoning_effort",
+                        REQUIRED_REASONING_EFFORT,
+                    )
                 ),
                 runtime_metadata_provenance=str(
                     value.get("runtime_metadata_provenance", "unavailable")
@@ -1134,16 +1152,25 @@ class StageResult:
                     for item in value.get("normalization_warnings", ())
                     if isinstance(item, Mapping)
                 ),
+                analysis_package_stages=tuple(
+                    copy.deepcopy(dict(item))
+                    for item in raw_package_stages
+                ),
             )
         else:
             raise DispatchError("stage_result_invalid")
         identity_status = result.runtime_identity_status
+        if (
+            result.requested_model not in {"gpt-5.6-luna", "gpt-5.6-terra"}
+            or result.requested_reasoning_effort != REQUIRED_REASONING_EFFORT
+        ):
+            raise DispatchError("stage_requested_identity_invalid")
         if identity_status is None:
             identity_status = (
                 "confirmed"
-                if result.runtime_model == REQUIRED_MODEL
+                if result.runtime_model == result.requested_model
                 and result.runtime_reasoning_effort
-                == REQUIRED_REASONING_EFFORT
+                == result.requested_reasoning_effort
                 and result.runtime_metadata_provenance
                 == "codex_json_attestation_v1"
                 else "requested_unverified"
@@ -1155,9 +1182,9 @@ class StageResult:
             object.__setattr__(result, "runtime_identity_status", identity_status)
         if identity_status == "confirmed":
             if (
-                result.runtime_model != REQUIRED_MODEL
+                result.runtime_model != result.requested_model
                 or result.runtime_reasoning_effort
-                != REQUIRED_REASONING_EFFORT
+                != result.requested_reasoning_effort
                 or result.runtime_metadata_provenance
                 != "codex_json_attestation_v1"
             ):
@@ -1174,9 +1201,9 @@ class StageResult:
                 not isinstance(result.runtime_model, str)
                 and not isinstance(result.runtime_reasoning_effort, str)
             ) or (
-                result.runtime_model == REQUIRED_MODEL
+                result.runtime_model == result.requested_model
                 and result.runtime_reasoning_effort
-                == REQUIRED_REASONING_EFFORT
+                == result.requested_reasoning_effort
             ):
                 raise DispatchError("runtime_identity_quarantine_invalid")
         else:
@@ -1229,6 +1256,51 @@ class StageResult:
                 + result.review_mcp_transcript_sha256
             ):
                 raise DispatchError("stage_review_transcript_binding_invalid")
+        if result.analysis_package_stages:
+            rows = result.analysis_package_stages
+            if any(not isinstance(row, Mapping) for row in rows):
+                raise DispatchError("analysis_package_stage_runtime_invalid")
+            stage_names = [str(row.get("stage") or "") for row in rows]
+            provider_stage_names = [
+                str(row.get("provider_stage_name") or "") for row in rows
+            ]
+            subject_match = re.fullmatch(
+                r"(math|cs408|english)_analysis", provider_stage_names[0]
+            )
+            subject = subject_match.group(1) if subject_match else None
+            if (
+                len(stage_names) < 5
+                or len(stage_names) > 6
+                or stage_names[0] != "terra_initial"
+                or stage_names[-1] != "terra_final"
+                or any(
+                    re.fullmatch(r"luna_investigation_[A-Za-z0-9][A-Za-z0-9_.-]*", name)
+                    is None
+                    for name in stage_names[1:-1]
+                )
+                or len(stage_names) != len(set(stage_names))
+                or subject is None
+                or provider_stage_names[1:-1]
+                != [f"{subject}_luna_analysis"] * (len(rows) - 2)
+                or provider_stage_names[-1] != f"{subject}_critical_review"
+                or any(
+                    isinstance(row.get("formal_write_count"), bool)
+                    or row.get("formal_write_count") != 0
+                    for row in rows
+                )
+                or rows[0].get("requested_model") != "gpt-5.6-terra"
+                or rows[-1].get("requested_model") != "gpt-5.6-terra"
+                or any(
+                    row.get("requested_model") != "gpt-5.6-luna"
+                    for row in rows[1:-1]
+                )
+                or any(
+                    row.get("requested_reasoning_effort")
+                    != REQUIRED_REASONING_EFFORT
+                    for row in rows
+                )
+            ):
+                raise DispatchError("analysis_package_stage_runtime_invalid")
         grounding_fields = (
             result.read_session_manifest_sha256,
             result.authority_snapshot_manifest_sha256,
@@ -18130,8 +18202,8 @@ def _publish_named_immutable(path: Path, value: Mapping[str, Any]) -> None:
             pass
 def _stage_runtime(result: StageResult) -> dict[str, Any]:
     runtime = {
-        "requested_model": REQUIRED_MODEL,
-        "requested_reasoning_effort": REQUIRED_REASONING_EFFORT,
+        "requested_model": result.requested_model,
+        "requested_reasoning_effort": result.requested_reasoning_effort,
         "runtime_identity_status": result.runtime_identity_status,
         "runtime_model": result.runtime_model,
         "runtime_reasoning_effort": result.runtime_reasoning_effort,
@@ -18164,6 +18236,11 @@ def _stage_runtime(result: StageResult) -> dict[str, Any]:
             for row in result.normalization_warnings
         ],
     }
+    if result.analysis_package_stages:
+        runtime["analysis_package_stages"] = [
+            copy.deepcopy(dict(row))
+            for row in result.analysis_package_stages
+        ]
     if result.review_mcp_transcript_sha256 is not None:
         runtime.update(
             {

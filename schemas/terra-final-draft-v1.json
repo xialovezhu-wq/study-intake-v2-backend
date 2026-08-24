@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/study-intake/terra-final-draft-v1.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "subject", "capture_id", "branch_assessments", "subject_sections", "proposals", "conflicts", "gaps", "checklist", "warnings", "formal_write_count"],
+  "properties": {
+    "schema_version": {"const": "terra_final_draft_v1"}, "subject": {"enum": ["math", "cs408", "english"]}, "capture_id": {"type": "string", "minLength": 1},
+    "branch_assessments": {"type": "array", "minItems": 3, "maxItems": 4, "items": {"$ref": "#/$defs/assessment"}},
+    "subject_sections": {"type": "object", "additionalProperties": false, "required": ["learning_summary", "cross_branch_synthesis", "recommended_next_step"], "properties": {"learning_summary": {"type": "string", "minLength": 1}, "cross_branch_synthesis": {"type": "string", "minLength": 1}, "recommended_next_step": {"type": "string", "minLength": 1}}},
+    "proposals": {"$ref": "#/$defs/strings"}, "conflicts": {"$ref": "#/$defs/strings"}, "gaps": {"$ref": "#/$defs/strings"}, "checklist": {"$ref": "#/$defs/strings"}, "warnings": {"$ref": "#/$defs/strings"}, "formal_write_count": {"const": 0}
+  },
+  "$defs": {
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "assessment": {"type": "object", "additionalProperties": false, "required": ["branch_id", "input_kind", "disposition", "assessment", "evidence_refs"], "properties": {"branch_id": {"type": "string", "minLength": 1}, "input_kind": {"enum": ["report", "diagnostic"]}, "disposition": {"enum": ["adopt", "modify", "reject", "request_more_evidence"]}, "assessment": {"type": "string", "minLength": 1}, "evidence_refs": {"$ref": "#/$defs/strings"}}}
+  }
+}

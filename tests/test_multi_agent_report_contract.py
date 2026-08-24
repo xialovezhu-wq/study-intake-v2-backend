@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 from multi_agent_report_contract import (  # noqa: E402
     MultiAgentReportContractError,
     build_luna_investigation_report,
+    build_luna_investigation_report_v2,
     build_sol_handoff_v2,
     build_terra_final_input,
     build_terra_final_report,
@@ -21,6 +22,7 @@ from multi_agent_report_contract import (  # noqa: E402
     validate_dual_report_plan,
     validate_sol_handoff_v2,
     validate_terra_final_report,
+    validate_luna_investigation_report_v2,
 )
 from orchestration_plan import seal_read_plan  # noqa: E402
 from read_bundle import build_read_bundle  # noqa: E402
@@ -271,6 +273,47 @@ class MultiAgentReportContractTests(unittest.TestCase):
                 summary="must not build", confidence="unknown"
             )
 
+    def test_successor_luna_report_seals_every_execution_artifact(self) -> None:
+        value = plan()
+        read_bundle = bundle(value)
+        result = branch_result(value, 1)
+        artifacts = {
+            "read_session_id": "SESSION-1",
+            "read_session_manifest_sha256": "1" * 64,
+            "opened_session_receipt_ref": "study://opened",
+            "final_session_receipt_ref": "study://final",
+        }
+        for index, stem in enumerate((
+            "mcp_transcript", "mcp_call_receipt", "raw_output",
+            "stage_execution_receipt", "normalization_receipt",
+        ), start=2):
+            artifacts[f"{stem}_sha256"] = str(index) * 64
+            artifacts[f"{stem}_ref"] = (
+                f"study-intake-{stem.replace('_', '-')}://sha256/"
+                + str(index) * 64
+            )
+        report = build_luna_investigation_report_v2(
+            plan=value, read_bundle=read_bundle, branch_result=result,
+            summary="successor", confidence="high",
+            execution_artifacts=artifacts,
+        )
+        validate_luna_investigation_report_v2(
+            report, plan=value, read_bundle=read_bundle,
+            branch_result=result,
+        )
+        for key in artifacts:
+            changed = copy.deepcopy(report)
+            changed["execution_artifacts"][key] = (
+                None if key.endswith("_ref") else "0" * 64
+            )
+            with self.subTest(key=key), self.assertRaises(
+                MultiAgentReportContractError
+            ):
+                validate_luna_investigation_report_v2(
+                    changed, plan=value, read_bundle=read_bundle,
+                    branch_result=result,
+                )
+
     def test_terra_final_rejects_missing_extra_or_reordered_bindings(self) -> None:
         value, read_bundle, results, reports = self.fixture()
         terra_input = build_terra_final_input(
@@ -357,8 +400,11 @@ class MultiAgentReportContractTests(unittest.TestCase):
     def test_new_schemas_parse_and_generator_declares_them(self) -> None:
         names = {
             "luna-investigation-report-v1.json",
+            "luna-investigation-report-v2.json",
             "terra-final-report-v1.json",
+            "terra-final-report-v2.json",
             "sol-handoff-envelope-v2.json",
+            "sol-handoff-envelope-v3.json",
         }
         for name in names:
             schema = json.loads((ROOT / "schemas" / name).read_text(encoding="utf-8"))

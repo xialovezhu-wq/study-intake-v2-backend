@@ -631,6 +631,79 @@ class ProcessingPluginHostTests(unittest.TestCase):
         }
         return publication, stage_receipts
 
+    def _investigation_read_session(
+        self, subject: str = "math", branch_id: str = "branch-1"
+    ) -> tuple[dict, dict, dict]:
+        context = self._open(subject)
+        session = context["mcp_read_session"]
+        provider_stage_name = f"{subject}_luna_analysis"
+        arguments = {"collection": "catalog", "page_size": 1}
+        result = {
+            "subject": subject,
+            "generation": session["generation"],
+            "authority_fingerprint": session["authority_fingerprint"],
+            "read_session": {
+                "read_session_id": session["read_session_id"],
+                "manifest_sha256": session["manifest_sha256"],
+                "capture_id": session["capture_id"],
+                "capture_manifest_sha256": session["capture_manifest_sha256"],
+                "artifact_ids": session["artifact_ids"],
+            },
+            "read_route": self._model_route(session),
+            "total_count": 1,
+            "returned_count": 1,
+            "offset": 0,
+            "next_cursor": None,
+            "truncated": False,
+            "complete": True,
+            "formal_write_count": 0,
+        }
+        call = {
+            "sequence": 1,
+            "server": {
+                "math": "kaoyan_math_read",
+                "cs408": "kaoyan_cs408_read",
+                "english": "kaoyan_english_read",
+            }[subject],
+            "tool": "list_records",
+            "arguments": arguments,
+            "arguments_sha256": self._json_digest(arguments),
+            "result": result,
+            "result_sha256": self._json_digest(result),
+        }
+        transcript_sha256 = "d" * 64
+        signed = self.host.sign_model_mcp_calls(
+            subject=subject,
+            stage_name=provider_stage_name,
+            context=context,
+            calls=[call],
+            transcript_sha256=transcript_sha256,
+        )
+        stage_receipt = {
+            "status": "ready",
+            "branch_id": branch_id,
+            "provider_stage_name": provider_stage_name,
+            "read_session_id": session["read_session_id"],
+            "read_session_manifest_sha256": session["manifest_sha256"],
+            "evidence_generation": session["generation"],
+            "evidence_authority_fingerprint": session[
+                "authority_fingerprint"
+            ],
+            "mcp_call_receipt_sha256": signed["receipt_sha256"],
+            "mcp_transcript_sha256": transcript_sha256,
+            "mcp_tool_call_count": 1,
+            "provider_request_count": 2,
+            "pagination_coverage_complete": True,
+            "formal_write_count": 0,
+        }
+        finalized = self.host.finalize_investigation_read_session(
+            subject=subject,
+            context=context,
+            branch_id=branch_id,
+            stage_receipt=stage_receipt,
+        )
+        return context, stage_receipt, finalized
+
     def test_session_validation_reuses_authority_without_semantic_prefetch(self) -> None:
         context = self._open("math")
         with mock.patch.object(self.host, "_call", side_effect=AssertionError("validation called MCP")) as call:
@@ -1744,6 +1817,117 @@ class ProcessingPluginHostTests(unittest.TestCase):
             self.host.validate_final_model_read_session(
                 subject="math", context=context, finalized=tampered
             )
+
+    def test_investigation_read_session_finalizes_one_luna_stage(self) -> None:
+        context, _stage, finalized = self._investigation_read_session("math")
+        receipt = self.host.validate_final_investigation_read_session(
+            subject="math",
+            context=context,
+            branch_id="branch-1",
+            finalized=finalized,
+        )
+        self.assertEqual(
+            receipt["schema_version"],
+            "mcp_investigation_session_receipt_v1",
+        )
+        self.assertEqual(receipt["model_mcp_tool_call_count"], 1)
+        self.assertEqual(receipt["provider_request_count"], 2)
+        self.assertTrue(receipt["proposal_only"])
+        self.assertEqual(receipt["formal_write_count"], 0)
+
+    def test_investigation_read_session_rejects_receipt_tampering(self) -> None:
+        context, _stage, finalized = self._investigation_read_session("cs408")
+        tampered = copy.deepcopy(finalized)
+        tampered["receipt"]["provider_request_count"] = 3
+        with self.assertRaisesRegex(
+            ProcessingPluginError, "mcp_investigation_session_receipt_invalid"
+        ):
+            self.host.validate_final_investigation_read_session(
+                subject="cs408",
+                context=context,
+                branch_id="branch-1",
+                finalized=tampered,
+            )
+
+    def test_investigation_read_session_rejects_wrong_session_or_branch(self) -> None:
+        context, stage, finalized = self._investigation_read_session("english")
+        with self.assertRaisesRegex(
+            ProcessingPluginError, "mcp_investigation_session_receipt_invalid"
+        ):
+            self.host.validate_final_investigation_read_session(
+                subject="english",
+                context=context,
+                branch_id="other-branch",
+                finalized=finalized,
+            )
+        wrong_context = self._open("english")
+        with self.assertRaisesRegex(
+            ProcessingPluginError, "mcp_investigation_session_receipt_invalid"
+        ):
+            self.host.validate_final_investigation_read_session(
+                subject="english",
+                context=wrong_context,
+                branch_id="branch-1",
+                finalized=finalized,
+            )
+        wrong_stage = copy.deepcopy(stage)
+        wrong_stage["branch_id"] = "other-branch"
+        with self.assertRaisesRegex(
+            ProcessingPluginError,
+            "mcp_investigation_session_finalization_invalid",
+        ):
+            self.host.finalize_investigation_read_session(
+                subject="english",
+                context=context,
+                branch_id="branch-1",
+                stage_receipt=wrong_stage,
+            )
+
+    def test_investigation_read_session_requires_calls_and_zero_writes(self) -> None:
+        context, stage, _finalized = self._investigation_read_session("math")
+        for field, value in (
+            ("mcp_tool_call_count", 0),
+            ("formal_write_count", 1),
+            ("pagination_coverage_complete", False),
+        ):
+            changed = copy.deepcopy(stage)
+            changed[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ProcessingPluginError,
+                "mcp_investigation_session_finalization_invalid",
+            ):
+                self.host.finalize_investigation_read_session(
+                    subject="math",
+                    context=context,
+                    branch_id="branch-1",
+                    stage_receipt=changed,
+                )
+
+    def test_investigation_finalizer_preserves_old_two_stage_finalizer(self) -> None:
+        publication, stage_receipts = self._published_read_session("math")
+        self.assertEqual(
+            stage_receipts["read_session"]["receipt"]["schema_version"],
+            "mcp_read_session_receipt_v1",
+        )
+        reopened = self.host.validate_final_model_read_session(
+            subject="math",
+            context=self.host.validate_read_session_context(
+                subject="math",
+                context=self.host.reopen_published_read_session(
+                    subject="math",
+                    publication=publication,
+                    stage_receipts=stage_receipts,
+                )["context"],
+            ),
+            finalized={
+                "receipt": stage_receipts["read_session"]["receipt"],
+                "receipt_sha256": stage_receipts["read_session"][
+                    "receipt_sha256"
+                ],
+                "receipt_ref": stage_receipts["read_session"]["receipt_ref"],
+            },
+        )
+        self.assertEqual(reopened["phase"], "complete")
 
     def test_published_read_session_reopens_only_persisted_calls(self) -> None:
         publication, stage_receipts = self._published_read_session("math")

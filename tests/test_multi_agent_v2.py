@@ -168,6 +168,119 @@ class MultiAgentV2Tests(unittest.TestCase):
         self.assertEqual(fanout["wave_count"], 3)
         self.assertEqual([row["wave_index"] for row in fanout["results"]], [1, 2, 3])
 
+    def test_one_branch_exception_is_sealed_without_aborting_three_siblings(self) -> None:
+        successful = self.worker
+
+        class OneRaises:
+            def run(self, request, *, wave_index, cancellation):
+                if request["branch_id"] == "branch-02":
+                    raise RuntimeError("private exception text must not escape")
+                return successful.run(
+                    request, wave_index=wave_index, cancellation=cancellation
+                )
+
+        value = plan([branch(index, 5) for index in range(1, 5)])
+        fanout = ReadFanoutScheduler(physical_slots=4).run(value, OneRaises())
+        self.assertEqual(
+            [row["branch_id"] for row in fanout["results"]],
+            [row["branch_id"] for row in value["branches"]],
+        )
+        failed = fanout["results"][1]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error_code"], "branch_worker_exception")
+        self.assertNotIn("private exception", json.dumps(failed))
+        self.assertEqual(failed["formal_write_count"], 0)
+        self.assertEqual(failed["evidence"], [])
+        self.assertEqual(
+            failed["result_sha256"],
+            hashlib.sha256(
+                (
+                    json.dumps(
+                        {key: item for key, item in failed.items() if key != "result_sha256"},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            [row["status"] for row in fanout["results"]],
+            ["succeeded", "failed", "succeeded", "succeeded"],
+        )
+        self.assertEqual(fanout["terminal_branch_count"], 4)
+        self.assertEqual(fanout["dropped_branch_count"], 0)
+
+    def test_multiple_worker_failures_remain_branch_local(self) -> None:
+        successful = self.worker
+
+        class TwoRaise:
+            def run(self, request, *, wave_index, cancellation):
+                if request["branch_id"] in {"branch-01", "branch-03"}:
+                    raise ValueError("different private details")
+                return successful.run(
+                    request, wave_index=wave_index, cancellation=cancellation
+                )
+
+        value = plan([branch(index, 5) for index in range(1, 4)])
+        fanout = ReadFanoutScheduler(physical_slots=3).run(value, TwoRaise())
+        self.assertEqual(
+            [row["branch_id"] for row in fanout["results"]],
+            ["branch-01", "branch-02", "branch-03"],
+        )
+        self.assertEqual(
+            [row["status"] for row in fanout["results"]],
+            ["failed", "succeeded", "failed"],
+        )
+        self.assertEqual(
+            [row.get("error_code") for row in fanout["results"] if row["status"] == "failed"],
+            ["branch_worker_exception", "branch_worker_exception"],
+        )
+        self.assertTrue(all(row["formal_write_count"] == 0 for row in fanout["results"]))
+
+    def test_bad_worker_identity_becomes_branch_diagnostic(self) -> None:
+        successful = self.worker
+
+        class OneCorrupts:
+            def run(self, request, *, wave_index, cancellation):
+                result = successful.run(
+                    request, wave_index=wave_index, cancellation=cancellation
+                )
+                if request["branch_id"] == "branch-02":
+                    result["branch_id"] = "sibling-impersonation"
+                    result["formal_write_count"] = 1
+                return result
+
+        value = plan([branch(index, 5) for index in range(1, 4)])
+        fanout = ReadFanoutScheduler(physical_slots=3).run(value, OneCorrupts())
+        self.assertEqual(
+            [row["branch_id"] for row in fanout["results"]],
+            ["branch-01", "branch-02", "branch-03"],
+        )
+        diagnostic = fanout["results"][1]
+        self.assertEqual(diagnostic["status"], "failed")
+        self.assertEqual(
+            diagnostic["error_code"], "branch_result_formal_write_invalid"
+        )
+        self.assertEqual(diagnostic["formal_write_count"], 0)
+
+    def test_four_branch_cancellation_preserves_every_terminal_in_plan_order(self) -> None:
+        cancellation = threading.Event()
+        cancellation.set()
+        value = plan([branch(index, 0) for index in range(1, 5)])
+        fanout = ReadFanoutScheduler(physical_slots=4).run(
+            value, self.worker, cancellation=cancellation
+        )
+        self.assertEqual(
+            [row["branch_id"] for row in fanout["results"]],
+            [row["branch_id"] for row in value["branches"]],
+        )
+        self.assertTrue(all(row["status"] == "cancelled" for row in fanout["results"]))
+        self.assertTrue(all(row["formal_write_count"] == 0 for row in fanout["results"]))
+        self.assertEqual(fanout["terminal_branch_count"], 4)
+        self.assertEqual(fanout["pending_branch_count"], 0)
+
     def test_read_bundle_and_issues_found_remain_sol_visible(self) -> None:
         value = plan([branch(1, 10), branch(2, 10)])
         fanout = ReadFanoutScheduler(physical_slots=2).run(value, self.worker)
@@ -305,9 +418,14 @@ class MultiAgentV2Tests(unittest.TestCase):
             command=[sys.executable, str(self.fixture)],
         )
         with mock.patch("read_branch.subprocess.Popen") as popen:
-            with self.assertRaises(Exception):
-                ReadFanoutScheduler(physical_slots=1).run(plan([branch(1, 0)]), worker)
+            fanout = ReadFanoutScheduler(physical_slots=1).run(
+                plan([branch(1, 0)]), worker
+            )
             popen.assert_not_called()
+        self.assertEqual(fanout["results"][0]["status"], "failed")
+        self.assertEqual(
+            fanout["results"][0]["error_code"], "branch_worker_exception"
+        )
 
     def test_offline_tripwire_covers_every_forbidden_external_surface(self) -> None:
         for purpose in (

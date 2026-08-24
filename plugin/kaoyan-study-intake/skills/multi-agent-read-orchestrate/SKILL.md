@@ -1,11 +1,11 @@
 ---
 name: multi-agent-read-orchestrate
-description: Release-bound Terra orchestration SOP for one immutable Study Intake task. It plans any number of independent read branches, delegates only to Luna leaf readers, waits for every required branch, preserves failures and conflicts, and never performs formal writes.
+description: Release-bound Terra orchestration contract for one immutable Study Intake Capture. It plans exactly three or four independent Luna investigations, preserves every report or failure diagnostic, produces one Terra final synthesis, and never performs formal writes.
 ---
 
 # Study Intake Multi-Agent Read Orchestrate
 
-Skill version `1.0.0`.
+Skill version `1.1.0`.
 
 ## Input boundary
 
@@ -13,11 +13,11 @@ Read only the frozen task context, task artifact manifest, immutable release bin
 
 ## Plan
 
-Create one `orchestration_read_plan_v1` object before spawning readers.
+Create one `orchestration_read_plan_v1` object with exactly three or four required, independent reader branches.
 
 - Split only semantically independent read domains.
 - Give every branch one unique ID, purpose, rationale, bounded read scope, allowed tools, dependency list, completion requirements and failure policy.
-- Preserve every logically necessary branch. Physical capacity may queue branches in waves but must never delete, merge or truncate them.
+- Preserve every branch. Physical capacity may queue branches in waves but must never delete, merge or truncate them.
 - Keep cursor chains, pagination, `search_records` to `get_records`, and all response-dependent calls serial within one branch.
 - Reject cycles, duplicate branches, cross-subject scopes, writer tools, terminal, shell, web and SQL.
 
@@ -27,11 +27,11 @@ Every reader is a leaf using `gpt-5.6-luna` with reasoning effort `max`, read-on
 
 ## Fan-in
 
-Wait for every required branch to reach a terminal state. Preserve failed, cancelled, timed-out and missing branches. Build one content-addressed read bundle with ordered request/result hashes, MCP receipts, evidence membership, deduplication, conflicts, coverage and authority/generation closure.
+Wait for all branches to finish. Persist every successful Luna investigation as its own content-addressed report, including its MCP call trail and execution evidence. Persist every failed, cancelled or timed-out branch as a distinct diagnostic record. Build one content-addressed read bundle with ordered request/result hashes, evidence membership, conflicts, coverage and authority/generation closure. The bundle indexes the reports; it never replaces them.
 
 ## Integration and review
 
-Integrate only claims grounded in the read bundle. A fresh-context Terra reviewer reads the frozen task, read plan, read bundle, candidate and receipts. It does not automatically reopen the subject database.
+Integrate only claims grounded in the preserved Luna reports and read bundle. A fresh-context Terra final reviewer reads the frozen Capture, Terra initial analysis, sealed plan, every full Luna report, every diagnostic record, the read bundle and receipts. It does not open the subject database.
 
 Allowed review outcomes are `accepted`, `corrected`, `issues_found` and `technical_quarantine`.
 
@@ -41,4 +41,4 @@ Allowed review outcomes are `accepted`, `corrected`, `issues_found` and `technic
 
 ## Safety
 
-Terra and Luna never write formal study data. Every artifact and receipt has `formal_write_count=0`. Final apply remains exclusively controlled by an independently authorized Sol writer transaction.
+Terra and Luna never write formal study data. Every artifact and receipt has `formal_write_count=0`. The Sol handoff must reference the exact Luna report and diagnostic sets seen by Terra plus the Terra final report. Final apply remains exclusively controlled by an independently authorized Sol writer transaction.

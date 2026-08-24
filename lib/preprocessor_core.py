@@ -1683,6 +1683,39 @@ def load_config(path: Path) -> dict[str, Any]:
             )
         ):
             raise PreprocessorError("config_analysis_package_v1_invalid")
+    analysis_package_v2 = config.get("analysis_package_v2")
+    if analysis_package_v2 is not None:
+        expected_v2_keys = {
+            "enabled", "terra_initial_output_schema",
+            "luna_investigation_output_schema", "terra_final_output_schema",
+            "physical_branch_slots", "max_prompt_bytes", "max_output_bytes",
+        }
+        schema_keys = (
+            "terra_initial_output_schema",
+            "luna_investigation_output_schema",
+            "terra_final_output_schema",
+        )
+        if (
+            not isinstance(analysis_package_v2, Mapping)
+            or set(analysis_package_v2) != expected_v2_keys
+            or analysis_package_v2.get("enabled") is not True
+            or any(
+                not isinstance(analysis_package_v2.get(key), str)
+                or not Path(str(analysis_package_v2[key])).is_absolute()
+                or not Path(str(analysis_package_v2[key])).is_file()
+                for key in schema_keys
+            )
+            or isinstance(analysis_package_v2.get("physical_branch_slots"), bool)
+            or not isinstance(analysis_package_v2.get("physical_branch_slots"), int)
+            or not 3 <= int(analysis_package_v2["physical_branch_slots"]) <= 4
+            or any(
+                isinstance(analysis_package_v2.get(key), bool)
+                or not isinstance(analysis_package_v2.get(key), int)
+                or not 4096 <= int(analysis_package_v2[key]) <= 2 * 1024 * 1024
+                for key in ("max_prompt_bytes", "max_output_bytes")
+            )
+        ):
+            raise PreprocessorError("config_analysis_package_v2_invalid")
     processing_plugin = config.get("processing_plugin")
     if processing_plugin is not None:
         if (
@@ -26512,6 +26545,9 @@ class Worker:
         )
         model_config["analysis_package_v1"] = copy.deepcopy(
             dict(config.get("analysis_package_v1") or {})
+        )
+        model_config["analysis_package_v2"] = copy.deepcopy(
+            dict(config.get("analysis_package_v2") or {})
         )
         model_config["branch_scheduler"] = copy.deepcopy(
             dict(config.get("branch_scheduler") or {})

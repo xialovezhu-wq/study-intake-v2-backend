@@ -181,7 +181,7 @@
     "schema_version": "study-intake-multi-agent-component-registry-v1",
     "orchestrate_skill": {
       "id": "multi-agent-read-orchestrate",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "path": "skills/multi-agent-read-orchestrate/SKILL.md"
     },
     "roles": {
@@ -260,7 +260,7 @@
     "formal_write_count": 0
   },
   "skills": {
-    "multi-agent-read-orchestrate": "1.0.0",
+    "multi-agent-read-orchestrate": "1.1.0",
     "background-math-processing": "4.0.1",
     "background-cs408-processing": "4.0.1",
     "background-english-processing": "4.0.1",

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Mapping
 
 from orchestration_plan import validate_read_plan
-from read_branch import branch_request
+from read_branch import branch_request, build_exception_terminal, sha256_value
 
 
 class ReadFanoutError(RuntimeError):
@@ -23,6 +23,62 @@ class ReadFanoutScheduler:
         if isinstance(physical_slots, bool) or not isinstance(physical_slots, int) or physical_slots <= 0:
             raise ReadFanoutError("branch_physical_slots_invalid")
         self.physical_slots = physical_slots
+
+    @staticmethod
+    def _branch_result_or_diagnostic(
+        request: Mapping[str, Any],
+        result: Any,
+        *,
+        wave_index: int,
+    ) -> dict[str, Any]:
+        if not isinstance(result, Mapping):
+            return build_exception_terminal(
+                request,
+                wave_index=wave_index,
+                error_code="branch_result_identity_invalid",
+            )
+        if result.get("formal_write_count") != 0:
+            return build_exception_terminal(
+                request,
+                wave_index=wave_index,
+                error_code="branch_result_formal_write_invalid",
+            )
+        exact_bindings = {
+            "schema_version": "read_branch_result_v1",
+            "plan_id": request["plan_id"],
+            "plan_sha256": request["plan_sha256"],
+            "request_sha256": request["request_sha256"],
+            "branch_id": request["branch_id"],
+            "subject": request["subject"],
+            "capture_id": request["capture_id"],
+            "frozen_task_sha256": request["frozen_task_sha256"],
+            "release_id": request["release_id"],
+            "activation_id": request["activation_id"],
+            "authority_snapshot_sha256": request["authority_snapshot_sha256"],
+            "generation": request["generation"],
+            "required": request["branch"]["required"],
+            "purpose": request["branch"]["purpose"],
+            "wave_index": wave_index,
+        }
+        if any(result.get(key) != value for key, value in exact_bindings.items()):
+            return build_exception_terminal(
+                request,
+                wave_index=wave_index,
+                error_code="branch_result_identity_invalid",
+            )
+        digest = result.get("result_sha256")
+        core = {
+            key: copy.deepcopy(value)
+            for key, value in result.items()
+            if key != "result_sha256"
+        }
+        if not isinstance(digest, str) or digest != sha256_value(core):
+            return build_exception_terminal(
+                request,
+                wave_index=wave_index,
+                error_code="branch_result_receipt_invalid",
+            )
+        return copy.deepcopy(dict(result))
 
     def run(
         self,
@@ -54,10 +110,14 @@ class ReadFanoutScheduler:
             maximum_active = max(maximum_active, len(selected))
             results: dict[str, dict[str, Any]] = {}
             with ThreadPoolExecutor(max_workers=len(selected), thread_name_prefix=f"read-wave-{wave_index}") as pool:
+                requests = {
+                    branch_id: branch_request(validated, branches[branch_id])
+                    for branch_id in selected
+                }
                 futures = {
                     pool.submit(
                         worker.run,
-                        branch_request(validated, branches[branch_id]),
+                        requests[branch_id],
                         wave_index=wave_index,
                         cancellation=cancel,
                     ): branch_id
@@ -66,12 +126,18 @@ class ReadFanoutScheduler:
                 for future in as_completed(futures):
                     branch_id = futures[future]
                     try:
-                        result = future.result()
-                    except Exception as exc:
-                        raise ReadFanoutError(f"branch_worker_exception:{branch_id}:{type(exc).__name__}") from exc
-                    if result.get("branch_id") != branch_id or result.get("formal_write_count") != 0:
-                        raise ReadFanoutError("branch_result_identity_invalid")
-                    results[branch_id] = copy.deepcopy(dict(result))
+                        raw_result = future.result()
+                    except Exception:
+                        results[branch_id] = build_exception_terminal(
+                            requests[branch_id],
+                            wave_index=wave_index,
+                        )
+                    else:
+                        results[branch_id] = self._branch_result_or_diagnostic(
+                            requests[branch_id],
+                            raw_result,
+                            wave_index=wave_index,
+                        )
             for branch_id in selected:
                 terminal[branch_id] = results[branch_id]
                 pending.remove(branch_id)
@@ -162,12 +228,16 @@ class ReadFanoutScheduler:
                 max_workers=len(selected),
                 thread_name_prefix=f"fair-read-wave-{wave_index}",
             ) as pool:
+                requests = {
+                    (plan_id, branch_id): branch_request(
+                        plan_by_id[plan_id], branches[plan_id][branch_id]
+                    )
+                    for plan_id, branch_id in selected
+                }
                 futures = {
                     pool.submit(
                         workers[plan_id].run,
-                        branch_request(
-                            plan_by_id[plan_id], branches[plan_id][branch_id]
-                        ),
+                        requests[(plan_id, branch_id)],
                         wave_index=wave_index,
                         cancellation=cancel,
                     ): (plan_id, branch_id)
@@ -175,7 +245,16 @@ class ReadFanoutScheduler:
                 }
                 for future in as_completed(futures):
                     key = futures[future]
-                    results[key] = copy.deepcopy(dict(future.result()))
+                    try:
+                        raw_result = future.result()
+                    except Exception:
+                        results[key] = build_exception_terminal(
+                            requests[key], wave_index=wave_index
+                        )
+                    else:
+                        results[key] = self._branch_result_or_diagnostic(
+                            requests[key], raw_result, wave_index=wave_index
+                        )
             for plan_id, branch_id in selected:
                 terminal[plan_id][branch_id] = results[(plan_id, branch_id)]
                 pending[plan_id].remove(branch_id)

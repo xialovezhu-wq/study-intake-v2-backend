@@ -49,6 +49,58 @@ def branch_request(plan: Mapping[str, Any], branch: Mapping[str, Any]) -> dict[s
     return {**core, "request_sha256": sha256_value(core)}
 
 
+def build_exception_terminal(
+    request: Mapping[str, Any],
+    *,
+    wave_index: int,
+    error_code: str = "branch_worker_exception",
+) -> dict[str, Any]:
+    """Build a sealed branch-local diagnostic without exception disclosure."""
+
+    allowed_error_codes = {
+        "branch_worker_exception",
+        "branch_result_identity_invalid",
+        "branch_result_formal_write_invalid",
+        "branch_result_receipt_invalid",
+    }
+    if error_code not in allowed_error_codes:
+        raise ReadBranchError("branch_exception_terminal_code_invalid")
+    core = {
+        "schema_version": "read_branch_result_v1",
+        "plan_id": request["plan_id"],
+        "plan_sha256": request["plan_sha256"],
+        "request_sha256": request["request_sha256"],
+        "branch_id": request["branch_id"],
+        "subject": request["subject"],
+        "capture_id": request["capture_id"],
+        "frozen_task_sha256": request["frozen_task_sha256"],
+        "release_id": request["release_id"],
+        "activation_id": request["activation_id"],
+        "authority_snapshot_sha256": request["authority_snapshot_sha256"],
+        "generation": request["generation"],
+        "status": "failed",
+        "required": request["branch"]["required"],
+        "purpose": request["branch"]["purpose"],
+        "child_agent_id": None,
+        "parent_agent_id": "terra-parent-fixture",
+        "read_session_id": None,
+        "mcp_launcher_pid": None,
+        "mcp_launcher_pgid": None,
+        "wave_index": wave_index,
+        "calls": [],
+        "evidence": [],
+        "findings": [],
+        "conflicts": [],
+        "missing_evidence": [],
+        "pagination_closed": False,
+        "duration_ms": 0.0,
+        "error_code": error_code,
+        "stderr_sha256": None,
+        "formal_write_count": 0,
+    }
+    return {**core, "result_sha256": sha256_value(core)}
+
+
 def validate_cursor_chain(calls: Sequence[Mapping[str, Any]], *, session_id: str, branch_id: str) -> None:
     expected_sequence = 1
     cursors: set[str] = set()

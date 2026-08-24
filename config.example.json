@@ -106,6 +106,15 @@
     "max_prompt_bytes": 262144,
     "max_output_bytes": 262144
   },
+  "analysis_package_v2": {
+    "enabled": true,
+    "terra_initial_output_schema": "${RELEASE_ROOT}/schemas/terra-initial-draft-v1.json",
+    "luna_investigation_output_schema": "${RELEASE_ROOT}/schemas/luna-investigation-draft-v1.json",
+    "terra_final_output_schema": "${RELEASE_ROOT}/schemas/terra-final-draft-v1.json",
+    "physical_branch_slots": 4,
+    "max_prompt_bytes": 524288,
+    "max_output_bytes": 524288
+  },
   "processing_plugin": {
     "enabled": true,
     "root": "${RELEASE_ROOT}/plugin/kaoyan-study-intake",

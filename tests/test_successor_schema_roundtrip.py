@@ -541,7 +541,7 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
             "background-math-processing": "4.0.1",
             "background-cs408-processing": "4.0.1",
             "background-english-processing": "4.0.1",
-            "multi-agent-read-orchestrate": "1.0.0",
+            "multi-agent-read-orchestrate": "1.1.0",
         }
         for skill_name, expected_version in expected_skill_versions.items():
             skill_path = plugin_root / "skills" / skill_name / "SKILL.md"

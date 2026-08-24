@@ -55,6 +55,7 @@ PREFLIGHT_TOOLS = (
 )
 RETIRED_SCHEMAS = {"daily-sol-batch-v1.json"}
 REQUIRED_RUNTIME_SCHEMAS = {
+    "analysis-package-v2.json",
     "concurrent-completion-v2.json",
     "cs408-luna-semantic-qualification-v1.json",
     "cs408-scene-admission-receipt-v1.json",
@@ -172,8 +173,11 @@ REQUIRED_RUNTIME_SCHEMAS = {
     "user-sol-authorization-receipt-v2.json",
     "dashboard-multi-agent-v1.json",
     "live-execution-gate-state-v1.json",
+    "luna-investigation-draft-v1.json",
     "luna-investigation-report-v1.json",
+    "luna-investigation-report-v2.json",
     "manual-live-authorization-v1.json",
+    "mcp-investigation-session-receipt-v1.json",
     "multi-agent-model-contract-v1.json",
     "multi-agent-event-chain-receipt-v1.json",
     "multi-agent-stage-execution-receipt-v1.json",
@@ -188,7 +192,12 @@ REQUIRED_RUNTIME_SCHEMAS = {
     "risk-report-v1.json",
     "sol-handoff-envelope-v1.json",
     "sol-handoff-envelope-v2.json",
+    "sol-handoff-envelope-v3.json",
     "terra-final-report-v1.json",
+    "terra-final-report-v2.json",
+    "terra-final-draft-v1.json",
+    "terra-initial-analysis-v1.json",
+    "terra-initial-draft-v1.json",
 }
 
 

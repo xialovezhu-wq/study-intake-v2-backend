@@ -243,7 +243,7 @@ REQUIRED_MODEL_CONTRACT = {
     },
     "orchestrate_skill": {
         "id": "multi-agent-read-orchestrate",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "path": "plugin/kaoyan-study-intake/skills/multi-agent-read-orchestrate/SKILL.md",
         "sha256": _release_asset_sha256(
             "plugin/kaoyan-study-intake/skills/multi-agent-read-orchestrate/SKILL.md"

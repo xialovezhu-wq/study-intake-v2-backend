@@ -38,6 +38,7 @@ from concurrent_dispatch import (  # noqa: E402
     REQUIRED_REASONING_EFFORT,
     StageResult,
     TaskExecutionContext,
+    _stage_runtime,
     dispatch_rule_binding,
 )
 from core_dispatch_bridge import (  # noqa: E402
@@ -1706,6 +1707,147 @@ class ConcurrentDispatchTests(unittest.TestCase):
         self.assertEqual(result.outcome, "failed")
         self.assertEqual(
             result.error_code, "runtime_identity_confirmation_invalid"
+        )
+
+    def test_stage_result_coerces_mixed_model_analysis_package(self) -> None:
+        package_stages = [
+            {
+                "stage": "terra_initial",
+                "provider_stage_name": "math_analysis",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "formal_write_count": 0,
+            },
+            *[
+                {
+                    "stage": f"luna_investigation_branch_{index}",
+                    "provider_stage_name": "math_luna_analysis",
+                    "requested_model": "gpt-5.6-luna",
+                    "requested_reasoning_effort": "max",
+                    "formal_write_count": 0,
+                }
+                for index in range(1, 5)
+            ],
+            {
+                "stage": "terra_final",
+                "provider_stage_name": "math_critical_review",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "formal_write_count": 0,
+            },
+        ]
+        result = StageResult.coerce({
+            "payload": {"package": True},
+            "requested_model": "gpt-5.6-terra",
+            "requested_reasoning_effort": "max",
+            "runtime_model": "gpt-5.6-terra",
+            "runtime_reasoning_effort": "max",
+            "runtime_metadata_provenance": "codex_json_attestation_v1",
+            "runtime_identity_status": "confirmed",
+            "analysis_package_stages": package_stages,
+        })
+        self.assertEqual(result.requested_model, "gpt-5.6-terra")
+        self.assertEqual(len(result.analysis_package_stages), 6)
+        serialized = _stage_runtime(result)
+        self.assertEqual(serialized["analysis_package_stages"], package_stages)
+        package_stages[1]["requested_model"] = "tampered"
+        self.assertEqual(
+            result.analysis_package_stages[1]["requested_model"],
+            "gpt-5.6-luna",
+        )
+
+    def test_stage_result_rejects_identity_and_package_stage_tampering(self) -> None:
+        with self.assertRaisesRegex(
+            DispatchError, "runtime_identity_confirmation_invalid"
+        ):
+            StageResult.coerce({
+                "payload": {},
+                "requested_model": "gpt-5.6-terra",
+                "runtime_model": "gpt-5.6-luna",
+                "runtime_reasoning_effort": "max",
+                "runtime_metadata_provenance": "codex_json_attestation_v1",
+                "runtime_identity_status": "confirmed",
+            })
+
+        valid = [
+            {
+                "stage": "terra_initial",
+                "provider_stage_name": "cs408_analysis",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "formal_write_count": 0,
+            },
+            *[
+                {
+                    "stage": f"luna_investigation_{index}",
+                    "provider_stage_name": "cs408_luna_analysis",
+                    "requested_model": "gpt-5.6-luna",
+                    "requested_reasoning_effort": "max",
+                    "formal_write_count": 0,
+                }
+                for index in range(1, 4)
+            ],
+            {
+                "stage": "terra_final",
+                "provider_stage_name": "cs408_critical_review",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "formal_write_count": 0,
+            },
+        ]
+        mutations = []
+        duplicate = copy.deepcopy(valid)
+        duplicate[2]["stage"] = duplicate[1]["stage"]
+        mutations.append(duplicate)
+        wrong_model = copy.deepcopy(valid)
+        wrong_model[1]["requested_model"] = "gpt-5.6-terra"
+        mutations.append(wrong_model)
+        wrong_provider = copy.deepcopy(valid)
+        wrong_provider[-1]["provider_stage_name"] = "math_critical_review"
+        mutations.append(wrong_provider)
+        write_claim = copy.deepcopy(valid)
+        write_claim[1]["formal_write_count"] = 1
+        mutations.append(write_claim)
+        mutations.append([*copy.deepcopy(valid[0:1]), *copy.deepcopy(valid[-1:])])
+        mutations.append("not-a-stage-list")
+        for package_stages in mutations:
+            with self.subTest(package_stages=package_stages), self.assertRaisesRegex(
+                DispatchError, "analysis_package_stage_runtime_invalid"
+            ):
+                StageResult.coerce({
+                    "payload": {},
+                    "runtime_model": "gpt-5.6-luna",
+                    "runtime_reasoning_effort": "max",
+                    "runtime_metadata_provenance": "codex_json_attestation_v1",
+                    "runtime_identity_status": "confirmed",
+                    "analysis_package_stages": package_stages,
+                })
+
+    def test_stage_result_legacy_defaults_and_runtime_shape_remain_compatible(self) -> None:
+        legacy = StageResult.coerce({
+            "payload": {"legacy": True},
+            "runtime_model": REQUIRED_MODEL,
+            "runtime_reasoning_effort": REQUIRED_REASONING_EFFORT,
+            "runtime_metadata_provenance": "codex_json_attestation_v1",
+            "runtime_identity_status": "confirmed",
+            "duration_ms": 7,
+        })
+        baseline = StageResult(
+            payload={"legacy": True},
+            runtime_model=REQUIRED_MODEL,
+            runtime_reasoning_effort=REQUIRED_REASONING_EFFORT,
+            runtime_metadata_provenance="codex_json_attestation_v1",
+            runtime_identity_status="confirmed",
+            duration_ms=7,
+        )
+        self.assertEqual(legacy.requested_model, REQUIRED_MODEL)
+        self.assertEqual(legacy.requested_reasoning_effort, REQUIRED_REASONING_EFFORT)
+        self.assertEqual(legacy.analysis_package_stages, ())
+        serialized = _stage_runtime(legacy)
+        self.assertNotIn("analysis_package_stages", serialized)
+        self.assertEqual(
+            json.dumps(serialized, sort_keys=True, separators=(",", ":")),
+            json.dumps(_stage_runtime(baseline), sort_keys=True, separators=(",", ":")),
         )
 
     def test_receipt_and_package_are_immutable_content_addressed(self) -> None:

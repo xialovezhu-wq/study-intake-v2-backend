@@ -506,6 +506,73 @@ class AnalysisPackageStore:
         self._write_no_clobber(pointer_path, canonical_bytes(pointer))
         return digest, ref
 
+    def publish_analysis_object(
+        self, value: Mapping[str, Any], *, ref_prefix: str
+    ) -> tuple[str, str]:
+        """Publish one successor analysis object in the existing report CAS."""
+
+        if not isinstance(ref_prefix, str) or not ref_prefix.startswith("study-intake-"):
+            raise AnalysisPackageError("analysis_object_ref_prefix_invalid")
+        return self._publish(self.report_root, value, ref_prefix)
+
+    def reopen_analysis_object(self, digest: str) -> dict[str, Any]:
+        digest = _sha(digest, "analysis_object_sha256_invalid")
+        path = self.report_root / digest[:2] / f"{digest}.json"
+        try:
+            payload = path.read_bytes()
+            value = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AnalysisPackageError("analysis_object_reopen_invalid") from exc
+        if path.is_symlink() or hashlib.sha256(payload).hexdigest() != digest or not isinstance(value, dict):
+            raise AnalysisPackageError("analysis_object_reopen_invalid")
+        return value
+
+    def reopen_capture(self, digest: str) -> dict[str, Any]:
+        digest = _sha(digest, "capture_sha256_invalid")
+        path = self.capture_root / digest[:2] / f"{digest}.json"
+        try:
+            payload = path.read_bytes()
+            value = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AnalysisPackageError("capture_reopen_invalid") from exc
+        if path.is_symlink() or hashlib.sha256(payload).hexdigest() != digest or not isinstance(value, dict):
+            raise AnalysisPackageError("capture_reopen_invalid")
+        return value
+
+    def publish_package_v2(self, value: Mapping[str, Any]) -> tuple[str, str]:
+        digest, ref = self._publish(
+            self.package_root, value, "study-intake-analysis-package"
+        )
+        pointer = {
+            "schema_version": "study-intake-analysis-package-pointer-v2",
+            "subject": value["subject"],
+            "capture_intake_date": value["capture_intake_date"],
+            "capture_id": value["capture_id"],
+            "package_schema_version": value["schema_version"],
+            "package_sha256": digest,
+            "package_ref": ref,
+            "formal_write_count": 0,
+        }
+        pointer_path = (
+            self.index_root / str(value["subject"])
+            / str(value["capture_intake_date"])
+            / f"{value['capture_id']}.json"
+        )
+        self._write_no_clobber(pointer_path, canonical_bytes(pointer))
+        return digest, ref
+
+    def reopen_package(self, digest: str) -> dict[str, Any]:
+        digest = _sha(digest, "package_sha256_invalid")
+        path = self.package_root / digest[:2] / f"{digest}.json"
+        try:
+            payload = path.read_bytes()
+            value = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AnalysisPackageError("package_reopen_invalid") from exc
+        if path.is_symlink() or hashlib.sha256(payload).hexdigest() != digest or not isinstance(value, dict):
+            raise AnalysisPackageError("package_reopen_invalid")
+        return value
+
     def packages_for(self, *, subject: str, capture_intake_date_value: str) -> list[dict[str, Any]]:
         if subject not in SUBJECTS:
             raise AnalysisPackageError("package_subject_invalid")
