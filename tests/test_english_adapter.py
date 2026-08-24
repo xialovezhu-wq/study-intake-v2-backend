@@ -892,6 +892,91 @@ print(json.dumps({
                 with self.assertRaises(PreprocessorError):
                     adapter._validate_event(malformed)
 
+    def test_raw_dialogue_parent_is_strictly_validated_but_not_a_candidate(self) -> None:
+        sentence = self.write_sentence(778, candidate=False)
+        sentence.update(
+            {
+                "schema_version": "english_capture_event_v2",
+                "parent_raw_capture_id": (
+                    f"EVT-{self.study_date.replace('-', '')}-"
+                    "0000000000000ABC"
+                ),
+                "observed_signals": [],
+                "source_signal_ids": [],
+                "capture_coverage": {
+                    "schema_version": "english_capture_coverage_v2",
+                    "declared_signal_count": 0,
+                    "covered_signal_count": 0,
+                    "signals": [],
+                },
+            }
+        )
+        sentence_path = (
+            self.state / "events" / self.study_date / f"{sentence['event_id']}.json"
+        )
+        atomic_write_json(sentence_path, sentence)
+        raw_event_id = sentence["parent_raw_capture_id"]
+        raw_event = {
+            "schema_version": "english_capture_event_v2",
+            "event_id": raw_event_id,
+            "event_type": "english_raw_dialogue_turn_v1",
+            "idempotency_key": "raw-parent-778",
+            "request_sha256": "a" * 64,
+            "occurred_at": utc_text(self.now),
+            "producer": {
+                "role": "foreground_producer",
+                "name": "english_learning_pipeline",
+                "version": "0.1.0",
+            },
+            "formal_write_count": 0,
+            "formal_writeback": "none",
+            "messages": [
+                {
+                    "role": "user",
+                    "message_id": "raw-user-778",
+                    "timestamp": utc_text(self.now),
+                    "content": "Synthetic source sentence.",
+                },
+                {
+                    "role": "assistant",
+                    "message_id": "raw-assistant-778",
+                    "timestamp": utc_text(self.now + dt.timedelta(seconds=1)),
+                    "content": "Synthetic bounded reply.",
+                    "complete": True,
+                },
+            ],
+            "attachments": [],
+            "context_identity": {
+                "conversation_id": "conversation-778",
+                "thread_id": "thread-778",
+                "workspace_id": "workspace-778",
+                "assistant_context_id": "assistant-context-778",
+            },
+            "resolution_status": "resolved",
+        }
+        raw_path = self.state / "events" / self.study_date / f"{raw_event_id}.json"
+        atomic_write_json(raw_path, raw_event)
+
+        adapter = self.adapter()
+        loaded = adapter._load_events()
+        self.assertEqual([event["event_id"] for event in loaded], [sentence["event_id"]])
+
+        invalid_raw = copy.deepcopy(raw_event)
+        invalid_raw["unexpected"] = "must fail closed"
+        atomic_write_json(raw_path, invalid_raw)
+        with self.assertRaisesRegex(PreprocessorError, "english_raw_event_envelope_invalid"):
+            adapter._load_events()
+
+        atomic_write_json(raw_path, raw_event)
+        sentence["parent_raw_capture_id"] = (
+            f"EVT-{self.study_date.replace('-', '')}-0000000000000DEF"
+        )
+        atomic_write_json(sentence_path, sentence)
+        with self.assertRaisesRegex(
+            PreprocessorError, "english_parent_raw_capture_binding_invalid"
+        ):
+            adapter._load_events()
+
     def test_microbatch_trigger_is_180_seconds_of_article_silence(self) -> None:
         self.write_sentence(1, age_seconds=181)
         adapter = self.adapter()

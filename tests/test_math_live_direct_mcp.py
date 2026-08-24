@@ -380,7 +380,7 @@ class MathLiveDirectMcpTests(unittest.TestCase):
             profile.update(
                 {
                     "package_output_schema": str(
-                        ROOT / "schemas/preprocess-package-v3.json"
+                        ROOT / "schemas/preprocess-package-v4.json"
                     ),
                     "soft_runtime_warning_seconds": soft_warning,
                     "stall_timeout_seconds": 1800,

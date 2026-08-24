@@ -947,6 +947,29 @@ class PreprocessorTests(unittest.TestCase):
                     load_config(self.config_path)
         atomic_write_json(self.config_path, self.config)
 
+    def test_worker_propagates_strict_hosted_synthetic_trial_to_runner(self) -> None:
+        config = copy.deepcopy(self.config)
+        english_root = self.base / "english"
+        english_root.mkdir()
+        config["execution_mode"] = "hosted_synthetic"
+        config["hosted_synthetic_trial"] = {
+            "enabled": True,
+            "synthetic_only": True,
+            "capture_source_kind": "synthetic",
+            "runtime_root": str(self.base),
+            "subject_roots": {
+                "math": str(self.math_repo),
+                "cs408": str(self.cs_repo),
+                "english": str(english_root),
+            },
+            "formal_write_count": 0,
+        }
+        worker = Worker(config, model_runner=FakeRunner())
+        self.assertEqual(
+            worker.model_config["hosted_synthetic_trial"],
+            config["hosted_synthetic_trial"],
+        )
+
     def legacy_contract_math_worker_is_idempotent_and_writes_private_package(self) -> None:
         runner = FakeRunner()
         worker = Worker(self.config, model_runner=runner)

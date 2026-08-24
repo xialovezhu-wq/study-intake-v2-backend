@@ -403,6 +403,151 @@ runner._invoke_subprocess(
         self.assertIn("soft_timeout_warning", [row["event"] for row in events])
         self.assertNotIn("timeout", [row["event"] for row in events])
 
+    def test_successor_critical_failure_preserves_original_error(self) -> None:
+        frozen = task(20)
+        topology = (
+            {
+                "stage": "terra_initial",
+                "provider_stage_name": "math_analysis",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "formal_write_count": 0,
+            },
+            *(
+                {
+                    "stage": f"luna_investigation_branch-{index:02d}",
+                    "provider_stage_name": "math_luna_analysis",
+                    "requested_model": "gpt-5.6-luna",
+                    "requested_reasoning_effort": "max",
+                    "formal_write_count": 0,
+                }
+                for index in range(1, 4)
+            ),
+            {
+                "stage": "terra_final",
+                "provider_stage_name": "math_critical_review",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "formal_write_count": 0,
+            },
+        )
+
+        class FailedCriticalSuccessor:
+            executes_full_two_pass_in_analysis = True
+
+            def run_analysis(self, _task, _context):
+                return StageResult(
+                    payload={"schema_version": "terra_initial_analysis_v1"},
+                    runtime_model="gpt-5.6-terra",
+                    runtime_reasoning_effort="max",
+                    runtime_metadata_provenance=(
+                        "codex_json_attestation_v1"
+                    ),
+                    runtime_identity_status="confirmed",
+                    requested_model="gpt-5.6-terra",
+                    requested_reasoning_effort="max",
+                    analysis_package_stages=topology,
+                )
+
+            def run_critical_review(self, _task, _draft, _context):
+                raise DispatchError("original_critical_stage_failure")
+
+        dispatcher = ConcurrentDispatcher(
+            self.runtime,
+            lambda _task, _context: FailedCriticalSuccessor(),
+        )
+        terminal = dispatcher.submit(frozen).wait(2)
+        self.assertEqual(terminal.status, "completed")
+        self.assertEqual(terminal.outcome, "failed")
+        self.assertEqual(
+            terminal.error_code, "original_critical_stage_failure"
+        )
+        self.assertIsNotNone(terminal.completion)
+        completion = dict(terminal.completion or {})
+        receipt = json.loads(
+            Path(completion["receipt_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            receipt["error_code"], "original_critical_stage_failure"
+        )
+        self.assertIsNone(completion["package_path"])
+
+    def test_successor_nominal_success_still_requires_critical_result(
+        self,
+    ) -> None:
+        frozen = task(21)
+        store = LeaseStore(self.runtime)
+        claimed = store.claim(
+            frozen.unit_sha256,
+            "missing-critical-owner",
+            subject="math",
+        )
+        self.assertIsNotNone(claimed.lease)
+        analysis = StageResult(
+            payload={"schema_version": "terra_initial_analysis_v1"},
+            runtime_model="gpt-5.6-terra",
+            runtime_reasoning_effort="max",
+            requested_model="gpt-5.6-terra",
+            requested_reasoning_effort="max",
+            analysis_package_stages=({"stage": "terra_initial"},),
+        )
+        with self.assertRaisesRegex(
+            DispatchError, "analysis_package_dispatch_incomplete"
+        ):
+            store.publish_terminal(
+                claimed.lease,
+                task=frozen,
+                outcome="succeeded",
+                error_code=None,
+                analysis=analysis,
+                critical_review=None,
+                started_at="2026-08-24T00:00:00Z",
+                finished_at="2026-08-24T00:00:01Z",
+            )
+
+    def test_opaque_two_pass_does_not_republish_completed_critical_progress(
+        self,
+    ) -> None:
+        frozen = task(22)
+        store = LeaseStore(self.runtime)
+
+        class CompletedOpaqueTwoPass:
+            executes_full_two_pass_in_analysis = True
+
+            def run_analysis(self, item, context):
+                store.publish_stage_progress(
+                    item,
+                    context.lease,
+                    stage_name="math_critical_review",
+                    progress_kind="stage_transition",
+                    stdout_bytes=5775,
+                    stderr_bytes=5378,
+                )
+                return result("analysis", item)
+
+            def run_critical_review(self, item, _draft, _context):
+                return result("critical_review", item)
+
+        dispatcher = ConcurrentDispatcher(
+            self.runtime,
+            lambda _task, _context: CompletedOpaqueTwoPass(),
+        )
+        terminal = dispatcher.submit(frozen).wait(2)
+        self.assertEqual(terminal.status, "completed")
+        self.assertEqual(terminal.outcome, "succeeded")
+        latest_path = (
+            store.stage_progress_latest_root
+            / frozen.unit_sha256
+            / "fence-1"
+            / "math_critical_review.json"
+        )
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        progress = json.loads(
+            Path(latest["progress_receipt_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(progress["stdout_bytes"], 5775)
+        self.assertEqual(progress["stderr_bytes"], 5378)
+
     def test_execution_receipt_rejects_false_mcp_call_accounting(self) -> None:
         _runner, store, frozen = self._bound_codex_runner()
         lease = _runner._dispatch_process_lifecycle["lease"]

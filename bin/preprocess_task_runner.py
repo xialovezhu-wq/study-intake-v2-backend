@@ -703,12 +703,13 @@ def run_request(
             )
         )
     analysis_package_profile = config.get("analysis_package_v2")
-    analysis_package_live_mode = bool(
-        config.get("execution_mode") == "live_authorized"
+    analysis_package_v2_mode = bool(
+        config.get("execution_mode")
+        in {"live_authorized", "hosted_synthetic"}
         and isinstance(analysis_package_profile, Mapping)
         and analysis_package_profile.get("enabled") is True
     )
-    if analysis_package_live_mode:
+    if analysis_package_v2_mode:
         if execution_mode != "full_two_pass":
             raise DispatchError("analysis_package_v2_resume_forbidden")
         for group_field in ("content_group_members", "math_group_members"):

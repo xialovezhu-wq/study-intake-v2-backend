@@ -8127,7 +8127,7 @@ class LeaseStore:
 
         error_code = "production_canary_analysis_package_v2_invalid"
         try:
-            from analysis_package_v1 import (
+            from analysis_package_store import (
                 AnalysisPackageError,
                 AnalysisPackageStore,
                 sha256_value as analysis_sha256_value,
@@ -19567,13 +19567,28 @@ class ConcurrentDispatcher:
                         self.lease_store.record_task_event(
                             task, context.lease, "critical_started"
                         )
-                    critical = self._invoke_stage(
-                        "critical_review",
-                        runner,
-                        task,
-                        context,
-                        draft_analysis=analysis.payload,
-                    )
+                    if opaque_two_pass:
+                        # The subprocess already ran and persisted Terra final
+                        # before returning the analysis result.  This call only
+                        # retrieves the cached result; publishing another
+                        # critical-review stage transition here would reset its
+                        # observed byte/tool counters and corrupt the monotonic
+                        # progress chain.
+                        critical = StageResult.coerce(
+                            runner.run_critical_review(
+                                task, analysis.payload, context
+                            )
+                        )
+                        if context.cancel_event.is_set():
+                            raise DispatchCancelled()
+                    else:
+                        critical = self._invoke_stage(
+                            "critical_review",
+                            runner,
+                            task,
+                            context,
+                            draft_analysis=analysis.payload,
+                        )
                     if not opaque_two_pass:
                         self.lease_store.record_task_event(
                             task, context.lease, "critical_completed"
@@ -19786,13 +19801,27 @@ class ConcurrentDispatcher:
                     outcome = "failed"
 
             finished_at = _utc_now()
+            terminal_analysis = analysis
+            if (
+                outcome != "succeeded"
+                and analysis is not None
+                and analysis.analysis_package_stages
+                and critical is None
+            ):
+                # The successor package is consumable only after both Terra
+                # stages are bound.  If the second outer stage fails, publish
+                # a failure completion without the partial successor instead
+                # of masking the original stage error with
+                # analysis_package_dispatch_incomplete.  A nominal success
+                # with the same missing stage still fails closed below.
+                terminal_analysis = None
             try:
                 completion = self.lease_store.publish_terminal(
                     context.lease,
                     task=task,
                     outcome=outcome,
                     error_code=error_code,
-                    analysis=analysis,
+                    analysis=terminal_analysis,
                     critical_review=critical,
                     report_disposition=report_disposition,
                     quality_error_code=(

@@ -161,14 +161,25 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
                     terminal_receipt_sha256="c" * 64,
                 )
 
-    def descriptor(self) -> dict[str, object]:
+    def descriptor(
+        self,
+        *,
+        review_unit_sha256: str = math_exact_smoke.REVIEW_UNIT_SHA256,
+    ) -> dict[str, object]:
         return build_authorization_descriptor(
             target_release_id="1" * 64,
             activation_id="2" * 64,
             authority_generation="math-generation-exact-test",
             authority_fingerprint="3" * 64,
             producer_authority_fingerprint="4" * 64,
+            review_unit_sha256=review_unit_sha256,
         )
+
+    @staticmethod
+    def current_review_unit_sha256() -> str:
+        return hashlib.sha256(
+            (MATH_REPO_ROOT / "数学一回滚复习系统/复习单元.json").read_bytes()
+        ).hexdigest()
 
     def _isolated_repo(self, root: Path) -> Path:
         repo = root / "repo"
@@ -1210,7 +1221,9 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
                 MATH_REPO_ROOT / "数学一回滚复习系统/复习单元.json",
             )
         }
-        descriptor = self.descriptor()
+        descriptor = self.descriptor(
+            review_unit_sha256=self.current_review_unit_sha256()
+        )
         schema = json.loads(
             (
                 ROOT
@@ -1312,7 +1325,9 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
             )
 
     def test_authorization_is_hmac_and_content_addressed(self) -> None:
-        descriptor = self.descriptor()
+        descriptor = self.descriptor(
+            review_unit_sha256=self.current_review_unit_sha256()
+        )
         snapshot = {
             "schema_version": "subject_authority_snapshot_v1",
             "subject": "math",
@@ -1459,7 +1474,9 @@ class MathExactSmokeAuthorizationTests(unittest.TestCase):
     def test_legacy_exact_sample_is_not_a_fresh_current_contract_capture(
         self,
     ) -> None:
-        descriptor = self.descriptor()
+        descriptor = self.descriptor(
+            review_unit_sha256=self.current_review_unit_sha256()
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = self._isolated_repo(root)

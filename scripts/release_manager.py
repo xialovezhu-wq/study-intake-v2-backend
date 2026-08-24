@@ -281,6 +281,33 @@ HISTORICAL_NO_TIER_MODEL_CONTRACT = {
     "model": "gpt-5.6-luna",
     "reasoning_effort": "max",
 }
+HISTORICAL_DA9B_MODEL_CONTRACT = copy.deepcopy(REQUIRED_MODEL_CONTRACT)
+HISTORICAL_DA9B_MODEL_CONTRACT["orchestrate_skill"] = {
+    "id": "multi-agent-read-orchestrate",
+    "version": "1.0.0",
+    "path": "plugin/kaoyan-study-intake/skills/multi-agent-read-orchestrate/SKILL.md",
+    "sha256": "40faac8aa7473537f7733046e919ec39eea8fbe85b920e74c610665437fc6f43",
+}
+for _role, _tool_policy_sha256 in {
+    "luna_analysis": (
+        "7493f9049acf4ef9108ee3ad619acd63a659b2bd082a40d56bf2f33750b04b80"
+    ),
+    "terra_analysis": (
+        "1b4ef95de1fe3dc13a412d7a3c3692a3e31dc72ce0acda0626d44db925511206"
+    ),
+    "terra_critical_review": (
+        "4a3d7e6b4fe4448142ec44642f94a346b2efe3c71ba9fc6f310ee8797a650e69"
+    ),
+}.items():
+    HISTORICAL_DA9B_MODEL_CONTRACT["roles"][_role][
+        "tool_policy_sha256"
+    ] = _tool_policy_sha256
+del _role, _tool_policy_sha256
+HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS = frozenset(
+    {
+        "da9b8831df0d78567bbd3edf2767ccef4f00c3e90a35a4942a016659df9a0efa",
+    }
+)
 HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS = frozenset(
     {
         "a4ff96b8932344211ca51c69edda98a06e95382bcdc4de79e2520fdcf8e343d6",
@@ -352,6 +379,13 @@ HISTORICAL_THREE_ROLE_TARGET_RUNTIME_ROLLBACK_CONTRACT = {
     "model_contract": HISTORICAL_THREE_ROLE_MODEL_CONTRACT,
     "component_inventory_profile": "full",
     "target_runtime_contract_required": False,
+}
+HISTORICAL_DA9B_ROLLBACK_CONTRACT = {
+    "name": "historical_da9b_multi_agent_v1",
+    "model_contract": HISTORICAL_DA9B_MODEL_CONTRACT,
+    "component_inventory_profile": "full",
+    "target_runtime_contract_required": False,
+    "release_ids": HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS,
 }
 HISTORICAL_ROLLBACK_RELEASE_CONTRACTS = (
     {
@@ -4213,6 +4247,7 @@ def _verify_release_with_model_contract(
     component_inventory_profile: str = "full",
     target_runtime_contract_required: bool = True,
     verify_live_runtime_bindings: bool = True,
+    historical_release_ids: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     if (
         not target_runtime_contract_required
@@ -4222,6 +4257,7 @@ def _verify_release_with_model_contract(
                 "current": REQUIRED_MODEL_CONTRACT,
                 "historical_offline": HISTORICAL_OFFLINE_MODEL_CONTRACT,
                 "three_role": HISTORICAL_THREE_ROLE_MODEL_CONTRACT,
+                "da9b": HISTORICAL_DA9B_MODEL_CONTRACT,
             }.values()
             or component_inventory_profile != "full"
         )
@@ -4254,11 +4290,14 @@ def _verify_release_with_model_contract(
         or manifest.get("schema_version") != SCHEMA_VERSION
     ):
         raise ReleaseError("release_manifest_invalid")
-    if (
-        not target_runtime_contract_required
-        and manifest.get("release_id")
-        not in HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS
-    ):
+    allowed_historical_release_ids = (
+        historical_release_ids
+        if historical_release_ids is not None
+        else HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS
+    )
+    if not target_runtime_contract_required and manifest.get(
+        "release_id"
+    ) not in allowed_historical_release_ids:
         raise ReleaseError("historical_target_runtime_release_not_allowlisted")
     source = manifest.get("source_files")
     modes = manifest.get("source_modes")
@@ -4645,7 +4684,15 @@ def verify_rollback_release(release_dir: Path) -> dict[str, Any]:
                 HISTORICAL_LEGACY_TARGET_RUNTIME_ROLLBACK_CONTRACT,
                 *descriptors,
             )
+        if declared_release_id in HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS:
+            descriptors = (HISTORICAL_DA9B_ROLLBACK_CONTRACT, *descriptors)
         for descriptor in descriptors:
+            descriptor_release_ids = descriptor.get("release_ids")
+            if (
+                descriptor_release_ids is not None
+                and declared_release_id not in descriptor_release_ids
+            ):
+                continue
             try:
                 historical = _verify_release_with_model_contract(
                     release_dir,
@@ -4656,6 +4703,7 @@ def verify_rollback_release(release_dir: Path) -> dict[str, Any]:
                     target_runtime_contract_required=bool(
                         descriptor.get("target_runtime_contract_required", True)
                     ),
+                    historical_release_ids=descriptor_release_ids,
                 )
             except ReleaseError:
                 continue

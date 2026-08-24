@@ -2575,6 +2575,25 @@ class ReleaseManagerTests(unittest.TestCase):
         ):
             return self.build(passed=passed)
 
+    def build_historical_da9b_release(
+        self,
+        *,
+        model_contract: Mapping[str, Any] | None = None,
+        passed: bool = True,
+    ) -> dict:
+        historical_contract = copy.deepcopy(
+            model_contract or release.HISTORICAL_DA9B_MODEL_CONTRACT
+        )
+        with (
+            mock.patch.object(
+                release, "REQUIRED_MODEL_CONTRACT", historical_contract
+            ),
+            mock.patch.object(
+                release, "_validate_target_release_config", return_value=None
+            ),
+        ):
+            return self.build(passed=passed)
+
     def build_historical_priority(self, *, passed: bool = False) -> dict:
         template_path = self.source / "config.example.json"
         template = json.loads(template_path.read_text(encoding="utf-8"))
@@ -3743,6 +3762,192 @@ if a.command == 'run-once':
                 }
             ),
         )
+
+    def test_da9b_contract_and_release_allowlist_are_exact(self) -> None:
+        self.assertEqual(
+            release.HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS,
+            frozenset(
+                {
+                    "da9b8831df0d78567bbd3edf2767ccef4f00c3e90a35a4942a016659df9a0efa",
+                }
+            ),
+        )
+        self.assertEqual(
+            release.sha256_bytes(
+                release.canonical_bytes(release.HISTORICAL_DA9B_MODEL_CONTRACT)
+            ),
+            "f762f1e3202699454b5c6a221deba38ae93bd73cd1073019536979f107694e93",
+        )
+        self.assertEqual(
+            release.HISTORICAL_DA9B_MODEL_CONTRACT["orchestrate_skill"],
+            {
+                "id": "multi-agent-read-orchestrate",
+                "version": "1.0.0",
+                "path": (
+                    "plugin/kaoyan-study-intake/skills/"
+                    "multi-agent-read-orchestrate/SKILL.md"
+                ),
+                "sha256": (
+                    "40faac8aa7473537f7733046e919ec39"
+                    "eea8fbe85b920e74c610665437fc6f43"
+                ),
+            },
+        )
+        self.assertEqual(
+            {
+                role: release.HISTORICAL_DA9B_MODEL_CONTRACT["roles"][role][
+                    "tool_policy_sha256"
+                ]
+                for role in (
+                    "luna_analysis",
+                    "terra_analysis",
+                    "terra_critical_review",
+                )
+            },
+            {
+                "luna_analysis": (
+                    "7493f9049acf4ef9108ee3ad619acd63"
+                    "a659b2bd082a40d56bf2f33750b04b80"
+                ),
+                "terra_analysis": (
+                    "1b4ef95de1fe3dc13a412d7a3c3692a"
+                    "3e31dc72ce0acda0626d44db925511206"
+                ),
+                "terra_critical_review": (
+                    "4a3d7e6b4fe4448142ec44642f94a346"
+                    "b2efe3c71ba9fc6f310ee8797a650e69"
+                ),
+            },
+        )
+
+    def test_da9b_descriptor_is_rollback_only_and_canary_preview_reopens_it(
+        self,
+    ) -> None:
+        target = self.build(passed=True)
+        manifest = self.make_canary_manifest(target)
+        previous = self.build_historical_da9b_release()
+        previous_id = str(previous["release_id"])
+        previous_root = Path(str(previous["release_dir"]))
+        active = self.base / "da9b-current"
+        active.symlink_to(previous_root)
+        observed_surface = {
+            "schema_version": "preview-test-v1",
+            "active_release_id": previous_id,
+            "formal_write_count": 0,
+        }
+
+        with self.assertRaisesRegex(
+            release.ReleaseError,
+            "release_manifest_invalid",
+        ):
+            release.verify_rollback_release(previous_root)
+
+        exact_ids = frozenset({previous_id})
+        exact_descriptor = {
+            **release.HISTORICAL_DA9B_ROLLBACK_CONTRACT,
+            "release_ids": exact_ids,
+        }
+        with (
+            mock.patch.object(
+                release, "HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS", exact_ids
+            ),
+            mock.patch.object(
+                release,
+                "HISTORICAL_DA9B_ROLLBACK_CONTRACT",
+                exact_descriptor,
+            ),
+        ):
+            verified = release.verify_rollback_release(previous_root)
+            self.assertEqual(
+                verified["verification_role"],
+                "historical_reopen_or_rollback_only",
+            )
+            self.assertEqual(
+                verified["historical_contract"],
+                "historical_da9b_multi_agent_v1",
+            )
+            self.assertEqual(
+                release._release_topology(str(previous_root)),
+                list(release.CONCURRENT_TOPOLOGY),
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseError,
+                "release_manifest_invalid",
+            ):
+                release.activate_release(
+                    release_base=self.release_base,
+                    release_id=previous_id,
+                    active_link=self.base / "forbidden-da9b-target-current",
+                    apply=False,
+                    operation="activate",
+                    launchagent_dir=self.launchagents,
+                )
+            planned = release.activate_canary_release(
+                release_base=self.release_base,
+                release_id=str(target["release_id"]),
+                active_link=active,
+                canary_manifest=manifest,
+                apply=False,
+                launchagent_dir=self.launchagents,
+                canary_pre_activation_verifier=self.canary_preflight_proof,
+                preview_state_inspector=lambda **_values: observed_surface,
+            )
+
+        self.assertEqual(planned["status"], "production_canary_planned")
+        self.assertTrue(planned["preview_non_mutation_verified"])
+        self.assertEqual(planned["previous_release_id"], previous_id)
+        self.assertEqual(active.resolve(), previous_root)
+
+        released_worker = previous_root / "bin" / "worker.py"
+        released_worker.chmod(0o644)
+        released_worker.write_text("print('tampered')\n", encoding="utf-8")
+        with (
+            mock.patch.object(
+                release, "HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS", exact_ids
+            ),
+            mock.patch.object(
+                release,
+                "HISTORICAL_DA9B_ROLLBACK_CONTRACT",
+                exact_descriptor,
+            ),
+            self.assertRaises(release.ReleaseError),
+        ):
+            release.verify_rollback_release(previous_root)
+
+    def test_da9b_release_id_does_not_allow_an_approximate_contract(self) -> None:
+        approximate_contract = copy.deepcopy(
+            release.HISTORICAL_DA9B_MODEL_CONTRACT
+        )
+        approximate_contract["roles"]["terra_analysis"][
+            "tool_policy_sha256"
+        ] = "0" * 64
+        approximate = self.build_historical_da9b_release(
+            model_contract=approximate_contract
+        )
+        approximate_root = Path(str(approximate["release_dir"]))
+        approximate_ids = frozenset({str(approximate["release_id"])})
+        exact_descriptor = {
+            **release.HISTORICAL_DA9B_ROLLBACK_CONTRACT,
+            "release_ids": approximate_ids,
+        }
+
+        with (
+            mock.patch.object(
+                release,
+                "HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS",
+                approximate_ids,
+            ),
+            mock.patch.object(
+                release,
+                "HISTORICAL_DA9B_ROLLBACK_CONTRACT",
+                exact_descriptor,
+            ),
+            self.assertRaisesRegex(
+                release.ReleaseError,
+                "release_manifest_invalid",
+            ),
+        ):
+            release.verify_rollback_release(approximate_root)
 
     def test_canary_preview_reopens_exact_allowlisted_previous_runtime(self) -> None:
         target = self.build(passed=True)

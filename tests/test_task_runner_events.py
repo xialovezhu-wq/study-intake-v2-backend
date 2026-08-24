@@ -21,7 +21,10 @@ from concurrent_dispatch import (  # noqa: E402
     StageResult,
     dispatch_rule_binding,
 )
-from core_dispatch_bridge import _analysis_package_v2_stage_results  # noqa: E402
+from core_dispatch_bridge import (  # noqa: E402
+    _analysis_package_v2_branch_stage_status,
+    _analysis_package_v2_stage_results,
+)
 from preprocess_task_runner import (  # noqa: E402
     _AnalysisCheckpointEventRecorder,
     _StageEventRecorder,
@@ -115,6 +118,30 @@ class TaskRunnerEventTests(unittest.TestCase):
             index = json.loads(index_path.read_text())
             rows.append(json.loads(Path(index["event_path"]).read_text()))
         return rows
+
+    def test_v2_branch_receipt_status_maps_to_outer_stage_status(self) -> None:
+        self.assertEqual(
+            _analysis_package_v2_branch_stage_status(
+                {"kind": "investigation_report"}, {"status": "ready"}
+            ),
+            "succeeded",
+        )
+        for status in ("failed", "timed_out", "cancelled"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    _analysis_package_v2_branch_stage_status(
+                        {"kind": "diagnostic_record"}, {"status": status}
+                    ),
+                    status,
+                )
+        for output, receipt in (
+            ({"kind": "investigation_report"}, {"status": "succeeded"}),
+            ({"kind": "diagnostic_record"}, {"status": "ready"}),
+        ):
+            with self.assertRaisesRegex(
+                DispatchError, "analysis_package_v2_topology_invalid"
+            ):
+                _analysis_package_v2_branch_stage_status(output, receipt)
 
     def test_records_real_analysis_and_review_boundaries_with_authority(self) -> None:
         calls = []
@@ -460,7 +487,7 @@ class TaskRunnerEventTests(unittest.TestCase):
             ],
         )
 
-    def test_live_analysis_package_bypasses_worker_publication_once(self) -> None:
+    def test_live_and_hosted_analysis_package_bypass_worker_publication_once(self) -> None:
         topology = (
             {
                 "stage": "terra_initial",
@@ -556,12 +583,6 @@ class TaskRunnerEventTests(unittest.TestCase):
                 analysis_package_stages=topology,
             )
 
-        config = {
-            "runtime_root": str(self.runtime),
-            "execution_mode": "live_authorized",
-            "analysis_package_v2": {"enabled": True},
-            "model": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
-        }
         request = {
             "schema_version": "study-intake-production-task-request-v1",
             "task": self.task.as_dict(),
@@ -577,47 +598,83 @@ class TaskRunnerEventTests(unittest.TestCase):
             "STUDY_PREPROCESS_LEASE_OWNER_ID": self.lease.owner_id,
             "STUDY_PREPROCESS_CONTEXT_ROOT": str(self.context_root),
         }
-        with (
-            mock.patch("preprocess_task_runner.load_config", return_value=config),
-            mock.patch("preprocess_task_runner.Worker", Worker),
-            mock.patch(
-                "preprocess_task_runner._analysis_package_v2_stage_results",
-                return_value=(
-                    stage(dict(model_result.draft_analysis or {})),
-                    stage(dict(model_result.critical_review or {})),
-                ),
-            ) as bridge,
-            mock.patch.dict(os.environ, environment, clear=False),
-        ):
-            result = run_request(self.runtime / "config.json", request)
-        self.assertEqual(calls, ["bind", "run"])
-        bridge.assert_called_once()
-        self.assertNotIn("terminal_review_stage_count", result)
-        self.assertEqual(result["formal_write_count"], 0)
-        self.assertEqual(len(result["member_publications"]), 1)
-        self.assertEqual(result["member_publications"][0], package)
-        self.assertEqual(result["analysis"]["requested_model"], "gpt-5.6-terra")
-        self.assertEqual(
-            result["critical_review"]["requested_model"], "gpt-5.6-terra"
-        )
-        self.assertEqual(
-            result["analysis"]["analysis_package_stages"],
-            result["critical_review"]["analysis_package_stages"],
-        )
-        self.assertEqual(
-            result["analysis"]["payload"]["analysis_package_binding"],
-            result["critical_review"]["payload"]["analysis_package_binding"],
-        )
+        for execution_mode in ("live_authorized", "hosted_synthetic"):
+            with self.subTest(execution_mode=execution_mode):
+                calls.clear()
+                config = {
+                    "runtime_root": str(self.runtime),
+                    "execution_mode": execution_mode,
+                    "analysis_package_v2": {"enabled": True},
+                    "model": {
+                        "model": "gpt-5.6-luna",
+                        "reasoning_effort": "max",
+                    },
+                }
+                with (
+                    mock.patch(
+                        "preprocess_task_runner.load_config",
+                        return_value=config,
+                    ),
+                    mock.patch("preprocess_task_runner.Worker", Worker),
+                    mock.patch(
+                        "preprocess_task_runner._analysis_package_v2_stage_results",
+                        return_value=(
+                            stage(dict(model_result.draft_analysis or {})),
+                            stage(dict(model_result.critical_review or {})),
+                        ),
+                    ) as bridge,
+                    mock.patch.dict(os.environ, environment, clear=False),
+                ):
+                    result = run_request(self.runtime / "config.json", request)
+                self.assertEqual(calls, ["bind", "run"])
+                bridge.assert_called_once()
+                self.assertNotIn("terminal_review_stage_count", result)
+                self.assertEqual(result["formal_write_count"], 0)
+                self.assertEqual(len(result["member_publications"]), 1)
+                self.assertEqual(result["member_publications"][0], package)
+                self.assertEqual(
+                    result["analysis"]["requested_model"],
+                    "gpt-5.6-terra",
+                )
+                self.assertEqual(
+                    result["critical_review"]["requested_model"],
+                    "gpt-5.6-terra",
+                )
+                self.assertEqual(
+                    result["analysis"]["analysis_package_stages"],
+                    result["critical_review"]["analysis_package_stages"],
+                )
+                self.assertEqual(
+                    result["analysis"]["payload"][
+                        "analysis_package_binding"
+                    ],
+                    result["critical_review"]["payload"][
+                        "analysis_package_binding"
+                    ],
+                )
 
     def test_live_bridge_requires_mcp_free_terra_execution_receipt_v3(
         self,
     ) -> None:
         source = inspect.getsource(_analysis_package_v2_stage_results)
         self.assertIn(
+            '"study-intake-model-stage-raw-output-v1"', source
+        )
+        self.assertIn(
             '"study-intake-model-stage-execution-receipt-v3"', source
+        )
+        self.assertIn(
+            '"study-intake-model-stage-normalization-receipt-v1"', source
+        )
+        self.assertNotIn(
+            '!= "study-intake-model-stage-raw-output-v2"', source
         )
         self.assertNotIn(
             '!= "study-intake-model-stage-execution-receipt-v2"', source
+        )
+        self.assertNotIn(
+            '!= "study-intake-model-stage-normalization-receipt-v2"',
+            source,
         )
 
     def test_run_request_preserves_worker_service_limit_without_result(self) -> None:

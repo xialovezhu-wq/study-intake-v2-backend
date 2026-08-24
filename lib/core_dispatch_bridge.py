@@ -30,6 +30,7 @@ from concurrent_dispatch import (
     DispatchCancelled,
     DispatchError,
     FrozenTask,
+    Lease,
     LeaseStore,
     REQUIRED_MODEL,
     REQUIRED_REASONING_EFFORT,
@@ -2338,6 +2339,22 @@ def _stage_result_from_model(
     )
 
 
+def _analysis_package_v2_branch_stage_status(
+    output: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> str:
+    kind = output.get("kind")
+    receipt_status = receipt.get("status")
+    if kind == "investigation_report":
+        if receipt_status != "ready":
+            raise DispatchError("analysis_package_v2_topology_invalid")
+        return "succeeded"
+    if kind == "diagnostic_record" and receipt_status in {
+        "failed", "timed_out", "cancelled"
+    }:
+        return str(receipt_status)
+    raise DispatchError("analysis_package_v2_topology_invalid")
+
+
 def _analysis_package_v2_stage_results(
     result: ModelResult,
     *,
@@ -2357,7 +2374,7 @@ def _analysis_package_v2_stage_results(
     ``critical_review``.
     """
 
-    from analysis_package_v1 import AnalysisPackageError, AnalysisPackageStore
+    from analysis_package_store import AnalysisPackageError, AnalysisPackageStore
     from analysis_package_v2 import reopen_analysis_package_v2
 
     receipts, package = result.stage_receipts, result.analysis
@@ -2472,8 +2489,12 @@ def _analysis_package_v2_stage_results(
             raise DispatchError("analysis_package_v2_topology_invalid")
         output = outputs[index - 1] if 0 < index < len(topology) - 1 else None
         expected_status = (
-            "succeeded" if output is None
-            else luna_receipts[branch_ids[index - 1]].get("status")
+            "succeeded"
+            if output is None
+            else _analysis_package_v2_branch_stage_status(
+                output,
+                luna_receipts[branch_ids[index - 1]],
+            )
         )
         if (
             (row.get("stage"), row.get("provider_stage_name"),
@@ -2640,11 +2661,11 @@ def _analysis_package_v2_stage_results(
             or execution.get("execution_binding") != binding
             or normalization.get("execution_binding") != binding
             or raw.get("schema_version")
-            != "study-intake-model-stage-raw-output-v2"
+            != "study-intake-model-stage-raw-output-v1"
             or execution.get("schema_version")
             != "study-intake-model-stage-execution-receipt-v3"
             or normalization.get("schema_version")
-            != "study-intake-model-stage-normalization-receipt-v2"
+            != "study-intake-model-stage-normalization-receipt-v1"
             or package.get(package_execution_key)
             != expected_package_execution
             or any(

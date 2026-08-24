@@ -19,7 +19,12 @@ for directory in (ROOT / "lib", ROOT / "bin"):
 import preprocess_dispatcher as dispatcher
 from concurrent_dispatch import DispatchError
 from live_execution_gate import LiveExecutionDenied, assert_external_launch_allowed
-from preprocessor_core import CodexRunner, PreprocessorError, load_config
+from preprocessor_core import (
+    CodexRunner,
+    PreprocessorError,
+    _validate_hosted_synthetic_trial_config,
+    load_config,
+)
 
 
 def substitute(
@@ -189,6 +194,45 @@ class OfflineExecutionGateV1Tests(unittest.TestCase):
             self.assertEqual(
                 caught.exception.code, "hosted_synthetic_launch_invalid"
             )
+
+    def test_hosted_synthetic_config_requires_three_isolated_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trial_root = Path(temporary).resolve()
+            runtime_root = trial_root / "runtime"
+            runtime_root.mkdir()
+            roots = {}
+            for subject in ("math", "cs408", "english"):
+                root = trial_root / "subjects" / subject
+                root.mkdir(parents=True)
+                roots[subject] = str(root)
+            config = {
+                "runtime_root": str(runtime_root),
+                "hosted_synthetic_trial": {
+                    "enabled": True,
+                    "synthetic_only": True,
+                    "capture_source_kind": "synthetic",
+                    "runtime_root": str(trial_root),
+                    "subject_roots": roots,
+                    "formal_write_count": 0,
+                },
+            }
+            _validate_hosted_synthetic_trial_config(config)
+
+            outside = json.loads(json.dumps(config))
+            outside["hosted_synthetic_trial"]["subject_roots"]["math"] = str(
+                trial_root.parent
+            )
+            with self.assertRaisesRegex(
+                PreprocessorError, "config_hosted_synthetic_trial_invalid"
+            ):
+                _validate_hosted_synthetic_trial_config(outside)
+
+            extra = json.loads(json.dumps(config))
+            extra["hosted_synthetic_trial"]["unexpected"] = True
+            with self.assertRaisesRegex(
+                PreprocessorError, "config_hosted_synthetic_trial_invalid"
+            ):
+                _validate_hosted_synthetic_trial_config(extra)
 
 
 if __name__ == "__main__":

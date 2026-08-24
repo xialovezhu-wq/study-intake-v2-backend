@@ -15,7 +15,7 @@ LIB = ROOT / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
-from analysis_package_v1 import AnalysisPackageStore  # noqa: E402
+from analysis_package_store import AnalysisPackageStore  # noqa: E402
 from analysis_package_v2 import reopen_analysis_package_v2  # noqa: E402
 from preprocessor_core import (  # noqa: E402
     Candidate,
@@ -563,7 +563,32 @@ class MultiAgentAnalysisPackageLiveTests(unittest.TestCase):
                 }
                 self.assertEqual(len(sessions), branch_count)
                 self.assertEqual(len(runner.children), branch_count)
-                self.assertEqual(result.pipeline_status, "multi_agent_analysis_package_ready")
+                self.assertEqual(
+                    result.pipeline_status,
+                    "multi_agent_analysis_package_ready",
+                )
+
+    def test_hosted_synthetic_trial_requires_exactly_three_luna_branches(
+        self,
+    ) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runner = _FakeLiveRunner(
+            runtime_root=Path(temporary.name),
+            branch_count=4,
+        )
+        runner.config["execution_mode"] = "hosted_synthetic"
+        with self.assertRaisesRegex(
+            PreprocessorError,
+            "hosted_synthetic_luna_branch_count_invalid",
+        ):
+            runner.run_analysis_package_v2(_candidate())
+        prompt = runner.parent_execute_calls[0]["prompt"]
+        self.assertIn(
+            "Propose exactly three independent Luna investigations",
+            prompt,
+        )
+        self.assertNotIn("three or four", prompt)
 
     def test_each_subject_two_captures_persists_complete_dual_report_sets(
         self,
@@ -685,6 +710,37 @@ class MultiAgentAnalysisPackageLiveTests(unittest.TestCase):
             self.assertEqual(AnalysisPackageStore(Path(folder)).packages_for(
                 subject="math", capture_intake_date_value="2026-08-24"
             ), [])
+
+    def test_first_read_session_failure_preserves_the_original_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runner = _FakeLiveRunner(
+                runtime_root=Path(folder), branch_count=3
+            )
+
+            class BrokenContext:
+                def _background_context(self, _candidate):
+                    raise PreprocessorError(
+                        "background_mcp_client_failed",
+                        diagnostic={
+                            "returncode": "2",
+                            "stderr_tail": "synthetic sealed client failure",
+                        },
+                    )
+
+            runner._new_multi_agent_branch_runner = (  # type: ignore[method-assign]
+                lambda _candidate, _branch_id: BrokenContext()
+            )
+            with self.assertRaisesRegex(
+                PreprocessorError, "background_mcp_client_failed"
+            ) as raised:
+                runner.run_analysis_package_v2(_candidate())
+            self.assertEqual(
+                raised.exception.diagnostic,
+                {
+                    "returncode": "2",
+                    "stderr_tail": "synthetic sealed client failure",
+                },
+            )
 
     def test_result_topology_persistence_reopen_and_process_closure(self) -> None:
         runner, result, runtime_root, temporary = self._run(4, {"branch-04"})

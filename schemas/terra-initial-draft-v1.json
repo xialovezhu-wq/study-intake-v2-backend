@@ -4,14 +4,14 @@
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "subject", "capture_id", "learning_sections", "proposed_branches", "warnings", "formal_write_count"],
   "properties": {
-    "schema_version": {"const": "terra_initial_draft_v1"}, "subject": {"enum": ["math", "cs408", "english"]}, "capture_id": {"type": "string", "minLength": 1},
+    "schema_version": {"type": "string", "enum": ["terra_initial_draft_v1"]}, "subject": {"type": "string", "enum": ["math", "cs408", "english"]}, "capture_id": {"type": "string", "minLength": 1},
     "learning_sections": {"type": "object", "additionalProperties": false, "required": ["task_summary", "known_facts", "open_questions"], "properties": {"task_summary": {"type": "string", "minLength": 1}, "known_facts": {"$ref": "#/$defs/nonempty_strings"}, "open_questions": {"$ref": "#/$defs/nonempty_strings"}}},
     "proposed_branches": {"type": "array", "minItems": 3, "maxItems": 4, "items": {"$ref": "#/$defs/branch"}},
-    "warnings": {"$ref": "#/$defs/strings"}, "formal_write_count": {"const": 0}
+    "warnings": {"$ref": "#/$defs/strings"}, "formal_write_count": {"type": "integer", "enum": [0]}
   },
   "$defs": {
-    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-    "nonempty_strings": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "strings": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "nonempty_strings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
     "branch": {"type": "object", "additionalProperties": false, "required": ["branch_id", "purpose", "rationale", "collection_scope", "expected_evidence_kinds"], "properties": {"branch_id": {"type": "string", "minLength": 1}, "purpose": {"type": "string", "minLength": 1}, "rationale": {"type": "string", "minLength": 1}, "collection_scope": {"$ref": "#/$defs/nonempty_strings"}, "expected_evidence_kinds": {"$ref": "#/$defs/nonempty_strings"}}}
   }
 }

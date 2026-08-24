@@ -272,6 +272,27 @@ class MultiAgentModelDraftTests(unittest.TestCase):
             )
             self.assertFalse(schema["additionalProperties"])
             self.assertNotIn("sha256", json.dumps(schema))
+            encoded = json.dumps(schema)
+            for unsupported in (
+                '"const"',
+                "uniqueItems",
+                "oneOf",
+                "unevaluatedProperties",
+                '"format"',
+            ):
+                self.assertNotIn(unsupported, encoded)
+
+            def assert_enums_declare_types(value):
+                if isinstance(value, dict):
+                    if "enum" in value:
+                        self.assertIn("type", value)
+                    for nested in value.values():
+                        assert_enums_declare_types(nested)
+                elif isinstance(value, list):
+                    for nested in value:
+                        assert_enums_declare_types(nested)
+
+            assert_enums_declare_types(schema)
 
 
 if __name__ == "__main__":

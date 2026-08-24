@@ -1563,6 +1563,57 @@ def _materialize_legacy_fixture_v2_config(
     return config
 
 
+def _validate_hosted_synthetic_trial_config(
+    config: Mapping[str, Any],
+) -> None:
+    trial = config.get("hosted_synthetic_trial")
+    if not isinstance(trial, Mapping) or set(trial) != {
+        "enabled",
+        "synthetic_only",
+        "capture_source_kind",
+        "runtime_root",
+        "subject_roots",
+        "formal_write_count",
+    }:
+        raise PreprocessorError("config_hosted_synthetic_trial_invalid")
+    raw_root = trial.get("runtime_root")
+    roots = trial.get("subject_roots")
+    config_runtime = config.get("runtime_root")
+    if (
+        trial.get("enabled") is not True
+        or trial.get("synthetic_only") is not True
+        or trial.get("capture_source_kind") != "synthetic"
+        or trial.get("formal_write_count") != 0
+        or not isinstance(raw_root, str)
+        or not Path(raw_root).is_absolute()
+        or not isinstance(config_runtime, str)
+        or not Path(config_runtime).is_absolute()
+        or not isinstance(roots, Mapping)
+        or set(roots) != set(SUBJECTS)
+    ):
+        raise PreprocessorError("config_hosted_synthetic_trial_invalid")
+    try:
+        trial_root = Path(raw_root).resolve(strict=True)
+        runtime_root = Path(config_runtime).resolve(strict=True)
+        runtime_root.relative_to(trial_root)
+        resolved_subjects = {
+            subject: Path(str(roots[subject])).resolve(strict=True)
+            for subject in SUBJECTS
+        }
+        for root in resolved_subjects.values():
+            root.relative_to(trial_root)
+    except (OSError, ValueError) as exc:
+        raise PreprocessorError(
+            "config_hosted_synthetic_trial_invalid"
+        ) from exc
+    if (
+        len(set(resolved_subjects.values())) != len(SUBJECTS)
+        or runtime_root in resolved_subjects.values()
+        or any(not root.is_dir() for root in resolved_subjects.values())
+    ):
+        raise PreprocessorError("config_hosted_synthetic_trial_invalid")
+
+
 def load_config(path: Path) -> dict[str, Any]:
     config = _materialize_legacy_fixture_v2_config(
         load_json(path), config_path=path
@@ -1589,7 +1640,9 @@ def load_config(path: Path) -> dict[str, Any]:
     if config["model"].get("max_images") != 8:
         raise PreprocessorError("config_model_max_images_must_be_8")
     execution_mode = config.get("execution_mode")
-    if execution_mode not in {"fixture", "offline", "live_authorized"}:
+    if execution_mode not in {
+        "fixture", "offline", "hosted_synthetic", "live_authorized"
+    }:
         raise PreprocessorError("config_execution_mode_invalid")
     declared_execution_mode = os.environ.get("STUDY_INTAKE_EXECUTION_MODE")
     if (
@@ -1597,6 +1650,10 @@ def load_config(path: Path) -> dict[str, Any]:
         and declared_execution_mode != execution_mode
     ):
         raise PreprocessorError("config_execution_mode_environment_mismatch")
+    if execution_mode == "hosted_synthetic":
+        _validate_hosted_synthetic_trial_config(config)
+    elif "hosted_synthetic_trial" in config:
+        raise PreprocessorError("config_hosted_synthetic_trial_invalid")
     live_gate = config.get("live_execution_gate")
     if (
         not isinstance(live_gate, Mapping)
@@ -1657,10 +1714,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "consumer_stage_chain",
         "analysis_package_v1",
     }
-    if (
-        execution_mode == "live_authorized"
-        or "analysis_package_v2" in config
-    ) and retired_analysis_route_keys.intersection(config):
+    if retired_analysis_route_keys.intersection(config):
         raise PreprocessorError("config_retired_analysis_route_present")
     try:
         from model_role_contract import (
@@ -1671,28 +1725,6 @@ def load_config(path: Path) -> dict[str, Any]:
         config["multi_agent_model_contract"] = model_contract_from_config(config)
     except ModelRoleContractError as exc:
         raise PreprocessorError(exc.code) from exc
-    analysis_package = config.get("analysis_package_v1")
-    if analysis_package is not None:
-        if (
-            not isinstance(analysis_package, Mapping)
-            or set(analysis_package) != {
-                "enabled",
-                "stage_output_schema",
-                "max_prompt_bytes",
-                "max_output_bytes",
-            }
-            or analysis_package.get("enabled") is not True
-            or not isinstance(analysis_package.get("stage_output_schema"), str)
-            or not Path(str(analysis_package["stage_output_schema"])).is_absolute()
-            or not Path(str(analysis_package["stage_output_schema"])).is_file()
-            or any(
-                isinstance(analysis_package.get(key), bool)
-                or not isinstance(analysis_package.get(key), int)
-                or not 4096 <= int(analysis_package[key]) <= 2 * 1024 * 1024
-                for key in ("max_prompt_bytes", "max_output_bytes")
-            )
-        ):
-            raise PreprocessorError("config_analysis_package_v1_invalid")
     analysis_package_v2 = config.get("analysis_package_v2")
     if analysis_package_v2 is not None:
         expected_v2_keys = {
@@ -3531,6 +3563,164 @@ class EnglishAdapter(BaseAdapter):
             "formal_write_count": 0,
         }
 
+    def _validate_raw_dialogue_event(self, event: Any) -> dict[str, Any]:
+        if not isinstance(event, dict):
+            raise PreprocessorError("english_raw_event_not_object")
+        required = {
+            "schema_version", "event_id", "event_type", "idempotency_key",
+            "request_sha256", "occurred_at", "producer",
+            "formal_write_count", "formal_writeback", "messages",
+            "attachments", "context_identity", "resolution_status",
+        }
+        producer = event.get("producer")
+        if (
+            set(event) != required
+            or event.get("schema_version") != "english_capture_event_v2"
+            or not isinstance(event.get("event_id"), str)
+            or self.EVENT_ID_RE.fullmatch(str(event["event_id"])) is None
+            or event.get("event_type") != "english_raw_dialogue_turn_v1"
+            or not isinstance(event.get("idempotency_key"), str)
+            or not 1 <= len(str(event["idempotency_key"]).strip()) <= 240
+            or SHA256_RE.fullmatch(str(event.get("request_sha256") or ""))
+            is None
+            or not isinstance(producer, Mapping)
+            or set(producer) != {"role", "name", "version"}
+            or producer.get("role") != "foreground_producer"
+            or not isinstance(producer.get("name"), str)
+            or not str(producer["name"]).strip()
+            or not isinstance(producer.get("version"), str)
+            or not str(producer["version"]).strip()
+            or event.get("formal_write_count") != 0
+            or event.get("formal_writeback") != "none"
+        ):
+            raise PreprocessorError("english_raw_event_envelope_invalid")
+        self._event_study_date(event)
+
+        messages = event.get("messages")
+        if not isinstance(messages, list) or len(messages) < 2:
+            raise PreprocessorError("english_raw_event_messages_invalid")
+        message_ids: set[str] = set()
+        message_times: list[dt.datetime] = []
+        roles: list[str] = []
+        for message in messages:
+            role = message.get("role") if isinstance(message, Mapping) else None
+            expected = {"role", "message_id", "timestamp", "content"}
+            if role == "assistant":
+                expected.add("complete")
+            timestamp_value = (
+                message.get("timestamp")
+                if isinstance(message, Mapping)
+                else None
+            )
+            try:
+                timestamp = dt.datetime.fromisoformat(
+                    str(timestamp_value).replace("Z", "+00:00")
+                )
+            except ValueError:
+                timestamp = None
+            if timestamp is not None and (
+                timestamp.tzinfo is None or timestamp.utcoffset() is None
+            ):
+                timestamp = None
+            message_id = (
+                message.get("message_id")
+                if isinstance(message, Mapping)
+                else None
+            )
+            if (
+                not isinstance(message, Mapping)
+                or set(message) != expected
+                or role not in {"user", "assistant"}
+                or not isinstance(message_id, str)
+                or not message_id.strip()
+                or message_id in message_ids
+                or timestamp is None
+                or not isinstance(message.get("content"), str)
+                or not str(message["content"]).strip()
+                or (role == "assistant" and message.get("complete") is not True)
+            ):
+                raise PreprocessorError("english_raw_event_messages_invalid")
+            message_ids.add(message_id)
+            message_times.append(timestamp)
+            roles.append(str(role))
+        if (
+            roles[-1] != "assistant"
+            or roles.count("assistant") != 1
+            or any(role != "user" for role in roles[:-1])
+            or message_times != sorted(message_times)
+        ):
+            raise PreprocessorError("english_raw_event_messages_invalid")
+
+        attachments = event.get("attachments")
+        if not isinstance(attachments, list):
+            raise PreprocessorError("english_raw_event_attachments_invalid")
+        attachment_ids: set[str] = set()
+        for attachment in attachments:
+            keys = (
+                frozenset(attachment)
+                if isinstance(attachment, Mapping)
+                else frozenset()
+            )
+            attachment_id = (
+                attachment.get("attachment_id")
+                if isinstance(attachment, Mapping)
+                else None
+            )
+            durable_ref = (
+                attachment.get("durable_ref")
+                if isinstance(attachment, Mapping)
+                else None
+            )
+            if (
+                not isinstance(attachment, Mapping)
+                or keys
+                not in {
+                    frozenset(
+                        {"attachment_id", "metadata", "sha256", "durable_ref"}
+                    ),
+                    frozenset(
+                        {
+                            "attachment_id", "message_id", "metadata",
+                            "sha256", "durable_ref",
+                        }
+                    ),
+                }
+                or not isinstance(attachment_id, str)
+                or not attachment_id.strip()
+                or attachment_id in attachment_ids
+                or (
+                    "message_id" in attachment
+                    and attachment.get("message_id") not in message_ids
+                )
+                or not isinstance(attachment.get("metadata"), Mapping)
+                or SHA256_RE.fullmatch(str(attachment.get("sha256") or ""))
+                is None
+                or not isinstance(durable_ref, str)
+                or not durable_ref.strip()
+                or durable_ref.startswith(("/", "~", "file://"))
+                or ".." in Path(durable_ref).parts
+            ):
+                raise PreprocessorError("english_raw_event_attachments_invalid")
+            attachment_ids.add(attachment_id)
+
+        context = event.get("context_identity")
+        context_keys = {
+            "conversation_id", "thread_id", "workspace_id",
+            "assistant_context_id",
+        }
+        if (
+            not isinstance(context, Mapping)
+            or set(context) != context_keys
+            or any(
+                not isinstance(context.get(key), str)
+                or not str(context[key]).strip()
+                for key in context_keys
+            )
+            or event.get("resolution_status") not in {"resolved", "unresolved"}
+        ):
+            raise PreprocessorError("english_raw_event_context_invalid")
+        return copy.deepcopy(event)
+
     def _validate_event(self, event: Any) -> dict[str, Any]:
         if not isinstance(event, dict):
             raise PreprocessorError("english_event_not_object")
@@ -3540,6 +3730,7 @@ class EnglishAdapter(BaseAdapter):
             "candidates", "supersedes_event_id", "correction_reason", "completion",
             "producer", "formal_write_count", "formal_writeback",
             "observed_signals", "source_signal_ids", "capture_coverage",
+            "parent_raw_capture_id",
         }
         event_id = event.get("event_id")
         event_type = event.get("event_type")
@@ -3564,6 +3755,17 @@ class EnglishAdapter(BaseAdapter):
             or not str(producer.get("name")).strip()
             or not isinstance(producer.get("version"), str)
             or not str(producer.get("version")).strip()
+            or (
+                event.get("parent_raw_capture_id") is not None
+                and (
+                    event_type not in {"sentence_captured", "sentence_correction"}
+                    or not isinstance(event.get("parent_raw_capture_id"), str)
+                    or self.EVENT_ID_RE.fullmatch(
+                        str(event.get("parent_raw_capture_id"))
+                    )
+                    is None
+                )
+            )
             or set(event) - allowed_event_fields
         ):
             raise PreprocessorError("english_event_envelope_invalid")
@@ -3876,6 +4078,7 @@ class EnglishAdapter(BaseAdapter):
             raise PreprocessorError("english_event_scan_limit_exceeded")
         events: list[dict[str, Any]] = []
         seen: set[str] = set()
+        raw_parent_ids: set[str] = set()
         migrations = self._load_event_migrations()
         for path in paths:
             try:
@@ -3883,6 +4086,14 @@ class EnglishAdapter(BaseAdapter):
                 if path.stat().st_size > self.max_event_bytes:
                     raise PreprocessorError("english_event_too_large")
                 raw_event = load_json(path)
+                if raw_event.get("event_type") == "english_raw_dialogue_turn_v1":
+                    raw_dialogue = self._validate_raw_dialogue_event(raw_event)
+                    raw_event_id = str(raw_dialogue["event_id"])
+                    if raw_event_id in seen or path.stem != raw_event_id:
+                        raise PreprocessorError("english_event_identity_conflict")
+                    seen.add(raw_event_id)
+                    raw_parent_ids.add(raw_event_id)
+                    continue
                 try:
                     event = self._validate_event(raw_event)
                 except PreprocessorError:
@@ -3905,6 +4116,12 @@ class EnglishAdapter(BaseAdapter):
                 raise PreprocessorError("english_event_identity_conflict")
             seen.add(event_id)
             events.append(event)
+        if any(
+            isinstance(event.get("parent_raw_capture_id"), str)
+            and event["parent_raw_capture_id"] not in raw_parent_ids
+            for event in events
+        ):
+            raise PreprocessorError("english_parent_raw_capture_binding_invalid")
         by_id = {str(event["event_id"]): event for event in events}
         superseded: set[str] = set()
         for event in events:
@@ -8186,6 +8403,26 @@ def _validate_bundle_interaction_trace(
     }
 
 
+def _first_turn_handoff_trace_sha256(value: Any) -> str | None:
+    trace = _validate_bundle_interaction_trace(
+        value, "background_handoff_bundle_trace"
+    )
+    disclosed_events = [
+        {
+            "role": row["role"],
+            "kind": row["kind"],
+            "text": row["text"],
+            "observed_at": None,
+        }
+        for row in trace["events"]
+    ]
+    if not disclosed_events:
+        return None
+    return hashlib.sha256(
+        canonical_bytes(disclosed_events) + b"\n"
+    ).hexdigest()
+
+
 def _validate_text_list(value: Any, label: str, *, maximum: int = 64) -> None:
     if not isinstance(value, list) or len(value) > maximum:
         raise PreprocessorError(f"{label}_invalid")
@@ -9493,21 +9730,44 @@ def _validate_background_handoff_resolution_receipt(
 
     completion_kind = handoff.get("completion_kind")
     if completion_kind == "first_turn_complete":
-        required = {
-            "schema",
-            "status",
-            "completion_kind",
-            "context_id",
-            "session_id",
-            "item_id",
-            "capture_id",
-            "capture_receipt_sha256",
-            "evidence_manifest_sha256",
-            "interaction_trace_sha256",
-            "event_time",
-            "advance_allowed",
-            "formal_write_count",
-        }
+        first_turn_freeze_receipt = bool(
+            isinstance(receipt, Mapping)
+            and receipt.get("status") == "morning_capture_frozen"
+        )
+        required = (
+            {
+                "schema",
+                "status",
+                "attestation_schema",
+                "context_id",
+                "session_id",
+                "item_id",
+                "capture_id",
+                "capture_receipt_sha256",
+                "evidence_manifest_sha256",
+                "buffer_freeze_receipt_sha256",
+                "interaction_trace_sha256",
+                "event_time",
+                "advance_allowed",
+                "formal_write_count",
+            }
+            if first_turn_freeze_receipt
+            else {
+                "schema",
+                "status",
+                "completion_kind",
+                "context_id",
+                "session_id",
+                "item_id",
+                "capture_id",
+                "capture_receipt_sha256",
+                "evidence_manifest_sha256",
+                "interaction_trace_sha256",
+                "event_time",
+                "advance_allowed",
+                "formal_write_count",
+            }
+        )
     elif completion_kind == "teaching_resolved":
         required = {
             "schema",
@@ -9555,14 +9815,24 @@ def _validate_background_handoff_resolution_receipt(
     ):
         raise PreprocessorError("background_handoff_resolution_receipt_invalid")
     if completion_kind == "first_turn_complete":
-        if (
-            row.get("status") != "background_handoff_attested"
-            or row.get("completion_kind") != "first_turn_complete"
-            or row.get("interaction_trace_sha256")
-            != handoff.get("interaction_trace_sha256")
-            or parse_time(row.get("event_time")) is None
-            or row.get("advance_allowed") is not False
-        ):
+        first_turn_contract_valid = bool(
+            row.get("interaction_trace_sha256")
+            == handoff.get("interaction_trace_sha256")
+            and parse_time(row.get("event_time")) is not None
+            and row.get("advance_allowed") is False
+            and (
+                row.get("status") == "background_handoff_attested"
+                and row.get("completion_kind") == "first_turn_complete"
+                or row.get("status") == "morning_capture_frozen"
+                and row.get("attestation_schema")
+                == "morning-capture-freeze-attestation-v1"
+                and SHA256_RE.fullmatch(
+                    str(row.get("buffer_freeze_receipt_sha256") or "")
+                )
+                is not None
+            )
+        )
+        if not first_turn_contract_valid:
             raise PreprocessorError(
                 "background_handoff_resolution_receipt_invalid"
             )
@@ -10321,28 +10591,8 @@ class Cs408Adapter(BaseAdapter):
                 CURRENT_QUESTION_BUNDLE_SCHEMA_V3,
             }:
                 raise PreprocessorError("background_handoff_first_turn_trace_missing")
-            trace = _validate_bundle_interaction_trace(
-                bundle.get("interaction_trace"), "background_handoff_bundle_trace"
-            )
-            trace_events = [
-                {
-                    "role": row["role"],
-                    "kind": row["kind"],
-                    "text": row["text"],
-                    "observed_at": None,
-                }
-                for row in trace["events"]
-            ]
-            expected_trace_sha256 = (
-                trace.get("full_trace_sha256")
-                if trace.get("schema") == INTERACTION_TRACE_SCHEMA_V2
-                else (
-                    hashlib.sha256(
-                        canonical_bytes(trace_events) + b"\n"
-                    ).hexdigest()
-                    if trace_events
-                    else None
-                )
+            expected_trace_sha256 = _first_turn_handoff_trace_sha256(
+                bundle.get("interaction_trace")
             )
             if handoff.get("interaction_trace_sha256") != expected_trace_sha256:
                 raise PreprocessorError("background_handoff_first_turn_trace_mismatch")
@@ -16295,6 +16545,9 @@ class CodexRunner:
         self._provider_progress: dict[str, dict[str, Any]] = {}
         self._provider_closure: dict[str, dict[str, Any]] = {}
         self._provider_raw_refs: dict[str, dict[str, Any]] = {}
+        self._mcp_stage_normalization_warnings: dict[
+            str, list[dict[str, Any]]
+        ] = {}
         self._cancel_requested = threading.Event()
         self._cancel_reason = "cancelled"
         self._dispatch_process_lifecycle: dict[str, Any] | None = None
@@ -19346,7 +19599,7 @@ class CodexRunner:
         ) or (
             server_code == "OUTPUT_LIMIT" and tool in library_tools
         ) or (
-            server_code == "NOT_FOUND" and tool == "get_records"
+            server_code == "NOT_FOUND" and tool in library_tools
         )
         if server_code in MCP_NON_EVIDENCE_ERROR_CODES and allowed_for_tool:
             return True
@@ -19465,13 +19718,23 @@ class CodexRunner:
         session = processing_context.get("mcp_read_session")
         if not isinstance(session, Mapping):
             raise PreprocessorError(f"{stage_name}_mcp_read_session_missing")
-        if (
-            isinstance(duplicate_argument_count, bool)
-            or duplicate_argument_count not in {0, 1}
+        duplicate_contract_valid = bool(
+            duplicate_argument_count == 0
             or (
                 duplicate_argument_count == 1
-                and (subject, stage_name) != ("english", "english_analysis")
+                and (subject, stage_name)
+                == ("english", "english_analysis")
             )
+            or (
+                (subject, stage_name)
+                == ("english", "english_luna_analysis")
+                and 1 <= duplicate_argument_count <= 8
+            )
+        )
+        if (
+            isinstance(duplicate_argument_count, bool)
+            or not isinstance(duplicate_argument_count, int)
+            or not duplicate_contract_valid
         ):
             raise PreprocessorError(
                 f"{stage_name}_mcp_duplicate_review_contract_invalid"
@@ -19650,13 +19913,36 @@ class CodexRunner:
             "stage": stage_name,
             "kind": "semantic_validation_rejected",
         }
-        normalization = self._publish_model_stage_normalization(
-            stage_name=stage_name,
-            result=result,
-            normalized_payload=result.payload,
-            warnings=(warning,),
-            error_code=None,
-        )
+        try:
+            normalization = self._publish_model_stage_normalization(
+                stage_name=stage_name,
+                result=result,
+                normalized_payload=result.payload,
+                warnings=(warning,),
+                error_code=None,
+            )
+        except PreprocessorError as proof_exc:
+            if proof_exc.code != "model_stage_normalization_binding_missing":
+                raise
+            diagnostic.update(
+                {
+                    "post_stage_validation_failed": True,
+                    "normalization_proof_incomplete": True,
+                    "model_stage_output_sha256": str(
+                        result.output_object_sha256 or result.output_sha256
+                    ),
+                    "model_stage_output_ref": str(
+                        result.output_object_ref or ""
+                    ),
+                    "mcp_transcript_sha256": str(
+                        result.mcp_transcript_sha256 or ""
+                    ),
+                    "mcp_transcript_ref": str(
+                        result.mcp_transcript_ref or ""
+                    ),
+                }
+            )
+            return PreprocessorError(exc.code, diagnostic=diagnostic)
         normalized_result = replace(
             result,
             stage_normalization_receipt_sha256=normalization.get(
@@ -19865,6 +20151,7 @@ class CodexRunner:
         get_task_context_count = 0
         read_artifact_ids: set[str] = set()
         library_call_count = 0
+        library_no_match_count = 0
         math_search_backoff_required = (
             subject == "math"
             and stage_name
@@ -19888,6 +20175,33 @@ class CodexRunner:
         ] = {}
         english_review_duplicate_calls: list[dict[str, Any]] = []
         english_review_duplicate_projection_sha256: str | None = None
+        english_luna_redundant_argument_hashes: set[
+            tuple[str, str]
+        ] = set()
+        english_luna_redundant_logical_reads: set[
+            tuple[str, str]
+        ] = set()
+        english_luna_redundant_query_coverage: dict[
+            str, dict[str, Any]
+        ] = {}
+        english_luna_redundant_calls: list[dict[str, Any]] = []
+        english_luna_completed_logical_reads: set[
+            tuple[str, str]
+        ] = set()
+        english_luna_query_logical_reads: dict[
+            str, tuple[str, str]
+        ] = {}
+        english_luna_redundant_query_logical_reads: dict[
+            str, tuple[str, str]
+        ] = {}
+        english_luna_query_items: dict[str, list[dict[str, Any]]] = {}
+        english_luna_redundant_query_items: dict[
+            str, list[dict[str, Any]]
+        ] = {}
+        english_luna_completed_logical_result_sha256s: dict[
+            tuple[str, str], str
+        ] = {}
+
         successful_call_order = 0
         for raw in stdout.splitlines():
             try:
@@ -20030,6 +20344,12 @@ class CodexRunner:
             elif non_evidence_error:
                 error = envelope.get("error")
                 if (
+                    tool in library_tools
+                    and isinstance(error, Mapping)
+                    and error.get("code") == "NOT_FOUND"
+                ):
+                    library_no_match_count += 1
+                if (
                     math_search_backoff_required
                     and tool == "search_records"
                     and isinstance(error, Mapping)
@@ -20107,9 +20427,6 @@ class CodexRunner:
                         }
                 continue
 
-            if non_evidence_error:
-                continue
-
             successful_call_order += 1
             math_search_attempt: dict[str, Any] | None = None
             if math_search_backoff_required and tool == "search_records":
@@ -20146,30 +20463,86 @@ class CodexRunner:
                         f"{stage_name}_mcp_cursor_without_first_page"
                     )
 
-            target_argument_hashes = (
-                math_search_attempt["argument_hashes"]
-                if math_search_attempt is not None
-                else argument_hashes
-            )
-            target_logical_first_page_hashes = (
-                math_search_attempt["logical_first_page_hashes"]
-                if math_search_attempt is not None
-                else logical_first_page_hashes
-            )
-            target_query_coverage = (
-                math_search_attempt["query_coverage"]
-                if math_search_attempt is not None
-                else query_coverage
-            )
-            target_calls = (
-                math_search_attempt["calls"]
-                if math_search_attempt is not None
-                else calls
-            )
             argument_sha256 = sha256_value(arguments)
             read_identity = (str(tool), argument_sha256)
+            cursor = arguments.get("cursor")
+            if cursor is not None and not isinstance(cursor, str):
+                raise PreprocessorError(f"{stage_name}_mcp_cursor_invalid")
+            logical_identity: tuple[str, str] | None = None
+            if cursor is None:
+                logical_arguments = {
+                    key: copy.deepcopy(value)
+                    for key, value in arguments.items()
+                    if key not in {"cursor", "page_size", "max_bytes"}
+                }
+                logical_identity = (
+                    str(tool),
+                    sha256_value(logical_arguments),
+                )
+            query_arguments = {
+                key: copy.deepcopy(value)
+                for key, value in arguments.items()
+                if key != "cursor"
+            }
+            query_sha256 = sha256_value(
+                {"tool": str(tool), "arguments": query_arguments}
+            )
+            english_luna_redundant_mode = bool(
+                subject == "english"
+                and stage_name == "english_luna_analysis"
+                and tool in library_tools
+                and (
+                    query_sha256
+                    in english_luna_redundant_query_coverage
+                    or (
+                        logical_identity is not None
+                        and logical_identity
+                        in english_luna_completed_logical_reads
+                        and read_identity not in argument_hashes
+                    )
+                )
+            )
             if (
-                read_identity in argument_hashes
+                english_luna_redundant_mode
+                and len(english_luna_redundant_calls) >= 8
+            ):
+                raise PreprocessorError(
+                    f"{stage_name}_mcp_duplicate_read"
+                )
+            if math_search_attempt is not None:
+                target_argument_hashes = math_search_attempt[
+                    "argument_hashes"
+                ]
+                target_logical_first_page_hashes = math_search_attempt[
+                    "logical_first_page_hashes"
+                ]
+                target_query_coverage = math_search_attempt[
+                    "query_coverage"
+                ]
+                target_calls = math_search_attempt["calls"]
+            elif english_luna_redundant_mode:
+                target_argument_hashes = (
+                    english_luna_redundant_argument_hashes
+                )
+                target_logical_first_page_hashes = (
+                    english_luna_redundant_logical_reads
+                )
+                target_query_coverage = (
+                    english_luna_redundant_query_coverage
+                )
+                target_calls = english_luna_redundant_calls
+            else:
+                target_argument_hashes = argument_hashes
+                target_logical_first_page_hashes = (
+                    logical_first_page_hashes
+                )
+                target_query_coverage = query_coverage
+                target_calls = calls
+            if (
+                (
+                    not english_luna_redundant_mode
+                    and read_identity in argument_hashes
+                )
                 or read_identity in target_argument_hashes
             ):
                 if (
@@ -20255,36 +20628,22 @@ class CodexRunner:
                 if not isinstance(artifact_id, str) or not artifact_id:
                     raise PreprocessorError(f"{stage_name}_mcp_arguments_invalid")
                 read_artifact_ids.add(artifact_id)
-            elif tool in library_tools and math_search_attempt is None:
+            elif (
+                tool in library_tools
+                and math_search_attempt is None
+                and not english_luna_redundant_mode
+            ):
                 library_call_count += 1
-            cursor = arguments.get("cursor")
-            if cursor is not None:
-                if not isinstance(cursor, str):
-                    raise PreprocessorError(f"{stage_name}_mcp_cursor_invalid")
-            else:
-                logical_arguments = {
-                    key: copy.deepcopy(value)
-                    for key, value in arguments.items()
-                    if key not in {"cursor", "page_size", "max_bytes"}
-                }
-                logical_identity = (
-                    str(tool),
-                    sha256_value(logical_arguments),
-                )
+            if logical_identity is not None:
                 if (
-                    logical_identity in logical_first_page_hashes
+                    (
+                        not english_luna_redundant_mode
+                        and logical_identity in logical_first_page_hashes
+                    )
                     or logical_identity in target_logical_first_page_hashes
                 ):
                     raise PreprocessorError(f"{stage_name}_mcp_duplicate_read")
                 target_logical_first_page_hashes.add(logical_identity)
-            query_arguments = {
-                key: copy.deepcopy(value)
-                for key, value in arguments.items()
-                if key != "cursor"
-            }
-            query_sha256 = sha256_value(
-                {"tool": str(tool), "arguments": query_arguments}
-            )
             coverage = target_query_coverage.get(query_sha256)
             if coverage is None:
                 if cursor is not None:
@@ -20303,6 +20662,20 @@ class CodexRunner:
                     "complete": False,
                 }
                 target_query_coverage[query_sha256] = coverage
+                if (
+                    subject == "english"
+                    and stage_name == "english_luna_analysis"
+                    and tool in library_tools
+                    and logical_identity is not None
+                ):
+                    if english_luna_redundant_mode:
+                        english_luna_redundant_query_logical_reads[
+                            query_sha256
+                        ] = logical_identity
+                    else:
+                        english_luna_query_logical_reads[
+                            query_sha256
+                        ] = logical_identity
             elif coverage["complete"] is True:
                 raise PreprocessorError(
                     f"{stage_name}_mcp_page_after_complete"
@@ -20536,6 +20909,19 @@ class CodexRunner:
                     raise PreprocessorError(
                         f"{stage_name}_mcp_page_contract_invalid"
                     )
+            if (
+                subject == "english"
+                and stage_name == "english_luna_analysis"
+                and tool in library_tools
+            ):
+                target_item_pages = (
+                    english_luna_redundant_query_items
+                    if english_luna_redundant_mode
+                    else english_luna_query_items
+                )
+                target_item_pages.setdefault(query_sha256, []).extend(
+                    copy.deepcopy(dict(row)) for row in items
+                )
             service_query_sha256 = str(envelope["query_sha256"])
             if coverage["service_query_sha256"] is None:
                 coverage["service_query_sha256"] = service_query_sha256
@@ -20575,6 +20961,55 @@ class CodexRunner:
             coverage["returned_count"] += returned_count
             coverage["expected_offset"] = offset + returned_count
             coverage["complete"] = envelope["complete"] is True
+            if (
+                coverage["complete"] is True
+                and subject == "english"
+                and stage_name == "english_luna_analysis"
+                and tool in library_tools
+            ):
+                projection_items = (
+                    english_luna_redundant_query_items
+                    if english_luna_redundant_mode
+                    else english_luna_query_items
+                )
+                projection_sha256 = sha256_value(
+                    {
+                        "total_count": coverage["total_count"],
+                        "items": projection_items.get(query_sha256, []),
+                    }
+                )
+                if english_luna_redundant_mode:
+                    redundant_logical = (
+                        english_luna_redundant_query_logical_reads.get(
+                            query_sha256
+                        )
+                    )
+                    if (
+                        redundant_logical is None
+                        or english_luna_completed_logical_result_sha256s.get(
+                            redundant_logical
+                        )
+                        != projection_sha256
+                    ):
+                        raise PreprocessorError(
+                            f"{stage_name}_mcp_duplicate_read"
+                        )
+                else:
+                    completed_logical = (
+                        english_luna_query_logical_reads.get(
+                            query_sha256
+                        )
+                    )
+                    if completed_logical is None:
+                        raise PreprocessorError(
+                            f"{stage_name}_mcp_query_binding_changed"
+                        )
+                    english_luna_completed_logical_reads.add(
+                        completed_logical
+                    )
+                    english_luna_completed_logical_result_sha256s[
+                        completed_logical
+                    ] = projection_sha256
             target_calls.append({
                 # Final canonical sequence is assigned after provisional
                 # attempts commit so interleaved surviving calls retain their
@@ -20645,7 +21080,10 @@ class CodexRunner:
         if any(
             row["complete"] is not True
             or row["returned_count"] != row["total_count"]
-            for row in query_coverage.values()
+            for row in (
+                *query_coverage.values(),
+                *english_luna_redundant_query_coverage.values(),
+            )
         ):
             raise PreprocessorError(f"{stage_name}_mcp_cursor_incomplete")
         expected_artifact_ids = session.get("artifact_ids")
@@ -20653,7 +21091,7 @@ class CodexRunner:
             get_task_context_count != 1
             or not isinstance(expected_artifact_ids, list)
             or read_artifact_ids != set(expected_artifact_ids)
-            or library_call_count < 1
+            or library_call_count + library_no_match_count < 1
         ):
             raise PreprocessorError(f"{stage_name}_mcp_required_reads_incomplete")
         if english_review_duplicate_calls:
@@ -20688,11 +21126,34 @@ class CodexRunner:
         for sequence, call in enumerate(calls, start=1):
             call["sequence"] = sequence
             call.pop("_transport_order", None)
+        redundant_read_count = len(english_luna_redundant_calls)
+        if redundant_read_count:
+            warning = {
+                "code": (
+                    "english_luna_analysis_mcp_redundant_read_ignored"
+                ),
+                "stage": stage_name,
+                "kind": "mcp_redundant_read_ignored",
+                "duplicate_argument_count": redundant_read_count,
+                "logical_query_sha256s": sorted(
+                    {
+                        logical_identity[1]
+                        for logical_identity in (
+                            english_luna_redundant_query_logical_reads.values()
+                        )
+                    }
+                ),
+            }
+            with self._process_lock:
+                self._mcp_stage_normalization_warnings[stage_name] = [
+                    warning
+                ]
         transcript_sha256, transcript_ref = self._persist_mcp_stage_transcript(
             stage_name=stage_name,
             subject=subject,
             processing_context=processing_context,
             calls=calls,
+            duplicate_argument_count=redundant_read_count,
         )
         return tuple(calls), transcript_sha256, transcript_ref
 
@@ -21428,6 +21889,8 @@ class CodexRunner:
             raise PreprocessorError(f"{stage_name}_output_schema_missing")
         if len(prompt.encode("utf-8")) > max_prompt_bytes:
             raise PreprocessorError(f"{stage_name}_prompt_too_large")
+        with self._process_lock:
+            self._mcp_stage_normalization_warnings.pop(stage_name, None)
         model_request_config_args = self._model_request_config_args(model_role)
         role_config = (
             self.config.get("models", {}).get(model_role)
@@ -21772,6 +22235,7 @@ class CodexRunner:
                     diagnostic=diagnostic,
                 )
             review_policy_violation: _McpReviewPolicyViolation | None = None
+            mcp_policy_warnings: list[dict[str, Any]] = []
             try:
                 mcp_calls, mcp_transcript_sha256, mcp_transcript_ref = (
                     self._mcp_stage_calls(
@@ -21791,6 +22255,10 @@ class CodexRunner:
                 mcp_transcript_sha256 = exc.transcript_sha256
                 mcp_transcript_ref = exc.transcript_ref
             except PreprocessorError as exc:
+                with self._process_lock:
+                    self._mcp_stage_normalization_warnings.pop(
+                        stage_name, None
+                    )
                 diagnostic = dict(exc.diagnostic)
                 if isinstance(transport_sha256, str):
                     diagnostic["model_mcp_transport_sha256"] = transport_sha256
@@ -21833,6 +22301,12 @@ class CodexRunner:
                 diagnostic.update(execution_refs)
                 diagnostic.update(raw_refs)
                 raise PreprocessorError(exc.code, diagnostic=diagnostic) from exc
+            with self._process_lock:
+                mcp_policy_warnings = copy.deepcopy(
+                    self._mcp_stage_normalization_warnings.pop(
+                        stage_name, []
+                    )
+                )
             grounding_manifest_sha256: str | None = None
             if processing_context is not None:
                 grounding_manifest = mcp_grounding_manifest(
@@ -21893,7 +22367,10 @@ class CodexRunner:
                 )
                 raise PreprocessorError(error_code, diagnostic=diagnostic)
             size = len(raw_output)
-            raw_boundary_warnings: list[dict[str, Any]] = []
+            raw_boundary_warnings: list[dict[str, Any]] = [
+                copy.deepcopy(dict(row))
+                for row in mcp_policy_warnings
+            ]
             payload: Any = None
             if size > max_output_bytes and not enforce_output_schema:
                 error_code = f"{stage_name}_output_too_large"
@@ -25432,7 +25909,7 @@ class CodexRunner:
     def run_analysis_package_v2(self, candidate: Candidate) -> ModelResult:
         """Run Terra initial -> 3–4 Luna investigations -> Terra final."""
 
-        from analysis_package_v1 import (
+        from analysis_package_store import (
             AnalysisPackageStore,
             build_durable_capture,
             sha256_value as analysis_sha256_value,
@@ -25496,11 +25973,25 @@ class CodexRunner:
         capture_ref = (
             "study-intake-durable-capture://sha256/" + capture_sha
         )
+        fixed_trial_branch_count = (
+            3
+            if self.config.get("execution_mode") == "hosted_synthetic"
+            else None
+        )
+        branch_instruction = (
+            "Propose exactly three independent Luna investigations "
+            if fixed_trial_branch_count == 3
+            else (
+                "Propose exactly three or four independent Luna "
+                "investigations "
+            )
+        )
         initial_prompt = (
             "Produce one strict Terra initial draft. Read only the frozen "
             "Capture supplied below. Do not query any subject database. "
-            "Propose exactly three or four independent Luna investigations "
-            "using only the supplied collection names. formal_write_count=0.\n"
+            + branch_instruction
+            + "using only the supplied collection names. "
+            "formal_write_count=0.\n"
             + json.dumps(
                 {
                     "subject": candidate.subject,
@@ -25550,6 +26041,14 @@ class CodexRunner:
             subject=candidate.subject,
             capture_id=candidate.capture_id,
         )
+        if (
+            fixed_trial_branch_count is not None
+            and len(initial_draft["proposed_branches"])
+            != fixed_trial_branch_count
+        ):
+            raise PreprocessorError(
+                "hosted_synthetic_luna_branch_count_invalid"
+            )
         initial_receipt = self._stage_receipt(
             initial_result,
             prompt_version="multi-agent-terra-initial-v1",
@@ -25602,7 +26101,12 @@ class CodexRunner:
             first_context = first_child._background_context(candidate)
         except Exception as exc:
             raise PreprocessorError(
-                str(getattr(exc, "code", "multi_agent_read_session_open_failed"))
+                str(getattr(exc, "code", "multi_agent_read_session_open_failed")),
+                diagnostic=(
+                    dict(exc.diagnostic)
+                    if isinstance(getattr(exc, "diagnostic", None), Mapping)
+                    else None
+                ),
             ) from exc
         if not isinstance(first_context, Mapping):
             raise PreprocessorError("multi_agent_read_session_missing")
@@ -25741,8 +26245,14 @@ class CodexRunner:
                         "Produce one strict Luna investigation draft for only "
                         "this branch. Use the subject MCP, call get_task_context, "
                         "read all allowed task artifacts, then perform the planned "
-                        "library investigation. Cite only evidence refs returned "
-                        "in this read session. formal_write_count=0.\n"
+                        "library investigation. For read_task_artifact use "
+                        "max_bytes no greater than 32768. Do not repeat a logical "
+                        "library query after a complete response, including with "
+                        "a different page_size; follow only a returned cursor. "
+                        "Treat a scoped NOT_FOUND result as no match and continue "
+                        "without retrying the same logical query. Cite only "
+                        "evidence refs returned in this read session. "
+                        "formal_write_count=0.\n"
                         + json.dumps(
                             {
                                 "subject": candidate.subject,
@@ -26591,147 +27101,6 @@ class CodexRunner:
             mcp_tool_call_count=sum(
                 int(row.get("mcp_tool_call_count") or 0)
                 for row in child_results
-            ),
-        )
-
-    def run_analysis_package_v1(self, candidate: Candidate) -> ModelResult:
-        """Run Terra -> Luna -> Terra final and persist AnalysisPackageV1."""
-
-        from analysis_package_v1 import (
-            AnalysisPackageDriver,
-            AnalysisPackageStore,
-            build_durable_capture,
-            sha256_value as analysis_sha256_value,
-        )
-
-        profile = self.config.get("analysis_package_v1")
-        if not isinstance(profile, Mapping) or profile.get("enabled") is not True:
-            raise PreprocessorError("analysis_package_profile_missing")
-        schema_path = Path(str(profile.get("stage_output_schema") or ""))
-        if not schema_path.is_file():
-            raise PreprocessorError("analysis_package_stage_schema_missing")
-        if not isinstance(candidate.recorded_at, str):
-            raise PreprocessorError("analysis_package_captured_at_missing")
-        processing_context = self._background_context(candidate)
-        if not isinstance(processing_context, Mapping):
-            raise PreprocessorError("analysis_package_read_session_missing")
-        capture = build_durable_capture(
-            capture_id=candidate.capture_id,
-            subject=candidate.subject,
-            study_date=candidate.study_date,
-            captured_at=candidate.recorded_at,
-            payload={
-                "input_fingerprint": candidate.input_fingerprint,
-                "input_binding": copy.deepcopy(candidate.input_binding),
-                "model_input": copy.deepcopy(candidate.model_input),
-            },
-            source_kind=(
-                "synthetic"
-                if self.config.get("execution_mode") == "fixture"
-                else "canonical"
-            ),
-        )
-        prior_reports: dict[str, dict[str, Any]] = {}
-        semantic_receipts: dict[str, dict[str, Any]] = {}
-        stage_results: dict[str, StructuredStageResult] = {}
-        provider_stage_names = {
-            "terra_analysis": f"{candidate.subject}_analysis",
-            "luna_analysis": f"{candidate.subject}_luna_analysis",
-            "terra_final": f"{candidate.subject}_critical_review",
-        }
-        role_names = {
-            "terra_analysis": "terra_analysis",
-            "luna_analysis": "luna_analysis",
-            "terra_final": "terra_critical_review",
-        }
-
-        def execute_stage(
-            stage: str, model: str, stage_input: Mapping[str, Any]
-        ) -> Mapping[str, Any]:
-            canonical_prior_reports = {
-                str(row["stage"]): copy.deepcopy(dict(row["report"]))
-                for row in stage_input.get("prior_reports", [])
-                if isinstance(row, Mapping)
-                and isinstance(row.get("stage"), str)
-                and isinstance(row.get("report"), Mapping)
-            }
-            prompt = self._analysis_package_prompt(
-                candidate=candidate,
-                stage=stage,
-                stage_input=stage_input,
-                prior_reports=canonical_prior_reports,
-                processing_context=processing_context,
-            )
-            result = self._execute_prompt(
-                prompt=prompt,
-                output_schema=schema_path,
-                image_paths=(),
-                stage_name=provider_stage_names[stage],
-                max_prompt_bytes=int(profile["max_prompt_bytes"]),
-                max_output_bytes=int(profile["max_output_bytes"]),
-                allowed_evidence_refs=(),
-                bind_evidence_schema=False,
-                timeout_seconds=None,
-                subject=candidate.subject,
-                processing_context=processing_context,
-                model_role=role_names[stage],
-                enforce_output_schema=False,
-            )
-            prompt_version = f"analysis-package-{stage}-v1"
-            receipt = self._stage_receipt(
-                result,
-                prompt_version=prompt_version,
-                prompt_sha256=sha256_text(prompt),
-                schema_sha256=str(result.schema_sha256),
-                result_sha256=analysis_sha256_value(result.payload),
-                processing_context=processing_context,
-                requested_model=model,
-                requested_reasoning_effort="max",
-                normalization_warnings=result.normalization_warnings,
-            )
-            receipt["provider_output_mode"] = "tolerant_json_object"
-            prior_reports[stage] = copy.deepcopy(result.payload)
-            semantic_receipts[stage] = copy.deepcopy(receipt)
-            stage_results[stage] = result
-            return {
-                "report": copy.deepcopy(result.payload),
-                "runtime": {
-                    "requested_model": model,
-                    "requested_reasoning_effort": "max",
-                    "runtime_model": result.runtime_model,
-                    "runtime_reasoning_effort": (
-                        result.runtime_reasoning_effort
-                    ),
-                    "runtime_metadata_provenance": (
-                        result.runtime_metadata_provenance
-                    ),
-                    "duration_ms": result.duration_ms,
-                },
-                "receipt": receipt,
-            }
-
-        package = AnalysisPackageDriver(
-            AnalysisPackageStore(self.runtime_root), execute_stage
-        ).run(capture)
-        final_result = stage_results["terra_final"]
-        return ModelResult(
-            analysis=package,
-            duration_ms=sum(row.duration_ms for row in stage_results.values()),
-            runtime_model=final_result.runtime_model,
-            runtime_reasoning_effort=final_result.runtime_reasoning_effort,
-            runtime_metadata_provenance=(
-                final_result.runtime_metadata_provenance
-            ),
-            pipeline_status="analysis_package_ready",
-            draft_analysis=prior_reports["terra_analysis"],
-            critical_review=prior_reports["terra_final"],
-            stage_receipts=semantic_receipts,
-            semantic_stage_count=3,
-            provider_request_count=sum(
-                row.provider_request_count for row in stage_results.values()
-            ),
-            mcp_tool_call_count=sum(
-                row.mcp_tool_call_count for row in stage_results.values()
             ),
         )
 
@@ -27967,6 +28336,10 @@ class Worker:
         model_config["fixture_execution"] = copy.deepcopy(
             dict(config.get("fixture_execution") or {})
         )
+        if config.get("execution_mode") == "hosted_synthetic":
+            model_config["hosted_synthetic_trial"] = copy.deepcopy(
+                dict(config.get("hosted_synthetic_trial") or {})
+            )
         model_config["models"] = copy.deepcopy(dict(config.get("models") or {}))
         model_config["analysis_package_v2"] = copy.deepcopy(
             dict(config.get("analysis_package_v2") or {})

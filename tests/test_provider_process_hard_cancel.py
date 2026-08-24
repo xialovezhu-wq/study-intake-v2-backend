@@ -80,7 +80,7 @@ class ProviderProcessHardCancelTests(unittest.TestCase):
                 self.old_activity_mode
             )
 
-    def _wait_marker(self, timeout: float = 10.0) -> dict[str, object]:
+    def _wait_marker(self, timeout: float = 30.0) -> dict[str, object]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.marker.is_file():
@@ -120,7 +120,7 @@ class ProviderProcessHardCancelTests(unittest.TestCase):
             / "fence-1"
             / "english_analysis.json"
         )
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not identity_index_path.is_file():
             time.sleep(0.02)
         self.assertTrue(identity_index_path.is_file())

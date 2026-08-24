@@ -33,11 +33,9 @@ LEGACY_ROLE_SPECS = {
     },
 }
 
-# Phase 3 deliberately gives the two analysis passes and the fresh review
-# separate identities.  The legacy roles above stay valid for old releases and
-# fixture configurations, but none of them may be used as a consumer-stage
-# alias.  In particular, the legacy orchestrator is not an analysis role and
-# the Sol MCP preflight is not a writer role.
+# Multi-Agent V2 gives the two analysis passes and the fresh review separate
+# identities. The legacy roles above remain valid for ordinary configurations,
+# but the legacy orchestrator is not an analysis role.
 CONSUMER_STAGE_ROLE_SPECS = {
     "terra_analysis": {
         "model": "gpt-5.6-terra",
@@ -69,14 +67,6 @@ ALL_ROLE_SPECS = {**LEGACY_ROLE_SPECS, **CONSUMER_STAGE_ROLE_SPECS}
 LEGACY_ROLE_NAMES = frozenset(LEGACY_ROLE_SPECS)
 CONSUMER_STAGE_ROLE_NAMES = frozenset(CONSUMER_STAGE_ROLE_SPECS)
 ACTIVE_ROLE_NAMES = frozenset(ALL_ROLE_SPECS)
-CONSUMER_STAGE_ORDER = (
-    "terra_analysis",
-    "luna_analysis",
-    "terra_critical_review",
-)
-CONSUMER_STAGE_CHAIN_KEYS = frozenset({"enabled", "stages", "formal_write_count"})
-
-
 def _role_specs_for_names(names: set[str]) -> Mapping[str, Mapping[str, Any]]:
     """Return the accepted role layout without weakening legacy configs."""
 
@@ -87,44 +77,6 @@ def _role_specs_for_names(names: set[str]) -> Mapping[str, Mapping[str, Any]]:
     if names == set(ACTIVE_ROLE_NAMES):
         return ALL_ROLE_SPECS
     raise ModelRoleContractError("multi_agent_model_roles_invalid")
-
-
-def validate_consumer_stage_chain(
-    value: Mapping[str, Any], *, available_roles: set[str] | None = None
-) -> dict[str, Any]:
-    """Validate the active, role-bound Phase 3 consumer chain.
-
-    The chain is intentionally kept in configuration rather than folded into
-    the historical model-contract schema.  That lets old releases continue to
-    validate while making the active three-stage binding explicit.
-    """
-
-    if not isinstance(value, Mapping) or set(value) != CONSUMER_STAGE_CHAIN_KEYS:
-        raise ModelRoleContractError("consumer_stage_chain_shape_invalid")
-    if value.get("enabled") is not True or value.get("formal_write_count") != 0:
-        raise ModelRoleContractError("consumer_stage_chain_disabled_or_writable")
-    stages = value.get("stages")
-    if not isinstance(stages, list) or len(stages) != len(CONSUMER_STAGE_ORDER):
-        raise ModelRoleContractError("consumer_stage_chain_stages_invalid")
-    expected_roles = set(CONSUMER_STAGE_ROLE_NAMES)
-    if available_roles is not None and not expected_roles.issubset(available_roles):
-        raise ModelRoleContractError("consumer_stage_chain_role_missing")
-    observed_roles: list[str] = []
-    for expected_stage, raw in zip(CONSUMER_STAGE_ORDER, stages):
-        if not isinstance(raw, Mapping) or set(raw) != {"stage", "role"}:
-            raise ModelRoleContractError("consumer_stage_chain_stage_invalid")
-        if raw.get("stage") != expected_stage or raw.get("role") != expected_stage:
-            raise ModelRoleContractError("consumer_stage_chain_role_binding_invalid")
-        observed_roles.append(str(raw["role"]))
-    if set(observed_roles) != expected_roles or len(set(observed_roles)) != len(observed_roles):
-        raise ModelRoleContractError("consumer_stage_chain_role_binding_invalid")
-    return {
-        "enabled": True,
-        "stages": [
-            {"stage": stage, "role": stage} for stage in CONSUMER_STAGE_ORDER
-        ],
-        "formal_write_count": 0,
-    }
 
 
 class ModelRoleContractError(RuntimeError):
@@ -168,9 +120,6 @@ def model_contract_from_config(config: Mapping[str, Any]) -> dict[str, Any]:
             assets[field] = raw
             assets[field.replace("_path", "_sha256")] = sha256_file(path)
         normalized[role] = {**copy.deepcopy(dict(required)), **assets}
-    chain = config.get("consumer_stage_chain")
-    if chain is not None:
-        validate_consumer_stage_chain(chain, available_roles=set(models))
     core = {
         "schema_version": "study-intake-multi-agent-model-contract-v1",
         "roles": normalized,

@@ -141,6 +141,116 @@ def _mcp_event(*, tool: str, arguments: dict, sequence: int) -> dict:
     }
 
 
+def _mcp_error_event(
+    *, tool: str, arguments: dict, code: str
+) -> dict:
+    session = _session()
+    envelope = {
+        "ok": False,
+        "schema_version": "study-read-mcp.v3",
+        "server_release": session["mcp_server_release"],
+        "request_id": "0123456789abcdef",
+        "tool": tool,
+        "error": {
+            "code": code,
+            "message": "synthetic no match",
+            "retryable": False,
+        },
+        "formal_write_count": 0,
+        "model_call_count": 0,
+        "mcp_tool_call_count": 0,
+    }
+    return {
+        "type": "item.completed",
+        "item": {
+            "type": "mcp_tool_call",
+            "server": "kaoyan_english_read",
+            "tool": tool,
+            "arguments": arguments,
+            "result": {
+                "structured_content": envelope,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            envelope,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    }
+                ],
+            },
+        },
+    }
+
+
+def _search_page_event(
+    *,
+    query: str,
+    page_size: int,
+    cursor: str | None,
+    offset: int,
+    total_count: int,
+    item_sequences: list[int],
+    next_cursor: str | None,
+    sequence: int,
+) -> dict:
+    arguments = {"query": query, "page_size": page_size}
+    if cursor is not None:
+        arguments["cursor"] = cursor
+    event = _mcp_event(
+        tool="search_records",
+        arguments=arguments,
+        sequence=sequence,
+    )
+    envelope = copy.deepcopy(event["item"]["result"]["structured_content"])
+    items = [
+        _mcp_event(
+            tool="search_records",
+            arguments=arguments,
+            sequence=item_sequence,
+        )["item"]["result"]["structured_content"]["items"][0]
+        for item_sequence in item_sequences
+    ]
+    query_arguments = {
+        key: value for key, value in arguments.items() if key != "cursor"
+    }
+    envelope.update(
+        {
+            "items": items,
+            "total_count": total_count,
+            "returned_count": len(items),
+            "offset": offset,
+            "page_size": page_size,
+            "query_sha256": hashlib.sha256(
+                json.dumps(
+                    {
+                        "tool": "search_records",
+                        "arguments": query_arguments,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "next_cursor": next_cursor,
+            "truncated": next_cursor is not None,
+            "complete": next_cursor is None,
+        }
+    )
+    event["item"]["result"]["structured_content"] = copy.deepcopy(
+        envelope
+    )
+    event["item"]["result"]["content"][0]["text"] = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return event
+
+
 def _immutable_fixture() -> tuple[bytes, dict, bytes]:
     events = [
         _mcp_event(tool="get_task_context", arguments={}, sequence=1),
@@ -406,6 +516,382 @@ class EnglishDuplicateReviewBoundaryTests(unittest.TestCase):
                 )
         self.assertEqual(raised.exception.code, "english_analysis_mcp_duplicate_read")
         self.assertNotIsInstance(raised.exception, core._McpReviewPolicyViolation)
+
+    def test_luna_redundant_completed_library_read_is_normalized(self) -> None:
+        events = [
+            _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+            _mcp_event(
+                tool="read_task_artifact",
+                arguments={
+                    "artifact_id": "capture-facts",
+                    "cursor": None,
+                    "max_bytes": 16384,
+                },
+                sequence=2,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=8,
+                cursor=None,
+                offset=0,
+                total_count=6,
+                item_sequences=list(range(101, 107)),
+                next_cursor=None,
+                sequence=3,
+            ),
+        ]
+        for index in range(6):
+            events.append(
+                _search_page_event(
+                    query="bounded",
+                    page_size=1,
+                    cursor=(None if index == 0 else f"cursor-{index}"),
+                    offset=index,
+                    total_count=6,
+                    item_sequences=[101 + index],
+                    next_cursor=(
+                        None if index == 5 else f"cursor-{index + 1}"
+                    ),
+                    sequence=4 + index,
+                )
+            )
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            runner = core.CodexRunner({}, runtime)
+            calls, transcript_sha256, _transcript_ref = (
+                runner._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
+            )
+            transcript = json.loads(
+                (
+                    runtime
+                    / "private/reports/mcp-stage-transcripts/sha256"
+                    / transcript_sha256[:2]
+                    / f"{transcript_sha256}.json"
+                ).read_text(encoding="utf-8")
+            )
+            warnings = runner._mcp_stage_normalization_warnings[
+                "english_luna_analysis"
+            ]
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            transcript["coverage"]["duplicate_argument_count"], 6
+        )
+        self.assertEqual(
+            warnings[0]["code"],
+            "english_luna_analysis_mcp_redundant_read_ignored",
+        )
+        self.assertEqual(warnings[0]["duplicate_argument_count"], 6)
+
+    def test_luna_exact_library_duplicate_remains_failure(self) -> None:
+        library = _search_page_event(
+            query="bounded",
+            page_size=8,
+            cursor=None,
+            offset=0,
+            total_count=1,
+            item_sequences=[101],
+            next_cursor=None,
+            sequence=3,
+        )
+        events = [
+            _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+            _mcp_event(
+                tool="read_task_artifact",
+                arguments={
+                    "artifact_id": "capture-facts",
+                    "cursor": None,
+                    "max_bytes": 16384,
+                },
+                sequence=2,
+            ),
+            library,
+            copy.deepcopy(library),
+        ]
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                core.PreprocessorError,
+                "english_luna_analysis_mcp_duplicate_read",
+            ):
+                core.CodexRunner({}, Path(temporary))._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
+
+    def test_luna_redundant_chain_result_drift_remains_failure(self) -> None:
+        events = [
+            _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+            _mcp_event(
+                tool="read_task_artifact",
+                arguments={
+                    "artifact_id": "capture-facts",
+                    "cursor": None,
+                    "max_bytes": 16384,
+                },
+                sequence=2,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=8,
+                cursor=None,
+                offset=0,
+                total_count=2,
+                item_sequences=[101, 102],
+                next_cursor=None,
+                sequence=3,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=1,
+                cursor=None,
+                offset=0,
+                total_count=2,
+                item_sequences=[101],
+                next_cursor="cursor-1",
+                sequence=4,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=1,
+                cursor="cursor-1",
+                offset=1,
+                total_count=2,
+                item_sequences=[999],
+                next_cursor=None,
+                sequence=5,
+            ),
+        ]
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                core.PreprocessorError,
+                "english_luna_analysis_mcp_duplicate_read",
+            ):
+                core.CodexRunner({}, Path(temporary))._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
+
+    def test_luna_redundant_chain_must_close(self) -> None:
+        events = [
+            _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+            _mcp_event(
+                tool="read_task_artifact",
+                arguments={
+                    "artifact_id": "capture-facts",
+                    "cursor": None,
+                    "max_bytes": 16384,
+                },
+                sequence=2,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=8,
+                cursor=None,
+                offset=0,
+                total_count=2,
+                item_sequences=[101, 102],
+                next_cursor=None,
+                sequence=3,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=1,
+                cursor=None,
+                offset=0,
+                total_count=2,
+                item_sequences=[101],
+                next_cursor="cursor-1",
+                sequence=4,
+            ),
+        ]
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                core.PreprocessorError,
+                "english_luna_analysis_mcp_cursor_incomplete",
+            ):
+                core.CodexRunner({}, Path(temporary))._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
+
+    def test_luna_duplicate_task_context_remains_failure(self) -> None:
+        context = _mcp_event(
+            tool="get_task_context", arguments={}, sequence=1
+        )
+        events = [context, copy.deepcopy(context)]
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                core.PreprocessorError,
+                "english_luna_analysis_mcp_duplicate_read",
+            ):
+                core.CodexRunner({}, Path(temporary))._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
+
+    def test_luna_library_not_found_is_safe_no_match(self) -> None:
+        cases = {
+            "list_records": {
+                "collection": "sentences",
+                "article_id": "ABSENT",
+                "page_size": 48,
+            },
+            "get_records": {
+                "collection": "sentences",
+                "ids": ["ABSENT"],
+                "page_size": 48,
+            },
+            "search_records": {"query": "absent", "page_size": 48},
+            "query_relations": {"ids": ["ABSENT"], "page_size": 48},
+        }
+        for tool, arguments in cases.items():
+            with self.subTest(tool=tool):
+                events = [
+                    _mcp_event(
+                        tool="get_task_context", arguments={}, sequence=1
+                    ),
+                    _mcp_event(
+                        tool="read_task_artifact",
+                        arguments={
+                            "artifact_id": "capture-facts",
+                            "cursor": None,
+                            "max_bytes": 16384,
+                        },
+                        sequence=2,
+                    ),
+                    _mcp_error_event(
+                        tool=tool,
+                        arguments=arguments,
+                        code="NOT_FOUND",
+                    ),
+                ]
+                stdout = (
+                    "\n".join(json.dumps(row) for row in events) + "\n"
+                ).encode("utf-8")
+                with tempfile.TemporaryDirectory() as temporary:
+                    calls, _sha256, _ref = core.CodexRunner(
+                        {}, Path(temporary)
+                    )._mcp_stage_calls(
+                        stdout=stdout,
+                        stage_name="english_luna_analysis",
+                        subject="english",
+                        processing_context={
+                            "mcp_read_session": _session()
+                        },
+                    )
+                self.assertEqual(
+                    [row["tool"] for row in calls],
+                    ["get_task_context", "read_task_artifact"],
+                )
+
+    def test_luna_task_artifact_not_found_remains_failure(self) -> None:
+        events = [
+            _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+            _mcp_error_event(
+                tool="read_task_artifact",
+                arguments={
+                    "artifact_id": "capture-facts",
+                    "max_bytes": 16384,
+                },
+                code="NOT_FOUND",
+            ),
+        ]
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                core.PreprocessorError,
+                "english_luna_analysis_mcp_server_not_found",
+            ):
+                core.CodexRunner({}, Path(temporary))._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
+
+    def test_more_than_eight_luna_redundant_reads_remains_failure(
+        self,
+    ) -> None:
+        events = [
+            _mcp_event(tool="get_task_context", arguments={}, sequence=1),
+            _mcp_event(
+                tool="read_task_artifact",
+                arguments={
+                    "artifact_id": "capture-facts",
+                    "cursor": None,
+                    "max_bytes": 16384,
+                },
+                sequence=2,
+            ),
+            _search_page_event(
+                query="bounded",
+                page_size=16,
+                cursor=None,
+                offset=0,
+                total_count=9,
+                item_sequences=list(range(201, 210)),
+                next_cursor=None,
+                sequence=3,
+            ),
+        ]
+        for index in range(9):
+            events.append(
+                _search_page_event(
+                    query="bounded",
+                    page_size=1,
+                    cursor=(None if index == 0 else f"cursor-{index}"),
+                    offset=index,
+                    total_count=9,
+                    item_sequences=[201 + index],
+                    next_cursor=(
+                        None if index == 8 else f"cursor-{index + 1}"
+                    ),
+                    sequence=4 + index,
+                )
+            )
+        stdout = (
+            "\n".join(json.dumps(row) for row in events) + "\n"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                core.PreprocessorError,
+                "english_luna_analysis_mcp_duplicate_read",
+            ):
+                core.CodexRunner({}, Path(temporary))._mcp_stage_calls(
+                    stdout=stdout,
+                    stage_name="english_luna_analysis",
+                    subject="english",
+                    processing_context={"mcp_read_session": _session()},
+                )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from analysis_package_v1 import AnalysisPackageError, AnalysisPackageStore, build_durable_capture  # noqa: E402
+from analysis_package_store import (  # noqa: E402
+    AnalysisPackageError,
+    AnalysisPackageStore,
+    build_durable_capture,
+    canonical_bytes,
+)
+from analysis_package_v1 import reopen_analysis_package_v1  # noqa: E402
 from analysis_package_v2 import (  # noqa: E402
     build_terra_initial_analysis,
     publish_analysis_package_v2,
@@ -270,21 +276,154 @@ class AnalysisPackageV2Tests(unittest.TestCase):
             )
 
     def test_v1_pointer_reopens_and_v2_cannot_clobber_it(self) -> None:
-        from analysis_package_v1 import AnalysisPackageDriver
-        from tests.test_analysis_package_v1 import executor
-
         with tempfile.TemporaryDirectory() as folder:
             store = AnalysisPackageStore(Path(folder))
             values = self._inputs(3)
-            v1 = AnalysisPackageDriver(store, executor).run(values["capture"])
+            capture_sha, capture_ref = store.publish_capture(values["capture"])
+            stages = []
+            for stage in ("terra_analysis", "luna_analysis", "terra_final"):
+                raw_sha = hashlib.sha256((stage + ":raw").encode()).hexdigest()
+                raw_ref = (
+                    "study-intake-direct-model-stage-raw://sha256/" + raw_sha
+                )
+                report = {
+                    "schema_version": "study-intake-analysis-stage-report-v2",
+                    "stage": stage,
+                    "subject": values["capture"]["subject"],
+                    "capture_id": values["capture"]["capture_id"],
+                    "summary": "historical read-only fixture",
+                    "proposals": [],
+                    "duplicate_candidates": [],
+                    "warnings": [],
+                    "evidence_refs": [capture_ref],
+                    "normalization_status": "complete",
+                    "formal_write_count": 0,
+                }
+                report_sha, report_ref = store._publish(
+                    store.report_root,
+                    report,
+                    "study-intake-analysis-stage-report",
+                )
+                executor_receipt = {
+                    "stage": stage,
+                    "raw_output_object_sha256": raw_sha,
+                    "raw_output_object_ref": raw_ref,
+                    "formal_write_count": 0,
+                }
+                execution = {
+                    "schema_version": (
+                        "study-intake-analysis-stage-execution-receipt-v1"
+                    ),
+                    "stage": stage,
+                    "subject": values["capture"]["subject"],
+                    "capture_id": values["capture"]["capture_id"],
+                    "raw_output_sha256": raw_sha,
+                    "raw_output_ref": raw_ref,
+                    "executor_receipt": executor_receipt,
+                    "executor_receipt_sha256": hashlib.sha256(
+                        canonical_bytes(executor_receipt)
+                    ).hexdigest(),
+                    "formal_write_count": 0,
+                }
+                execution_sha, execution_ref = store._publish(
+                    store.execution_receipt_root,
+                    execution,
+                    "study-intake-analysis-stage-execution-receipt",
+                )
+                normalization = {
+                    "schema_version": (
+                        "study-intake-analysis-stage-normalization-receipt-v1"
+                    ),
+                    "stage": stage,
+                    "subject": values["capture"]["subject"],
+                    "capture_id": values["capture"]["capture_id"],
+                    "execution_receipt_sha256": execution_sha,
+                    "execution_receipt_ref": execution_ref,
+                    "raw_output_sha256": raw_sha,
+                    "raw_output_ref": raw_ref,
+                    "report_sha256": report_sha,
+                    "report_ref": report_ref,
+                    "normalization_status": "complete",
+                    "warning_codes": [],
+                    "formal_write_count": 0,
+                }
+                normalization_sha, normalization_ref = store._publish(
+                    store.normalization_receipt_root,
+                    normalization,
+                    "study-intake-analysis-stage-normalization-receipt",
+                )
+                stages.append({
+                    "stage": stage,
+                    "report_sha256": report_sha,
+                    "report_ref": report_ref,
+                    "raw_output_sha256": raw_sha,
+                    "raw_output_ref": raw_ref,
+                    "execution_receipt_sha256": execution_sha,
+                    "execution_receipt_ref": execution_ref,
+                    "normalization_receipt_sha256": normalization_sha,
+                    "normalization_receipt_ref": normalization_ref,
+                    "normalization_status": "complete",
+                    "formal_write_count": 0,
+                })
+            v1 = {
+                "schema_version": "study-intake-analysis-package-v1",
+                "package_id": "ANPKG-HISTORICAL-READONLY",
+                "capture_id": values["capture"]["capture_id"],
+                "subject": values["capture"]["subject"],
+                "study_date": values["capture"]["study_date"],
+                "captured_at": values["capture"]["captured_at"],
+                "capture_intake_date": values["capture"]["capture_intake_date"],
+                "capture_sha256": capture_sha,
+                "capture_ref": capture_ref,
+                "stage_order": [row["stage"] for row in stages],
+                "stages": stages,
+                "warnings": [],
+                "status": "ready_for_nightly",
+                "formal_write_count": 0,
+            }
+            payload = canonical_bytes(v1)
+            package_sha = hashlib.sha256(payload).hexdigest()
+            package_path = (
+                store.package_root / package_sha[:2] / f"{package_sha}.json"
+            )
+            store._write_no_clobber(package_path, payload)
+            pointer = {
+                "schema_version": "study-intake-analysis-package-pointer-v1",
+                "subject": v1["subject"],
+                "capture_intake_date": v1["capture_intake_date"],
+                "capture_id": v1["capture_id"],
+                "package_sha256": package_sha,
+                "package_ref": (
+                    "study-intake-analysis-package://sha256/" + package_sha
+                ),
+                "formal_write_count": 0,
+            }
+            store._write_no_clobber(
+                store.index_root / "math" / "2026-08-24"
+                / "CAP-DUAL-1.json",
+                canonical_bytes(pointer),
+            )
             self.assertEqual(
-                store.reopen_package(v1["package_sha256"])["schema_version"],
+                reopen_analysis_package_v1(store, package_sha)["schema_version"],
                 "study-intake-analysis-package-v1",
             )
+            with self.assertRaisesRegex(
+                AnalysisPackageError, "analysis_package_publish_schema_retired"
+            ):
+                store.publish_package(v1)
             with self.assertRaisesRegex(
                 AnalysisPackageError, "analysis_object_no_clobber_conflict"
             ):
                 publish_analysis_package_v2(store, **values)
+            first_report_sha = stages[0]["report_sha256"]
+            (
+                store.report_root / first_report_sha[:2]
+                / f"{first_report_sha}.json"
+            ).write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                AnalysisPackageError, "analysis_object_reopen_invalid"
+            ):
+                reopen_analysis_package_v1(store, package_sha)
 
     def test_v2_pointer_is_idempotent_but_changed_package_cannot_clobber(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

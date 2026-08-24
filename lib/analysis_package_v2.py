@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Mapping, Sequence
 
-from analysis_package_v1 import (
+from analysis_package_store import (
     AnalysisPackageError,
     AnalysisPackageStore,
     sha256_value,
@@ -383,7 +383,7 @@ def publish_analysis_package_v2(
         "sol_handoff": _binding(kind="sol_handoff", schema=str(handoff["schema_version"]), digest=handoff_sha, ref=handoff_ref),
         "status": "ready_for_nightly", "formal_write_count": 0,
     }
-    package_sha, package_ref = store.publish_package_v2(core)
+    package_sha, package_ref = store.publish_package(core)
     return {**core, "package_sha256": package_sha, "package_ref": package_ref}
 
 

@@ -14,13 +14,16 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from analysis_package_v1 import (
+from analysis_package_store import (
     AnalysisPackageError,
     AnalysisPackageStore,
-    PACKAGE_SCHEMA,
     canonical_bytes,
     sha256_value,
     validate_durable_capture,
+)
+from analysis_package_v1 import (
+    PACKAGE_SCHEMA,
+    reopen_analysis_package_v1,
 )
 from analysis_package_v2 import (
     PACKAGE_SCHEMA as PACKAGE_V2_SCHEMA,
@@ -1410,7 +1413,17 @@ def _subject_tasks(
     for binding in batch["analysis_packages"]:
         capture_id = str(binding["capture_id"])
         package = by_capture.get(capture_id)
-        if package is None or _package_binding(package) != dict(binding):
+        try:
+            reopened = reopen_analysis_package_v1(
+                package_store, str(binding["package_sha256"])
+            )
+        except AnalysisPackageError as exc:
+            raise NightlySolError("analysis_package_reopen_mismatch") from exc
+        if (
+            package is None
+            or reopened != package
+            or _package_binding(package) != dict(binding)
+        ):
             raise NightlySolError("analysis_package_reopen_mismatch")
         stages = {
             str(row.get("stage")): row

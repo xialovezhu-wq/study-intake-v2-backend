@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from preprocessor_core import (  # noqa: E402
     PreprocessorError,
+    _first_turn_handoff_trace_sha256,
+    _validate_background_handoff_resolution_receipt,
     canonical_bytes,
     current_question_bundle_evidence_status,
     validate_current_question_bundle,
@@ -261,6 +263,128 @@ class CurrentQuestionEvidenceV3Tests(unittest.TestCase):
         oversized["interaction_trace"] = _trace(events)
         with self.assertRaises(PreprocessorError):
             self.validate(oversized)
+
+    def test_first_turn_handoff_hashes_only_the_disclosed_event_projection(self) -> None:
+        trace = _bundle()["interaction_trace"]
+        projected = [
+            {
+                "role": row["role"],
+                "kind": row["kind"],
+                "text": row["text"],
+                "observed_at": None,
+            }
+            for row in trace["events"]
+        ]
+        expected = hashlib.sha256(canonical_bytes(projected) + b"\n").hexdigest()
+        self.assertEqual(_first_turn_handoff_trace_sha256(trace), expected)
+        self.assertNotEqual(expected, trace["full_trace_sha256"])
+
+        changed = copy.deepcopy(trace)
+        changed["events"][0]["text"] = "改动后的披露事件。"
+        changed["full_trace_sha256"] = hashlib.sha256(
+            canonical_bytes(changed["events"])
+        ).hexdigest()
+        self.assertNotEqual(
+            _first_turn_handoff_trace_sha256(changed),
+            expected,
+        )
+
+    def test_first_turn_handoff_hashes_truncated_v2_disclosed_events(self) -> None:
+        full_events = [
+            {
+                "ordinal": ordinal,
+                "role": "learner" if ordinal % 2 else "assistant",
+                "kind": "reasoning" if ordinal % 2 else "hint",
+                "text": f"事件 {ordinal}",
+            }
+            for ordinal in range(1, 27)
+        ]
+        disclosed = [full_events[0], full_events[-1]]
+        trace = {
+            "schema": "current-question-interaction-trace-v2",
+            "events": disclosed,
+            "original_event_count": len(full_events),
+            "included_event_count": len(disclosed),
+            "omitted_event_count": 24,
+            "omitted_ranges": [{"start_ordinal": 2, "end_ordinal": 25}],
+            "truncation_reason": "size_limit",
+            "full_trace_sha256": hashlib.sha256(
+                canonical_bytes(full_events)
+            ).hexdigest(),
+        }
+        projected = [
+            {
+                "role": row["role"],
+                "kind": row["kind"],
+                "text": row["text"],
+                "observed_at": None,
+            }
+            for row in disclosed
+        ]
+        expected = hashlib.sha256(canonical_bytes(projected) + b"\n").hexdigest()
+        self.assertEqual(_first_turn_handoff_trace_sha256(trace), expected)
+        self.assertNotEqual(expected, trace["full_trace_sha256"])
+
+    def test_first_turn_handoff_empty_trace_has_no_hash(self) -> None:
+        trace = _trace([])
+        self.assertIsNone(_first_turn_handoff_trace_sha256(trace))
+
+    def test_morning_freeze_receipt_is_a_strict_first_turn_attestation(self) -> None:
+        handoff = {
+            "completion_kind": "first_turn_complete",
+            "context_id": "CTX-1",
+            "item_id": "ITEM-1",
+            "capture_id": "CAP-1",
+            "capture_receipt_sha256": "a" * 64,
+            "evidence_manifest_sha256": "b" * 64,
+            "interaction_trace_sha256": "c" * 64,
+        }
+        bundle = {"session_id": "SESSION-1"}
+        receipt = {
+            "schema": "current-question-turn-receipt-v1",
+            "status": "morning_capture_frozen",
+            "attestation_schema": "morning-capture-freeze-attestation-v1",
+            "context_id": "CTX-1",
+            "session_id": "SESSION-1",
+            "item_id": "ITEM-1",
+            "capture_id": "CAP-1",
+            "capture_receipt_sha256": "a" * 64,
+            "evidence_manifest_sha256": "b" * 64,
+            "buffer_freeze_receipt_sha256": "d" * 64,
+            "interaction_trace_sha256": "c" * 64,
+            "event_time": "2026-08-24T08:00:00+08:00",
+            "advance_allowed": False,
+            "formal_write_count": 0,
+        }
+        self.assertEqual(
+            _validate_background_handoff_resolution_receipt(
+                receipt,
+                handoff=handoff,
+                bundle=bundle,
+                trace_binding={},
+            ),
+            receipt,
+        )
+
+        for field, bad_value in (
+            ("attestation_schema", "unknown-freeze-v1"),
+            ("buffer_freeze_receipt_sha256", "not-a-hash"),
+            ("interaction_trace_sha256", "e" * 64),
+            ("advance_allowed", True),
+        ):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(receipt)
+                invalid[field] = bad_value
+                with self.assertRaisesRegex(
+                    PreprocessorError,
+                    "background_handoff_resolution_receipt_invalid",
+                ):
+                    _validate_background_handoff_resolution_receipt(
+                        invalid,
+                        handoff=handoff,
+                        bundle=bundle,
+                        trace_binding={},
+                    )
 
 
 if __name__ == "__main__":

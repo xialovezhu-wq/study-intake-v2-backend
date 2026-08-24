@@ -18,10 +18,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from analysis_package_v1 import (  # noqa: E402
-    AnalysisPackageDriver,
+from analysis_package_store import (  # noqa: E402
     AnalysisPackageStore,
-    REPORT_SCHEMA,
     build_durable_capture,
     canonical_bytes,
     sha256_value,
@@ -60,43 +58,6 @@ SKILLS = {
     "cs408": "kaoyan-408-daily-intake-curation",
     "english": "kaoyan-english-daily-intake-curation",
 }
-
-
-def executor(stage: str, model: str, stage_input: dict[str, Any]) -> dict[str, Any]:
-    subject = stage_input["subject"]
-    raw_sha = sha256_value(
-        {"stage": stage, "stage_input": stage_input, "raw": "synthetic"}
-    )
-    return {
-        "report": {
-            "schema_version": REPORT_SCHEMA,
-            "stage": stage,
-            "subject": subject,
-            "capture_id": stage_input["capture_id"],
-            "summary": "synthetic report",
-            "proposals": [],
-            "duplicate_candidates": [],
-            "warnings": [],
-            "evidence_refs": [f"mcp-item:{subject}:synthetic:{stage}"],
-            "formal_write_count": 0,
-        },
-        "runtime": {
-            "requested_model": model,
-            "requested_reasoning_effort": "max",
-            "runtime_model": model,
-            "runtime_reasoning_effort": "max",
-            "runtime_metadata_provenance": "synthetic_attestation",
-            "duration_ms": 1,
-        },
-        "receipt": {
-            "stage": stage,
-            "raw_output_object_sha256": raw_sha,
-            "raw_output_object_ref": (
-                "study-intake-direct-model-stage-raw://sha256/" + raw_sha
-            ),
-            "formal_write_count": 0,
-        },
-    }
 
 
 def state_sha(root: Path) -> str:
@@ -233,6 +194,134 @@ def native_executor(
     return execute
 
 
+def publish_historical_package_fixture(
+    store: AnalysisPackageStore, capture: Mapping[str, Any]
+) -> str:
+    """Materialize immutable V1 history without invoking a retired driver."""
+
+    capture_sha, capture_ref = store.publish_capture(capture)
+    stages: list[dict[str, Any]] = []
+    for stage in ("terra_analysis", "luna_analysis", "terra_final"):
+        raw_sha = sha256_value({
+            "capture_id": capture["capture_id"], "stage": stage, "kind": "raw"
+        })
+        raw_ref = "study-intake-direct-model-stage-raw://sha256/" + raw_sha
+        report = {
+            "schema_version": "study-intake-analysis-stage-report-v2",
+            "stage": stage,
+            "subject": capture["subject"],
+            "capture_id": capture["capture_id"],
+            "summary": "historical fixture",
+            "proposals": [],
+            "duplicate_candidates": [],
+            "warnings": [],
+            "evidence_refs": [capture_ref],
+            "normalization_status": "complete",
+            "formal_write_count": 0,
+        }
+        report_sha, report_ref = store._publish(
+            store.report_root, report, "study-intake-analysis-stage-report"
+        )
+        executor_receipt = {
+            "schema_version": "historical-fixture-executor-receipt-v1",
+            "stage": stage,
+            "raw_output_object_sha256": raw_sha,
+            "raw_output_object_ref": raw_ref,
+            "formal_write_count": 0,
+        }
+        execution = {
+            "schema_version": "study-intake-analysis-stage-execution-receipt-v1",
+            "stage": stage,
+            "subject": capture["subject"],
+            "capture_id": capture["capture_id"],
+            "raw_output_sha256": raw_sha,
+            "raw_output_ref": raw_ref,
+            "executor_receipt": executor_receipt,
+            "executor_receipt_sha256": sha256_value(executor_receipt),
+            "formal_write_count": 0,
+        }
+        execution_sha, execution_ref = store._publish(
+            store.execution_receipt_root,
+            execution,
+            "study-intake-analysis-stage-execution-receipt",
+        )
+        normalization = {
+            "schema_version": (
+                "study-intake-analysis-stage-normalization-receipt-v1"
+            ),
+            "stage": stage,
+            "subject": capture["subject"],
+            "capture_id": capture["capture_id"],
+            "execution_receipt_sha256": execution_sha,
+            "execution_receipt_ref": execution_ref,
+            "raw_output_sha256": raw_sha,
+            "raw_output_ref": raw_ref,
+            "report_sha256": report_sha,
+            "report_ref": report_ref,
+            "normalization_status": "complete",
+            "warning_codes": [],
+            "formal_write_count": 0,
+        }
+        normalization_sha, normalization_ref = store._publish(
+            store.normalization_receipt_root,
+            normalization,
+            "study-intake-analysis-stage-normalization-receipt",
+        )
+        stages.append({
+            "stage": stage,
+            "report_sha256": report_sha,
+            "report_ref": report_ref,
+            "raw_output_sha256": raw_sha,
+            "raw_output_ref": raw_ref,
+            "execution_receipt_sha256": execution_sha,
+            "execution_receipt_ref": execution_ref,
+            "normalization_receipt_sha256": normalization_sha,
+            "normalization_receipt_ref": normalization_ref,
+            "normalization_status": "complete",
+            "formal_write_count": 0,
+        })
+    package = {
+        "schema_version": "study-intake-analysis-package-v1",
+        "package_id": "ANPKG-" + sha256_value({
+            "capture_sha256": capture_sha,
+            "stage_report_sha256s": [row["report_sha256"] for row in stages],
+        })[:24].upper(),
+        "capture_id": capture["capture_id"],
+        "subject": capture["subject"],
+        "study_date": capture["study_date"],
+        "captured_at": capture["captured_at"],
+        "capture_intake_date": capture["capture_intake_date"],
+        "capture_sha256": capture_sha,
+        "capture_ref": capture_ref,
+        "stage_order": [row["stage"] for row in stages],
+        "stages": stages,
+        "warnings": [],
+        "status": "ready_for_nightly",
+        "formal_write_count": 0,
+    }
+    payload = canonical_bytes(package)
+    package_sha = hashlib.sha256(payload).hexdigest()
+    store._write_no_clobber(
+        store.package_root / package_sha[:2] / f"{package_sha}.json", payload
+    )
+    pointer = {
+        "schema_version": "study-intake-analysis-package-pointer-v1",
+        "subject": capture["subject"],
+        "capture_intake_date": capture["capture_intake_date"],
+        "capture_id": capture["capture_id"],
+        "package_sha256": package_sha,
+        "package_ref": "study-intake-analysis-package://sha256/" + package_sha,
+        "formal_write_count": 0,
+    }
+    store._write_no_clobber(
+        store.index_root / str(capture["subject"])
+        / str(capture["capture_intake_date"])
+        / f"{capture['capture_id']}.json",
+        canonical_bytes(pointer),
+    )
+    return package_sha
+
+
 def prepare_batch(
     root: Path,
     *,
@@ -242,9 +331,9 @@ def prepare_batch(
     skill_path: Path | None = None,
 ) -> tuple[AnalysisPackageStore, dict[str, Any], Path]:
     package_store = AnalysisPackageStore(root)
-    driver = AnalysisPackageDriver(package_store, executor)
     for index, capture_id in enumerate(capture_ids, start=1):
-        driver.run(
+        publish_historical_package_fixture(
+            package_store,
             build_durable_capture(
                 capture_id=capture_id,
                 subject=subject,
@@ -254,7 +343,7 @@ def prepare_batch(
                 captured_at=f"2026-08-21T0{index}:00:00+08:00",
                 payload={"synthetic": index},
                 source_kind="synthetic",
-            )
+            ),
         )
     skill = skill_path or (root / f"{subject}-SKILL.md")
     if skill_path is None:

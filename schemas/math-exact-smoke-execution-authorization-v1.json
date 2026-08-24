@@ -25,7 +25,7 @@
     "gates_sha256": {"const": "d794d0b2f301535a647e0ef96a389cde494ed16aa4a76abd66ff9e36fcbefb50"},
     "readme_sha256": {"const": "7ecbbd64c9475f76bea70e613a5c79ea7f3bf63308a5ae4a6380bda53877ce78"},
     "initial_ledger_sha256": {"const": "289168feaec0899976d4f05fb1f1a9f753666f455979f21ecc566f8451c5a7e2"},
-    "review_unit_sha256": {"const": "95c99baf2f0b713fb4a8683534e47cf9b20bad593a292ad92b9d6d639fe4cee7"},
+    "review_unit_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "execution_order": {
       "type": "array", "prefixItems": [
         {"const": "GS-269"}, {"const": "GS-566"}, {"const": "GS-225"},

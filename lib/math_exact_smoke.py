@@ -255,6 +255,7 @@ def build_authorization_descriptor(
     authority_generation: str,
     authority_fingerprint: str,
     producer_authority_fingerprint: str,
+    review_unit_sha256: str = REVIEW_UNIT_SHA256,
 ) -> dict[str, Any]:
     """Build the unsigned exact descriptor in memory; this performs no write."""
 
@@ -264,6 +265,10 @@ def build_authorization_descriptor(
     _require_sha256(
         producer_authority_fingerprint,
         "math_smoke_producer_authority_invalid",
+    )
+    _require_sha256(
+        review_unit_sha256,
+        "math_smoke_review_unit_hash_invalid",
     )
     if not isinstance(authority_generation, str) or not authority_generation:
         raise MathExactSmokeError("math_smoke_generation_invalid")
@@ -293,7 +298,7 @@ def build_authorization_descriptor(
         "gates_sha256": GATES_SHA256,
         "readme_sha256": README_SHA256,
         "initial_ledger_sha256": INITIAL_LEDGER_SHA256,
-        "review_unit_sha256": REVIEW_UNIT_SHA256,
+        "review_unit_sha256": review_unit_sha256,
         "execution_order": list(EXACT_ORDER),
         "samples": samples,
         "execution_authorized_by_user": True,
@@ -324,6 +329,9 @@ def preview_exact_smoke(
         authority_fingerprint=str(descriptor.get("authority_fingerprint") or ""),
         producer_authority_fingerprint=str(
             descriptor.get("producer_authority_fingerprint") or ""
+        ),
+        review_unit_sha256=str(
+            descriptor.get("review_unit_sha256") or ""
         ),
     )
     if canonical_bytes(dict(descriptor)) != canonical_bytes(expected):
@@ -375,7 +383,7 @@ def preview_exact_smoke(
     _require_sha256(expected_ledger_sha256, "math_smoke_ledger_hash_invalid")
     if file_sha256(ledger_path) != expected_ledger_sha256:
         raise MathExactSmokeError("math_smoke_ledger_hash_drift")
-    if file_sha256(unit_path) != REVIEW_UNIT_SHA256:
+    if file_sha256(unit_path) != descriptor.get("review_unit_sha256"):
         raise MathExactSmokeError("math_smoke_review_unit_drift")
     counts = _ledger_capture_counts(ledger_path)
     expected_counts = (
@@ -750,6 +758,9 @@ def reopen_execution_authorization(
         authority_fingerprint=str(descriptor.get("authority_fingerprint") or ""),
         producer_authority_fingerprint=str(
             descriptor.get("producer_authority_fingerprint") or ""
+        ),
+        review_unit_sha256=str(
+            descriptor.get("review_unit_sha256") or ""
         ),
     )
     if canonical_bytes(descriptor) != canonical_bytes(expected):
