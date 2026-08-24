@@ -30,6 +30,7 @@ from concurrent_dispatch import (  # noqa: E402
 from execution_quality_contract import decide_execution_quality  # noqa: E402
 from core_dispatch_bridge import (  # noqa: E402
     _CapturingRunner,
+    _analysis_package_v2_stage_results,
     _stage_result_from_model,
     content_processing_identity,
     validate_concurrent_cs408_candidate,
@@ -701,6 +702,54 @@ def run_request(
                 store=lease_store,
             )
         )
+    analysis_package_profile = config.get("analysis_package_v2")
+    analysis_package_live_mode = bool(
+        config.get("execution_mode") == "live_authorized"
+        and isinstance(analysis_package_profile, Mapping)
+        and analysis_package_profile.get("enabled") is True
+    )
+    if analysis_package_live_mode:
+        if execution_mode != "full_two_pass":
+            raise DispatchError("analysis_package_v2_resume_forbidden")
+        for group_field in ("content_group_members", "math_group_members"):
+            group_members = task.frozen_payload.get(group_field)
+            if isinstance(group_members, list) and len(group_members) > 1:
+                raise DispatchError(
+                    "analysis_package_v2_multiple_publications_invalid"
+                )
+        result = worker.runner.run(candidate)
+        if not isinstance(result, ModelResult):
+            raise DispatchError("analysis_package_v2_result_invalid")
+        if not lease_store.is_current(lease):
+            raise DispatchError("stale_lease_fence")
+        analysis_stage, critical_stage = _analysis_package_v2_stage_results(
+            result,
+            task=task,
+            candidate=candidate,
+            runtime_root=runtime_root,
+            lease_fence=fence,
+            lease_owner_id=owner_id,
+            expected_release_id=str(contract["release_id"]),
+            lease_store=lease_store,
+        )
+        publication = copy.deepcopy(dict(result.analysis))
+        if (
+            publication.get("schema_version")
+            != "study-intake-analysis-package-v2"
+            or publication.get("subject") != candidate.subject
+            or publication.get("capture_id") != candidate.capture_id
+            or publication.get("formal_write_count") != 0
+        ):
+            raise DispatchError("analysis_package_v2_publication_invalid")
+        return {
+            "schema_version": "study-intake-production-task-result-v1",
+            "unit_sha256": task.unit_sha256,
+            "lease_fence": fence,
+            "analysis": dataclasses.asdict(analysis_stage),
+            "critical_review": dataclasses.asdict(critical_stage),
+            "member_publications": [publication],
+            "formal_write_count": 0,
+        }
     capturing = _CapturingRunner(worker.runner)
     reuse_runner = _ContentReuseRunner(capturing)
     worker.runner = reuse_runner

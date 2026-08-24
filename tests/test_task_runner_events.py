@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import os
 import sys
 import tempfile
@@ -17,15 +18,21 @@ from concurrent_dispatch import (  # noqa: E402
     DispatchError,
     FrozenTask,
     LeaseStore,
+    StageResult,
     dispatch_rule_binding,
 )
+from core_dispatch_bridge import _analysis_package_v2_stage_results  # noqa: E402
 from preprocess_task_runner import (  # noqa: E402
     _AnalysisCheckpointEventRecorder,
     _StageEventRecorder,
     run_request,
 )
 from preprocess_dispatcher import _stage_runtime_contract  # noqa: E402
-from preprocessor_core import ModelResult  # noqa: E402
+from preprocessor_core import (  # noqa: E402
+    CodexRunner,
+    ModelResult,
+    StructuredStageResult,
+)
 
 
 class TaskRunnerEventTests(unittest.TestCase):
@@ -169,6 +176,78 @@ class TaskRunnerEventTests(unittest.TestCase):
         self.assertEqual(
             verified["latest_event"]["event"], "critical_completed"
         )
+
+    def test_direct_stage_receipts_use_the_exact_persisted_file_digest(
+        self,
+    ) -> None:
+        runner = CodexRunner(
+            {
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+                "max_images": 8,
+            },
+            self.runtime,
+        )
+        raw = runner._persist_direct_model_stage_raw(
+            stage_name="english_luna_analysis",
+            raw_output=b'{"formal_write_count":0}\n',
+        )
+        execution = runner._publish_model_stage_execution(
+            stage_name="english_luna_analysis",
+            execution_status="completed",
+            raw_refs=raw,
+            transport_sha256="1" * 64,
+            transcript_sha256="2" * 64,
+            authority_snapshot_manifest_sha256="3" * 64,
+            mcp_grounding_manifest_sha256="4" * 64,
+            attempt_counts={
+                "attempted_mcp_tool_call_count": 1,
+                "successful_mcp_tool_call_count": 1,
+                "grounding_mcp_tool_call_count": 1,
+                "failed_mcp_tool_call_count": 0,
+                "last_mcp_error_code": None,
+            },
+            provider_returncode=0,
+            duration_ms=1,
+        )
+        result = StructuredStageResult(
+            payload={"formal_write_count": 0},
+            duration_ms=1,
+            runtime_model="gpt-5.6-luna",
+            runtime_reasoning_effort="max",
+            runtime_metadata_provenance="codex_json_attestation_v1",
+            runtime_identity_status="confirmed",
+            output_sha256="5" * 64,
+            schema_sha256="6" * 64,
+            raw_output_object_sha256=raw["raw_output_object_sha256"],
+            raw_output_object_ref=raw["raw_output_object_ref"],
+            stage_execution_receipt_sha256=execution[
+                "stage_execution_receipt_sha256"
+            ],
+            stage_execution_receipt_ref=execution[
+                "stage_execution_receipt_ref"
+            ],
+            stage_name="english_luna_analysis",
+        )
+        normalization = runner._publish_model_stage_normalization(
+            stage_name="english_luna_analysis",
+            result=result,
+            normalized_payload={"formal_write_count": 0},
+            warnings=(),
+            error_code=None,
+        )
+        for relative, digest in (
+            (
+                "private/reports/direct-model-stage-execution/sha256",
+                execution["stage_execution_receipt_sha256"],
+            ),
+            (
+                "private/reports/direct-model-stage-normalization/sha256",
+                normalization["stage_normalization_receipt_sha256"],
+            ),
+        ):
+            path = self.runtime / relative / digest[:2] / f"{digest}.json"
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
 
     def test_failed_review_has_start_without_false_completion(self) -> None:
         class Runner:
@@ -379,6 +458,166 @@ class TaskRunnerEventTests(unittest.TestCase):
                 "critical_started",
                 "critical_completed",
             ],
+        )
+
+    def test_live_analysis_package_bypasses_worker_publication_once(self) -> None:
+        topology = (
+            {
+                "stage": "terra_initial",
+                "provider_stage_name": "english_analysis",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "formal_write_count": 0,
+            },
+            *(
+                {
+                    "stage": f"luna_investigation_branch-{index}",
+                    "provider_stage_name": "english_luna_analysis",
+                    "requested_model": "gpt-5.6-luna",
+                    "requested_reasoning_effort": "max",
+                    "status": "succeeded",
+                    "formal_write_count": 0,
+                }
+                for index in range(1, 4)
+            ),
+            {
+                "stage": "terra_final",
+                "provider_stage_name": "english_critical_review",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "formal_write_count": 0,
+            },
+        )
+        package = {
+            "schema_version": "study-intake-analysis-package-v2",
+            "package_id": "ANPKG2-TEST",
+            "package_sha256": "9" * 64,
+            "package_ref": (
+                "study-intake-analysis-package://sha256/" + "9" * 64
+            ),
+            "subject": "english",
+            "capture_id": "EN-TEST",
+            "formal_write_count": 0,
+        }
+        model_result = ModelResult(
+            analysis=package,
+            duration_ms=2,
+            runtime_model="gpt-5.6-terra",
+            runtime_reasoning_effort="max",
+            runtime_metadata_provenance="codex_json_attestation_v1",
+            pipeline_status="multi_agent_analysis_package_ready",
+            draft_analysis={"schema_version": "terra_initial_analysis_v1"},
+            critical_review={"schema_version": "terra_final_report_v2"},
+            stage_receipts={},
+        )
+        calls = []
+
+        class Runner:
+            def bind_dispatch_process_lifecycle(inner_self, **_kwargs):
+                calls.append("bind")
+
+            def _execute_prompt(inner_self, **_kwargs):
+                raise AssertionError("route test does not execute a Provider")
+
+            def _write_analysis_checkpoint(inner_self, *_args, **_kwargs):
+                raise AssertionError("analysis package has no outer checkpoint")
+
+            def run(inner_self, _candidate):
+                calls.append("run")
+                return model_result
+
+        class Worker:
+            release_id = self.release_id
+
+            def __init__(inner_self, _config):
+                inner_self.runner = Runner()
+
+            def process_claimed_candidate(inner_self, *_args, **_kwargs):
+                raise AssertionError("Worker._process route must be bypassed")
+
+        def stage(payload: dict) -> StageResult:
+            payload["analysis_package_binding"] = {
+                "schema_version": "study-intake-analysis-package-binding-v1",
+                "id": package["package_id"],
+                "sha256": package["package_sha256"],
+                "ref": package["package_ref"],
+            }
+            return StageResult(
+                payload=payload,
+                runtime_model="gpt-5.6-terra",
+                runtime_reasoning_effort="max",
+                runtime_metadata_provenance="codex_json_attestation_v1",
+                runtime_identity_status="confirmed",
+                provider_request_count=1,
+                requested_model="gpt-5.6-terra",
+                requested_reasoning_effort="max",
+                analysis_package_stages=topology,
+            )
+
+        config = {
+            "runtime_root": str(self.runtime),
+            "execution_mode": "live_authorized",
+            "analysis_package_v2": {"enabled": True},
+            "model": {"model": "gpt-5.6-luna", "reasoning_effort": "max"},
+        }
+        request = {
+            "schema_version": "study-intake-production-task-request-v1",
+            "task": self.task.as_dict(),
+            "reason": "eligible",
+            "unit_sha256": self.task.unit_sha256,
+            "lease_fence": self.lease.fence,
+            "lease_owner_id": self.lease.owner_id,
+        }
+        environment = {
+            "STUDY_PREPROCESS_RUNTIME_ROOT": str(self.runtime.resolve()),
+            "STUDY_PREPROCESS_UNIT_SHA256": self.task.unit_sha256,
+            "STUDY_PREPROCESS_LEASE_FENCE": str(self.lease.fence),
+            "STUDY_PREPROCESS_LEASE_OWNER_ID": self.lease.owner_id,
+            "STUDY_PREPROCESS_CONTEXT_ROOT": str(self.context_root),
+        }
+        with (
+            mock.patch("preprocess_task_runner.load_config", return_value=config),
+            mock.patch("preprocess_task_runner.Worker", Worker),
+            mock.patch(
+                "preprocess_task_runner._analysis_package_v2_stage_results",
+                return_value=(
+                    stage(dict(model_result.draft_analysis or {})),
+                    stage(dict(model_result.critical_review or {})),
+                ),
+            ) as bridge,
+            mock.patch.dict(os.environ, environment, clear=False),
+        ):
+            result = run_request(self.runtime / "config.json", request)
+        self.assertEqual(calls, ["bind", "run"])
+        bridge.assert_called_once()
+        self.assertNotIn("terminal_review_stage_count", result)
+        self.assertEqual(result["formal_write_count"], 0)
+        self.assertEqual(len(result["member_publications"]), 1)
+        self.assertEqual(result["member_publications"][0], package)
+        self.assertEqual(result["analysis"]["requested_model"], "gpt-5.6-terra")
+        self.assertEqual(
+            result["critical_review"]["requested_model"], "gpt-5.6-terra"
+        )
+        self.assertEqual(
+            result["analysis"]["analysis_package_stages"],
+            result["critical_review"]["analysis_package_stages"],
+        )
+        self.assertEqual(
+            result["analysis"]["payload"]["analysis_package_binding"],
+            result["critical_review"]["payload"]["analysis_package_binding"],
+        )
+
+    def test_live_bridge_requires_mcp_free_terra_execution_receipt_v3(
+        self,
+    ) -> None:
+        source = inspect.getsource(_analysis_package_v2_stage_results)
+        self.assertIn(
+            '"study-intake-model-stage-execution-receipt-v3"', source
+        )
+        self.assertNotIn(
+            '!= "study-intake-model-stage-execution-receipt-v2"', source
         )
 
     def test_run_request_preserves_worker_service_limit_without_result(self) -> None:

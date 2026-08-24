@@ -758,6 +758,7 @@ class ContentDedupIsolationTests(unittest.TestCase):
                 self.assertEqual(
                     counts, {"analysis": 2, "critical_review": 2}
                 )
+
                 verified = [
                     LeaseStore(self.runtime).verify_authoritative_completion(
                         subject,
@@ -784,6 +785,40 @@ class ContentDedupIsolationTests(unittest.TestCase):
                     ),
                     2,
                 )
+
+    def test_analysis_package_v2_keeps_each_capture_as_one_singleton_task(self):
+        self.config["analysis_package_v2"] = {"enabled": True}
+        rows = [
+            (
+                english_candidate(
+                    "EN-V2-SINGLETON-A",
+                    recorded_at="2026-08-24T01:00:00Z",
+                    content="same immutable study fact",
+                ),
+                "eligible",
+            ),
+            (
+                english_candidate(
+                    "EN-V2-SINGLETON-B",
+                    recorded_at="2026-08-24T01:00:01Z",
+                    content="same immutable study fact",
+                ),
+                "eligible",
+            ),
+        ]
+
+        frozen, decisions = self._scan("english", rows)
+
+        self.assertEqual(len(frozen), 2, decisions)
+        self.assertEqual(len(decisions), 2)
+        self.assertTrue(all(row["model_enqueue_allowed"] for row in decisions))
+        for unit in frozen:
+            payload = unit.task.frozen_payload
+            self.assertEqual(
+                payload["content_group_capture_ids"],
+                [unit.candidate.capture_id],
+            )
+            self.assertEqual(len(payload["content_group_members"]), 1)
 
     def test_different_model_input_is_never_merged(self):
         rows = [

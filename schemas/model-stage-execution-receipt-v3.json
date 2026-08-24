@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/study-intake/model-stage-execution-receipt-v3.json",
+  "title": "MCP-free Terra model stage execution receipt v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stage_name", "provider_stage_name", "execution_status", "execution_binding", "raw_output_object_sha256", "raw_output_object_ref", "provider_process_identity_sha256", "provider_process_exit_sha256", "authority_snapshot_manifest_sha256", "mcp_grounding_manifest_sha256", "mcp_transport_sha256", "mcp_transcript_sha256", "attempted_mcp_tool_call_count", "successful_mcp_tool_call_count", "grounding_mcp_tool_call_count", "failed_mcp_tool_call_count", "last_mcp_error_code", "provider_returncode", "duration_ms", "requested_model", "requested_reasoning_effort", "requested_service_tier", "fast_mode_requested", "formal_write_count", "authority"],
+  "properties": {
+    "schema_version": {"const": "study-intake-model-stage-execution-receipt-v3"},
+    "stage_name": {"enum": ["analysis", "critical_review"]},
+    "provider_stage_name": {"enum": ["math_analysis", "math_critical_review", "cs408_analysis", "cs408_critical_review", "english_analysis", "english_critical_review"]},
+    "execution_status": {"const": "completed"},
+    "execution_binding": {"$ref": "#/$defs/execution_binding"},
+    "raw_output_object_sha256": {"$ref": "#/$defs/sha"},
+    "raw_output_object_ref": {"type": "string", "pattern": "^study-intake-model-stage-raw-output://sha256/[0-9a-f]{64}$"},
+    "provider_process_identity_sha256": {"$ref": "#/$defs/sha"},
+    "provider_process_exit_sha256": {"$ref": "#/$defs/sha"},
+    "authority_snapshot_manifest_sha256": {"type": "null"},
+    "mcp_grounding_manifest_sha256": {"type": "null"},
+    "mcp_transport_sha256": {"type": "null"},
+    "mcp_transcript_sha256": {"type": "null"},
+    "attempted_mcp_tool_call_count": {"const": 0},
+    "successful_mcp_tool_call_count": {"const": 0},
+    "grounding_mcp_tool_call_count": {"const": 0},
+    "failed_mcp_tool_call_count": {"const": 0},
+    "last_mcp_error_code": {"type": "null"},
+    "provider_returncode": {"const": 0},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "requested_model": {"const": "gpt-5.6-terra"},
+    "requested_reasoning_effort": {"const": "max"},
+    "requested_service_tier": {"type": "null"},
+    "fast_mode_requested": {"const": false},
+    "formal_write_count": {"const": 0},
+    "authority": {"$ref": "#/$defs/authority"}
+  },
+  "allOf": [
+    {"if": {"properties": {"stage_name": {"const": "analysis"}}}, "then": {"properties": {"provider_stage_name": {"enum": ["math_analysis", "cs408_analysis", "english_analysis"]}}}},
+    {"if": {"properties": {"stage_name": {"const": "critical_review"}}}, "then": {"properties": {"provider_stage_name": {"enum": ["math_critical_review", "cs408_critical_review", "english_critical_review"]}}}},
+    {"if": {"properties": {"provider_stage_name": {"pattern": "^math_"}}}, "then": {"properties": {"execution_binding": {"properties": {"subject": {"const": "math"}}}}}},
+    {"if": {"properties": {"provider_stage_name": {"pattern": "^cs408_"}}}, "then": {"properties": {"execution_binding": {"properties": {"subject": {"const": "cs408"}}}}}},
+    {"if": {"properties": {"provider_stage_name": {"pattern": "^english_"}}}, "then": {"properties": {"execution_binding": {"properties": {"subject": {"const": "english"}}}}}}
+  ],
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safe": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "execution_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit_sha256", "owner_id", "lease_fence", "attempt", "subject", "capture_id", "release_id", "frozen_payload_sha256", "stage_name", "provider_stage_name", "provider_process_identity_sha256"],
+      "properties": {
+        "unit_sha256": {"$ref": "#/$defs/sha"}, "owner_id": {"$ref": "#/$defs/safe"},
+        "lease_fence": {"type": "integer", "minimum": 1}, "attempt": {"type": "integer", "minimum": 1},
+        "subject": {"enum": ["math", "cs408", "english"]}, "capture_id": {"$ref": "#/$defs/safe"},
+        "release_id": {"$ref": "#/$defs/sha"}, "frozen_payload_sha256": {"$ref": "#/$defs/sha"},
+        "stage_name": {"enum": ["analysis", "critical_review"]},
+        "provider_stage_name": {"enum": ["math_analysis", "math_critical_review", "cs408_analysis", "cs408_critical_review", "english_analysis", "english_critical_review"]},
+        "provider_process_identity_sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "algorithm", "key_id", "purpose", "hmac_sha256"],
+      "properties": {
+        "schema_version": {"const": "study-intake-dispatch-authority-v1"},
+        "algorithm": {"const": "HMAC-SHA256"}, "key_id": {"$ref": "#/$defs/sha"},
+        "purpose": {"const": "study-intake-model-stage-execution"}, "hmac_sha256": {"$ref": "#/$defs/sha"}
+      }
+    }
+  }
+}

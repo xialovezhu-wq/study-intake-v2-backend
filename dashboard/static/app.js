@@ -94,6 +94,30 @@
     }
   }
 
+  function analysisPackageProjection(item) {
+    const keys = [
+      "analysis_package_schema_version", "luna_report_count",
+      "luna_diagnostic_count", "terra_final_report_sha256",
+      "terra_final_schema_version",
+    ];
+    if (!keys.some((key) => hasOwn(item, key))) return null;
+    const digest = item.terra_final_report_sha256;
+    if (
+      !keys.every((key) => hasOwn(item, key))
+      || item.analysis_package_schema_version !== "study-intake-analysis-package-v2"
+      || item.terra_final_schema_version !== "terra_final_report_v2"
+      || !Number.isInteger(item.luna_report_count)
+      || item.luna_report_count < 1
+      || item.luna_report_count > 4
+      || !Number.isInteger(item.luna_diagnostic_count)
+      || item.luna_diagnostic_count < 0
+      || ![3, 4].includes(item.luna_report_count + item.luna_diagnostic_count)
+      || typeof digest !== "string"
+      || !/^[0-9a-f]{64}$/.test(digest)
+    ) return null;
+    return Object.fromEntries(keys.map((key) => [key, item[key]]));
+  }
+
   function deriveLane(item) {
     assertPublicItem(item);
     const id = item.capture_id;
@@ -240,7 +264,10 @@
     if (detail.schema_version !== DETAIL_SCHEMA || detail.capture_id !== task.id || detail.subject !== task.subject) {
       throw new DashboardContractError(`item ${task.id} 的 detail v2 身份不匹配。`);
     }
-    return detail;
+    const analysisPackage = analysisPackageProjection(payload.item);
+    return analysisPackage
+      ? { ...detail, analysis_package_projection: analysisPackage }
+      : detail;
   }
 
   function detailEvidence(detail, item) {
@@ -276,26 +303,49 @@
         technical_evidence: "task detail 不可用。",
       };
     }
+    const analysisPackage = detail.analysis_package_projection || null;
+    const summary = [`Capture：${detail.capture_id}`, `执行：${item.execution_status}`, `质量：${item.quality_status}`, `报告处置：${item.report_disposition}`];
+    const lunaProvider = [
+      `Analysis 执行：${detail.analysis.execution_status}`,
+      `Analysis 报告：${detail.analysis.report_status}`,
+      `Analysis receipt：${shortDigest(detail.analysis.execution_receipt_sha256)}`,
+      "detail v2 未公开独立 Provider 结果；前端不从 Analysis 推断。",
+    ];
+    const report = [item.report_available ? "报告已生成，可通过本任务详情重新打开证据摘要。" : "报告尚未生成。", `Package：${shortDigest(detail.artifacts.package_sha256)}`];
+    const technicalEvidence = [
+      `release_id=${shortDigest(detail.release_id)}`,
+      `unit_sha256=${shortDigest(detail.unit_sha256)}`,
+      `terminal_receipt=${shortDigest(detail.terminal.receipt_sha256)}`,
+    ];
+    if (analysisPackage) {
+      summary.push("本次采用 Multi-Agent V2，并保留 Luna 调查层与 Terra 综合层。");
+      lunaProvider.unshift(
+        `Luna 独立调查报告：${analysisPackage.luna_report_count} 份`,
+        `Luna 失败诊断：${analysisPackage.luna_diagnostic_count} 份`,
+      );
+      report.push(
+        `Terra 最终报告：${shortDigest(analysisPackage.terra_final_report_sha256)}`,
+        `Terra 报告版本：${analysisPackage.terra_final_schema_version}`,
+      );
+      technicalEvidence.push(
+        `analysis_package_schema=${analysisPackage.analysis_package_schema_version}`,
+      );
+    }
     return {
-      summary: [`Capture：${detail.capture_id}`, `执行：${item.execution_status}`, `质量：${item.quality_status}`, `报告处置：${item.report_disposition}`],
+      summary,
       timeline: [
         `当前阶段：${detail.dispatch.current_stage}`,
         `本地调度：${detail.dispatch.local_dispatch_status}`,
         `最近有效进展：${detail.progress.last_meaningful_progress_at || "未公开"}`,
         `运行时长：${formatDuration(detail.progress.elapsed_runtime_seconds)}`,
       ],
-      luna_provider: [
-        `Analysis 执行：${detail.analysis.execution_status}`,
-        `Analysis 报告：${detail.analysis.report_status}`,
-        `Analysis receipt：${shortDigest(detail.analysis.execution_receipt_sha256)}`,
-        "detail v2 未公开独立 Provider 结果；前端不从 Analysis 推断。",
-      ],
+      luna_provider: lunaProvider,
       mcp: [
         `证据访问：${detail.evidence.evidence_access_status}`,
         `Authority snapshot：${shortDigest(detail.evidence.authority_snapshot_sha256)}`,
         "detail v2 未公开独立 MCP 查询字段；前端不复制 Analysis 证据。",
       ],
-      report: [item.report_available ? "报告已生成，可通过本任务详情重新打开证据摘要。" : "报告尚未生成。", `Package：${shortDigest(detail.artifacts.package_sha256)}`],
+      report,
       quality_findings: [
         `quality_status=${item.quality_status}`,
         `critical_review.execution_status=${detail.critical_review.execution_status}`,
@@ -304,15 +354,11 @@
       ],
       sol_review: [`sol_review_status=${detail.sol_review.status}`, `receipt=${shortDigest(detail.sol_review.receipt_sha256)}`],
       raw_output: "未请求 raw=1；定向实现只读取默认 detail v2，不读取完整结构化输出。",
-      technical_evidence: [
-        `release_id=${shortDigest(detail.release_id)}`,
-        `unit_sha256=${shortDigest(detail.unit_sha256)}`,
-        `terminal_receipt=${shortDigest(detail.terminal.receipt_sha256)}`,
-      ].join("；"),
+      technical_evidence: technicalEvidence.join("；"),
     };
   }
 
-  const testExports = { DashboardContractError, assertItemsResponse, deriveLane, itemToViewModel, assertDetailResponse, detailEvidence, detailSections };
+  const testExports = { DashboardContractError, assertItemsResponse, deriveLane, itemToViewModel, analysisPackageProjection, assertDetailResponse, detailEvidence, detailSections };
   if (typeof module !== "undefined" && module.exports) module.exports = testExports;
   if (typeof document === "undefined") return;
 

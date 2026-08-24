@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "study-intake-preprocess-package-v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["analysis", "analysis_package_binding", "capture_id", "content_processing_id", "critical_review", "formal_write_count", "lease_fence", "loaded_core_sha256", "model_contract", "pipeline", "release_id", "schema_version", "stage_runtime", "subject", "task", "unit_sha256"],
+  "properties": {
+    "schema_version": {"const": "study-intake-preprocess-package-v4"},
+    "unit_sha256": {"$ref": "#/$defs/sha"},
+    "lease_fence": {"type": "integer", "minimum": 1},
+    "subject": {"$ref": "#/$defs/subject"},
+    "capture_id": {"type": "string", "minLength": 1},
+    "content_processing_id": {"$ref": "#/$defs/nullable_sha"},
+    "release_id": {"$ref": "#/$defs/sha"},
+    "loaded_core_sha256": {"$ref": "#/$defs/nullable_sha"},
+    "task": {"$ref": "#/$defs/frozen_task"},
+    "model_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "outer_stage_model", "investigation_model", "reasoning_effort", "dispatcher_visible_stage_count"],
+      "properties": {
+        "mode": {"const": "multi_agent_v2"},
+        "outer_stage_model": {"const": "gpt-5.6-terra"},
+        "investigation_model": {"const": "gpt-5.6-luna"},
+        "reasoning_effort": {"const": "max"},
+        "dispatcher_visible_stage_count": {"const": 2}
+      }
+    },
+    "pipeline": {"const": ["analysis", "critical_review"]},
+    "analysis_package_binding": {"$ref": "#/$defs/analysis_package_binding"},
+    "analysis": {"$ref": "#/$defs/nonempty_object"},
+    "critical_review": {"$ref": "#/$defs/nonempty_object"},
+    "stage_runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["analysis", "critical_review"],
+      "properties": {
+        "analysis": {"$ref": "#/$defs/terra_stage_runtime"},
+        "critical_review": {"$ref": "#/$defs/terra_stage_runtime"}
+      }
+    },
+    "formal_write_count": {"const": 0}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullable_sha": {"oneOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+    "subject": {"enum": ["math", "cs408", "english"]},
+    "json_value": {},
+    "nonempty_object": {"type": "object", "minProperties": 1},
+    "analysis_package_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "id", "sha256", "ref"],
+      "properties": {
+        "schema_version": {"const": "study-intake-analysis-package-binding-v1"},
+        "id": {"type": "string", "pattern": "^ANPKG2-[A-F0-9]{24}$"},
+        "sha256": {"$ref": "#/$defs/sha"},
+        "ref": {"type": "string", "pattern": "^study-intake-analysis-package://sha256/[0-9a-f]{64}$"}
+      }
+    },
+    "frozen_task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "frozen_payload", "requested_model", "requested_reasoning_effort", "unit_sha256"],
+      "properties": {
+        "schema_version": {"const": "study-intake-frozen-task-v1"},
+        "frozen_payload": {"type": "object", "minProperties": 1},
+        "requested_model": {"const": "gpt-5.6-luna"},
+        "requested_reasoning_effort": {"const": "max"},
+        "unit_sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "analysis_package_stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stage", "provider_stage_name", "requested_model", "requested_reasoning_effort", "formal_write_count"],
+      "properties": {
+        "stage": {"type": "string", "pattern": "^(terra_initial|terra_final|luna_investigation_[A-Za-z0-9][A-Za-z0-9_.-]*)$"},
+        "provider_stage_name": {"type": "string", "pattern": "^(math|cs408|english)_(analysis|luna_analysis|critical_review)$"},
+        "requested_model": {"enum": ["gpt-5.6-terra", "gpt-5.6-luna"]},
+        "requested_reasoning_effort": {"const": "max"},
+        "status": {"type": "string", "minLength": 1},
+        "report_sha256": {"$ref": "#/$defs/sha"},
+        "report_ref": {"type": "string", "pattern": "^study-intake-luna-investigation-report://sha256/[0-9a-f]{64}$"},
+        "error_code": {"type": ["string", "null"]},
+        "formal_write_count": {"const": 0}
+      }
+    },
+    "terra_stage_runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested_model", "requested_reasoning_effort", "runtime_identity_status", "runtime_model", "runtime_reasoning_effort", "runtime_metadata_provenance", "duration_ms", "read_session_id", "semantic_stage_count", "provider_request_count", "mcp_tool_call_count", "model_call_count", "consumed_terminal_duplicate_read_count", "raw_output_object_sha256", "raw_output_object_ref", "stage_execution_receipt_sha256", "stage_execution_receipt_ref", "stage_normalization_receipt_sha256", "stage_normalization_receipt_ref", "normalization_status", "normalization_warning_count", "normalization_warnings", "analysis_package_stages"],
+      "properties": {
+        "requested_model": {"const": "gpt-5.6-terra"},
+        "requested_reasoning_effort": {"const": "max"},
+        "runtime_identity_status": {"enum": ["confirmed", "requested_unverified"]},
+        "runtime_model": {"enum": ["gpt-5.6-terra", null]},
+        "runtime_reasoning_effort": {"enum": ["max", null]},
+        "runtime_metadata_provenance": {"enum": ["codex_json_attestation_v1", "unavailable"]},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "read_session_id": {"type": ["string", "null"]},
+        "semantic_stage_count": {"type": "integer", "minimum": 1},
+        "provider_request_count": {"type": "integer", "minimum": 1},
+        "mcp_tool_call_count": {"type": "integer", "minimum": 0},
+        "model_call_count": {"type": "integer", "minimum": 1},
+        "consumed_terminal_duplicate_read_count": {"const": 0},
+        "raw_output_object_sha256": {"$ref": "#/$defs/nullable_sha"},
+        "raw_output_object_ref": {"type": ["string", "null"]},
+        "stage_execution_receipt_sha256": {"$ref": "#/$defs/nullable_sha"},
+        "stage_execution_receipt_ref": {"type": ["string", "null"]},
+        "stage_normalization_receipt_sha256": {"$ref": "#/$defs/nullable_sha"},
+        "stage_normalization_receipt_ref": {"type": ["string", "null"]},
+        "normalization_status": {"type": ["string", "null"]},
+        "normalization_warning_count": {"type": "integer", "minimum": 0},
+        "normalization_warnings": {"type": "array", "items": {"type": "object"}},
+        "analysis_package_stages": {"type": "array", "minItems": 5, "maxItems": 6, "items": {"$ref": "#/$defs/analysis_package_stage"}},
+        "review_mcp_transcript_sha256": {"$ref": "#/$defs/sha"},
+        "review_mcp_transcript_ref": {"type": "string"},
+        "read_session_manifest_sha256": {"$ref": "#/$defs/sha"},
+        "authority_snapshot_manifest_sha256": {"$ref": "#/$defs/sha"},
+        "capture_freeze_receipt_sha256": {"$ref": "#/$defs/sha"},
+        "mcp_read_session_receipt_sha256": {"$ref": "#/$defs/sha"},
+        "evidence_generation": {"type": "string"},
+        "evidence_authority_fingerprint": {"$ref": "#/$defs/sha"},
+        "evidence_subject": {"$ref": "#/$defs/subject"},
+        "evidence_release_id": {"$ref": "#/$defs/sha"},
+        "mcp_grounding_manifest_sha256": {"$ref": "#/$defs/sha"},
+        "mcp_transcript_sha256": {"$ref": "#/$defs/sha"},
+        "mcp_consumed_evidence_refs": {"type": "array", "items": {"type": "string"}},
+        "mcp_cited_evidence_refs": {"type": "array", "items": {"type": "string"}},
+        "mcp_stage_grounded_evidence_refs": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

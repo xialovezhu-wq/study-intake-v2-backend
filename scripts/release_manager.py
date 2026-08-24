@@ -3159,6 +3159,56 @@ def _validate_analysis_package_config(
         raise ReleaseError("release_analysis_package_v1_invalid")
 
 
+def _validate_analysis_package_v2_config(
+    config: Mapping[str, Any], *, release_root: Path
+) -> None:
+    if any(
+        retired_key in config
+        for retired_key in ("consumer_stage_chain", "analysis_package_v1")
+    ):
+        raise ReleaseError("release_retired_analysis_route_present")
+    profile = config.get("analysis_package_v2")
+    expected_schemas = {
+        "terra_initial_output_schema": (
+            release_root / "schemas/terra-initial-draft-v1.json"
+        ),
+        "luna_investigation_output_schema": (
+            release_root / "schemas/luna-investigation-draft-v1.json"
+        ),
+        "terra_final_output_schema": (
+            release_root / "schemas/terra-final-draft-v1.json"
+        ),
+    }
+    if (
+        not isinstance(profile, Mapping)
+        or set(profile)
+        != {
+            "enabled",
+            *expected_schemas,
+            "physical_branch_slots",
+            "max_prompt_bytes",
+            "max_output_bytes",
+        }
+        or profile.get("enabled") is not True
+        or isinstance(profile.get("physical_branch_slots"), bool)
+        or not isinstance(profile.get("physical_branch_slots"), int)
+        or not 3 <= int(profile["physical_branch_slots"]) <= 4
+        or any(
+            profile.get(key) != str(path)
+            or path.is_symlink()
+            or not path.is_file()
+            for key, path in expected_schemas.items()
+        )
+        or any(
+            isinstance(profile.get(key), bool)
+            or not isinstance(profile.get(key), int)
+            or not 4096 <= int(profile[key]) <= 2 * 1024 * 1024
+            for key in ("max_prompt_bytes", "max_output_bytes")
+        )
+    ):
+        raise ReleaseError("release_analysis_package_v2_invalid")
+
+
 def _validate_target_release_config(
     config: Mapping[str, Any],
     *,
@@ -3175,8 +3225,18 @@ def _validate_target_release_config(
         if isinstance(dispatch, Mapping)
         else None
     )
+    new_multi_agent_release = (
+        target_model_contract.get("schema_version")
+        == TARGET_MODEL_REQUEST_CONTRACT_SCHEMA
+        and isinstance(target_model_contract.get("roles"), Mapping)
+    )
+    package_schema_filename = (
+        "preprocess-package-v4.json"
+        if config.get("analysis_package_v2") is not None
+        else "preprocess-package-v3.json"
+    )
     expected_package_schema = str(
-        release_root / "schemas" / "preprocess-package-v3.json"
+        release_root / "schemas" / package_schema_filename
     )
     expected_package_schema_path = Path(expected_package_schema)
     package_profiles = tuple(
@@ -3241,12 +3301,17 @@ def _validate_target_release_config(
                 break
         if role_config_valid:
             try:
-                _validate_consumer_stage_chain_config(
-                    config, available_roles=set(models)
-                )
-                _validate_analysis_package_config(
-                    config, release_root=release_root
-                )
+                if new_multi_agent_release:
+                    _validate_analysis_package_v2_config(
+                        config, release_root=release_root
+                    )
+                else:
+                    _validate_consumer_stage_chain_config(
+                        config, available_roles=set(models)
+                    )
+                    _validate_analysis_package_config(
+                        config, release_root=release_root
+                    )
             except ReleaseError:
                 role_config_valid = False
     if (

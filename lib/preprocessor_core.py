@@ -75,6 +75,7 @@ MATH_FREE_TEXT_SAFE_PATTERN = (
 PACKAGE_SCHEMA = "study-intake-preprocess-package-v1"
 PACKAGE_SCHEMA_V2 = "study-intake-preprocess-package-v2"
 PACKAGE_SCHEMA_V3 = "study-intake-preprocess-package-v3"
+PACKAGE_SCHEMA_V4 = "study-intake-preprocess-package-v4"
 RECEIPT_SCHEMA = "study-intake-preprocess-receipt-v1"
 RECEIPT_SCHEMA_V2 = "study-intake-preprocess-receipt-v2"
 DASHBOARD_SCHEMA = "study-intake-dashboard-projection-v1"
@@ -1652,6 +1653,15 @@ def load_config(path: Path) -> dict[str, Any]:
         or not 10 <= int(scheduler["stall_timeout_seconds"]) <= 3600
     ):
         raise PreprocessorError("config_branch_scheduler_invalid")
+    retired_analysis_route_keys = {
+        "consumer_stage_chain",
+        "analysis_package_v1",
+    }
+    if (
+        execution_mode == "live_authorized"
+        or "analysis_package_v2" in config
+    ) and retired_analysis_route_keys.intersection(config):
+        raise PreprocessorError("config_retired_analysis_route_present")
     try:
         from model_role_contract import (
             ModelRoleContractError,
@@ -1716,6 +1726,8 @@ def load_config(path: Path) -> dict[str, Any]:
             )
         ):
             raise PreprocessorError("config_analysis_package_v2_invalid")
+    if execution_mode == "live_authorized" and analysis_package_v2 is None:
+        raise PreprocessorError("config_analysis_package_v2_required")
     processing_plugin = config.get("processing_plugin")
     if processing_plugin is not None:
         if (
@@ -2057,15 +2069,22 @@ def load_config(path: Path) -> dict[str, Any]:
             and isinstance(package_schema.get("properties"), Mapping)
             else None
         )
+        expected_package_schema_version = (
+            PACKAGE_SCHEMA_V4
+            if analysis_package_v2 is not None
+            else PACKAGE_SCHEMA_V3
+        )
         if (
             package_schema.get("title")
-            != "study-intake-preprocess-package-v3"
+            != expected_package_schema_version
             or not isinstance(schema_version_rule, Mapping)
             or schema_version_rule.get("const")
-            != "study-intake-preprocess-package-v3"
+            != expected_package_schema_version
         ):
             raise PreprocessorError(
-                f"config_{error_subject}_package_output_schema_not_v3"
+                "config_"
+                f"{error_subject}_package_output_schema_not_"
+                f"{expected_package_schema_version.rsplit('-', 1)[-1]}"
             )
     return config
 
@@ -16705,7 +16724,62 @@ class CodexRunner:
     ) -> dict[str, Any]:
         lifecycle = self._dispatch_process_lifecycle
         if lifecycle is None:
-            return {}
+            core = {
+                "schema_version": "study-intake-direct-model-stage-execution-v1",
+                "stage_name": stage_name,
+                "execution_status": execution_status,
+                "raw_output_object_sha256": raw_refs.get(
+                    "raw_output_object_sha256"
+                ),
+                "raw_output_object_ref": raw_refs.get("raw_output_object_ref"),
+                "mcp_transport_sha256": transport_sha256,
+                "mcp_transcript_sha256": transcript_sha256,
+                "authority_snapshot_manifest_sha256": (
+                    authority_snapshot_manifest_sha256
+                ),
+                "mcp_grounding_manifest_sha256": (
+                    mcp_grounding_manifest_sha256
+                ),
+                "attempted_mcp_tool_call_count": int(
+                    attempt_counts.get("attempted_mcp_tool_call_count") or 0
+                ),
+                "successful_mcp_tool_call_count": int(
+                    attempt_counts.get("successful_mcp_tool_call_count") or 0
+                ),
+                "grounding_mcp_tool_call_count": int(
+                    attempt_counts.get("grounding_mcp_tool_call_count") or 0
+                ),
+                "failed_mcp_tool_call_count": int(
+                    attempt_counts.get("failed_mcp_tool_call_count") or 0
+                ),
+                "last_mcp_error_code": attempt_counts.get(
+                    "last_mcp_error_code"
+                ),
+                "last_error_code": last_error_code,
+                "provider_returncode": provider_returncode,
+                "duration_ms": duration_ms,
+                "requested_model": requested_model,
+                "requested_reasoning_effort": requested_reasoning_effort,
+                "formal_write_count": 0,
+            }
+            digest = hashlib.sha256(json_file_bytes(core)).hexdigest()
+            path = (
+                self.runtime_root / "private" / "reports"
+                / "direct-model-stage-execution" / "sha256"
+                / digest[:2] / f"{digest}.json"
+            )
+            atomic_publish_json_no_clobber(path, core)
+            if sha256_file(path) != digest:
+                raise PreprocessorError(
+                    "direct_model_stage_execution_write_mismatch"
+                )
+            return {
+                "stage_execution_receipt_sha256": digest,
+                "stage_execution_receipt_ref": (
+                    "study-intake-direct-model-stage-execution://sha256/"
+                    + digest
+                ),
+            }
         closure = self._provider_closure.get(stage_name) or {}
         return lifecycle["lease_store"].publish_model_stage_execution_receipt(
             lifecycle["task"],
@@ -16764,8 +16838,6 @@ class CodexRunner:
         error_code: str | None,
     ) -> dict[str, Any]:
         lifecycle = self._dispatch_process_lifecycle
-        if lifecycle is None:
-            return {}
         required = (
             result.stage_execution_receipt_sha256,
             result.stage_execution_receipt_ref,
@@ -16781,6 +16853,55 @@ class CodexRunner:
             if warnings
             else "normalized"
         )
+        if lifecycle is None:
+            core = {
+                "schema_version": (
+                    "study-intake-direct-model-stage-normalization-v1"
+                ),
+                "stage_name": stage_name,
+                "execution_receipt_sha256": str(
+                    result.stage_execution_receipt_sha256
+                ),
+                "execution_receipt_ref": str(
+                    result.stage_execution_receipt_ref
+                ),
+                "raw_output_object_sha256": str(
+                    result.raw_output_object_sha256
+                ),
+                "raw_output_object_ref": str(result.raw_output_object_ref),
+                "normalization_status": status,
+                "normalized_payload_sha256": (
+                    sha256_value(normalized_payload)
+                    if normalized_payload is not None
+                    else None
+                ),
+                "warnings": [copy.deepcopy(dict(row)) for row in warnings],
+                "error_code": error_code,
+                "formal_write_count": 0,
+            }
+            digest = hashlib.sha256(json_file_bytes(core)).hexdigest()
+            path = (
+                self.runtime_root / "private" / "reports"
+                / "direct-model-stage-normalization" / "sha256"
+                / digest[:2] / f"{digest}.json"
+            )
+            atomic_publish_json_no_clobber(path, core)
+            if sha256_file(path) != digest:
+                raise PreprocessorError(
+                    "direct_model_stage_normalization_write_mismatch"
+                )
+            return {
+                "stage_normalization_receipt_sha256": digest,
+                "stage_normalization_receipt_ref": (
+                    "study-intake-direct-model-stage-normalization://sha256/"
+                    + digest
+                ),
+                "normalization_status": status,
+                "normalization_warning_count": len(warnings),
+                "normalization_warnings": [
+                    copy.deepcopy(dict(row)) for row in warnings
+                ],
+            }
         refs = lifecycle[
             "lease_store"
         ].publish_model_stage_normalization_receipt(
@@ -22519,6 +22640,19 @@ class CodexRunner:
                 for row in result.normalization_warnings
             ],
         }
+        if isinstance(result.stage_name, str):
+            closure = self._provider_closure.get(result.stage_name)
+            if isinstance(closure, Mapping):
+                receipt.update(
+                    {
+                        "provider_process_identity_sha256": closure.get(
+                            "provider_process_identity_sha256"
+                        ),
+                        "provider_process_exit_sha256": closure.get(
+                            "provider_process_exit_sha256"
+                        ),
+                    }
+                )
         if (format_normalization is None) != (format_stage_name is None):
             raise PreprocessorError("math_format_normalization_binding_invalid")
         if format_normalization is not None:
@@ -25169,6 +25303,1297 @@ class CodexRunner:
             + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
         )
 
+    def _new_multi_agent_branch_runner(
+        self, candidate: Candidate, branch_id: str
+    ) -> "CodexRunner":
+        """Create one state-isolated Luna runner for one investigation branch."""
+
+        del candidate, branch_id
+        child = CodexRunner(copy.deepcopy(self.config), self.runtime_root)
+        # Cancellation authority remains task-scoped while every runner keeps
+        # independent process, raw-output, and MCP-session maps.
+        child._cancel_requested = self._cancel_requested
+        return child
+
+    def _multi_agent_activation_id(self, subject: str) -> str:
+        release_id = str(self.config.get("authority_release_id") or "")
+        lifecycle = self._dispatch_process_lifecycle
+        if isinstance(lifecycle, Mapping):
+            store = lifecycle.get("lease_store")
+            status_reader = getattr(store, "production_canary_status", None)
+            if callable(status_reader):
+                try:
+                    status = status_reader(subject)
+                except Exception:
+                    status = None
+                activation_id = (
+                    status.get("activation_id")
+                    if isinstance(status, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(activation_id, str)
+                    and SHA256_RE.fullmatch(activation_id) is not None
+                ):
+                    return activation_id
+        if SHA256_RE.fullmatch(release_id) is None:
+            raise PreprocessorError("multi_agent_activation_binding_missing")
+        if self.config.get("execution_mode") == "live_authorized":
+            raise PreprocessorError("multi_agent_live_activation_missing")
+        # Fixture/source mode has no activated canary. Keep a deterministic,
+        # explicitly non-production binding only outside live mode.
+        return sha256_value(
+            {"release_id": release_id, "subject": subject, "mode": "source"}
+        )
+
+    def _multi_agent_skill_binding(self) -> dict[str, str]:
+        plugin = self.config.get("processing_plugin")
+        root = (
+            Path(str(plugin.get("root") or "")).resolve()
+            if isinstance(plugin, Mapping)
+            else None
+        )
+        if root is None:
+            raise PreprocessorError("multi_agent_orchestrate_skill_missing")
+        path = root / "skills/multi-agent-read-orchestrate/SKILL.md"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PreprocessorError("multi_agent_orchestrate_skill_missing") from exc
+        match = re.search(r"Skill version `([^`]+)`", text)
+        if match is None:
+            raise PreprocessorError("multi_agent_orchestrate_skill_invalid")
+        return {
+            "id": "multi-agent-read-orchestrate",
+            "version": match.group(1),
+            "sha256": sha256_file(path),
+        }
+
+    @staticmethod
+    def _multi_agent_branch_failure(
+        request: Mapping[str, Any], *, wave_index: int,
+        error: BaseException,
+    ) -> dict[str, Any]:
+        code = str(getattr(error, "code", "branch_worker_exception"))
+        if not code or len(code) > 180 or not re.fullmatch(r"[A-Za-z0-9_.:-]+", code):
+            code = "branch_worker_exception"
+        diagnostic = getattr(error, "diagnostic", None)
+        artifact_refs = {
+            str(key): str(value)
+            for key, value in dict(diagnostic or {}).items()
+            if isinstance(key, str)
+            and (key.endswith("_sha256") or key.endswith("_ref"))
+            and isinstance(value, str)
+            and value
+        }
+        core = {
+            "schema_version": "read_branch_result_v1",
+            "plan_id": request["plan_id"],
+            "plan_sha256": request["plan_sha256"],
+            "request_sha256": request["request_sha256"],
+            "branch_id": request["branch_id"],
+            "subject": request["subject"],
+            "capture_id": request["capture_id"],
+            "frozen_task_sha256": request["frozen_task_sha256"],
+            "release_id": request["release_id"],
+            "activation_id": request["activation_id"],
+            "authority_snapshot_sha256": request[
+                "authority_snapshot_sha256"
+            ],
+            "generation": request["generation"],
+            "status": "failed",
+            "required": request["branch"]["required"],
+            "purpose": request["branch"]["purpose"],
+            "child_agent_id": None,
+            "parent_agent_id": "terra-initial",
+            "read_session_id": None,
+            "mcp_launcher_pid": None,
+            "mcp_launcher_pgid": None,
+            "wave_index": wave_index,
+            "calls": [],
+            "evidence": [],
+            "findings": ([{
+                "kind": "technical_diagnostic",
+                "error_code": code,
+                "artifact_refs": artifact_refs,
+            }] if artifact_refs else []),
+            "conflicts": [],
+            "missing_evidence": [code],
+            "pagination_closed": False,
+            "duration_ms": 0.0,
+            "error_code": code,
+            "stderr_sha256": None,
+            "formal_write_count": 0,
+        }
+        from read_branch import sha256_value as branch_sha256_value
+
+        return {**core, "result_sha256": branch_sha256_value(core)}
+
+    def run_analysis_package_v2(self, candidate: Candidate) -> ModelResult:
+        """Run Terra initial -> 3–4 Luna investigations -> Terra final."""
+
+        from analysis_package_v1 import (
+            AnalysisPackageStore,
+            build_durable_capture,
+            sha256_value as analysis_sha256_value,
+        )
+        from analysis_package_v2 import (
+            build_terra_initial_analysis,
+            publish_analysis_package_v2,
+            reopen_analysis_package_v2,
+        )
+        from multi_agent_model_drafts import (
+            build_sealed_read_plan_from_draft,
+            validate_luna_investigation_draft,
+            validate_terra_final_draft,
+            validate_terra_initial_draft,
+        )
+        from multi_agent_report_contract import (
+            build_luna_investigation_report_v2,
+            build_sol_handoff_v3,
+            build_terra_final_input_v2,
+            build_terra_final_report_v2,
+        )
+        from read_bundle import (
+            build_analysis_candidate,
+            build_read_bundle,
+            build_sol_handoff,
+            review_candidate,
+        )
+        from read_fanout import ReadFanoutScheduler
+
+        profile = self.config.get("analysis_package_v2")
+        if not isinstance(profile, Mapping) or profile.get("enabled") is not True:
+            raise PreprocessorError("analysis_package_v2_profile_missing")
+        schema_paths = {
+            "terra_initial": Path(str(profile["terra_initial_output_schema"])),
+            "luna": Path(str(profile["luna_investigation_output_schema"])),
+            "terra_final": Path(str(profile["terra_final_output_schema"])),
+        }
+        if any(not path.is_file() for path in schema_paths.values()):
+            raise PreprocessorError("analysis_package_v2_schema_missing")
+        if not isinstance(candidate.recorded_at, str):
+            raise PreprocessorError("analysis_package_captured_at_missing")
+        capture = build_durable_capture(
+            capture_id=candidate.capture_id,
+            subject=candidate.subject,
+            study_date=candidate.study_date,
+            captured_at=candidate.recorded_at,
+            payload={
+                "input_fingerprint": candidate.input_fingerprint,
+                "input_binding": copy.deepcopy(candidate.input_binding),
+                "model_input": copy.deepcopy(candidate.model_input),
+            },
+            source_kind=(
+                "synthetic"
+                if self.config.get("execution_mode")
+                in {"fixture", "hosted_synthetic"}
+                else "canonical"
+            ),
+        )
+        store = AnalysisPackageStore(self.runtime_root)
+        capture_sha = analysis_sha256_value(capture)
+        capture_ref = (
+            "study-intake-durable-capture://sha256/" + capture_sha
+        )
+        initial_prompt = (
+            "Produce one strict Terra initial draft. Read only the frozen "
+            "Capture supplied below. Do not query any subject database. "
+            "Propose exactly three or four independent Luna investigations "
+            "using only the supplied collection names. formal_write_count=0.\n"
+            + json.dumps(
+                {
+                    "subject": candidate.subject,
+                    "capture_id": candidate.capture_id,
+                    "frozen_capture": capture,
+                    "allowed_collections": {
+                        "math": [
+                            "formal_card_catalog", "formal_card_records",
+                            "knowledge_catalog", "math_taxonomy_items",
+                            "activity", "search",
+                        ],
+                        "cs408": [
+                            "formal_wrong_item_catalog", "formal_nodes",
+                            "formal_knowledge_catalog", "knowledge_nodes",
+                            "knowledge_safe_notes", "curation_inventory",
+                            "morning_sessions", "review_events", "search",
+                        ],
+                        "english": [
+                            "article_catalog", "articles", "sentences",
+                            "vocabulary", "mastered_items", "patterns",
+                            "events", "raw_events", "effective_events",
+                            "article_learning_catalog",
+                            "article_learning_pages", "search",
+                        ],
+                    }[candidate.subject],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        initial_result = self._execute_prompt(
+            prompt=initial_prompt,
+            output_schema=schema_paths["terra_initial"],
+            image_paths=self._candidate_image_paths(candidate),
+            stage_name=f"{candidate.subject}_analysis",
+            max_prompt_bytes=int(profile["max_prompt_bytes"]),
+            max_output_bytes=int(profile["max_output_bytes"]),
+            allowed_evidence_refs=(),
+            bind_evidence_schema=False,
+            subject=None,
+            processing_context=None,
+            model_role="terra_analysis",
+            enforce_output_schema=True,
+        )
+        initial_draft = validate_terra_initial_draft(
+            initial_result.payload,
+            subject=candidate.subject,
+            capture_id=candidate.capture_id,
+        )
+        initial_receipt = self._stage_receipt(
+            initial_result,
+            prompt_version="multi-agent-terra-initial-v1",
+            prompt_sha256=sha256_text(initial_prompt),
+            schema_sha256=str(initial_result.schema_sha256),
+            result_sha256=analysis_sha256_value(initial_draft),
+            image_paths=self._candidate_image_paths(candidate),
+            requested_model="gpt-5.6-terra",
+            requested_reasoning_effort="max",
+            normalization_warnings=initial_result.normalization_warnings,
+        )
+        initial_receipt["provider_stage_name"] = f"{candidate.subject}_analysis"
+        terra_initial = build_terra_initial_analysis(
+            capture=capture,
+            summary=initial_draft["learning_sections"]["task_summary"],
+            analysis={
+                "sections": [
+                    {
+                        "kind": "known_facts",
+                        "summary": "; ".join(
+                            initial_draft["learning_sections"]["known_facts"]
+                        ),
+                        "evidence_refs": [capture_ref],
+                    },
+                    {
+                        "kind": "open_questions",
+                        "summary": "; ".join(
+                            initial_draft["learning_sections"]["open_questions"]
+                        ),
+                        "evidence_refs": [capture_ref],
+                    },
+                ]
+            },
+            proposed_branches=[
+                {
+                    "branch_id": row["branch_id"],
+                    "purpose": row["purpose"],
+                    "rationale": row["rationale"],
+                }
+                for row in initial_draft["proposed_branches"]
+            ],
+            evidence_refs=[capture_ref],
+        )
+
+        first_branch = initial_draft["proposed_branches"][0]
+        first_child = self._new_multi_agent_branch_runner(
+            candidate, str(first_branch["branch_id"])
+        )
+        try:
+            first_context = first_child._background_context(candidate)
+        except Exception as exc:
+            raise PreprocessorError(
+                str(getattr(exc, "code", "multi_agent_read_session_open_failed"))
+            ) from exc
+        if not isinstance(first_context, Mapping):
+            raise PreprocessorError("multi_agent_read_session_missing")
+        first_session = first_context.get("mcp_read_session")
+        if not isinstance(first_session, Mapping):
+            raise PreprocessorError("multi_agent_read_session_missing")
+        artifact_ids = first_session.get("artifact_ids")
+        if not isinstance(artifact_ids, list) or not artifact_ids:
+            raise PreprocessorError("multi_agent_task_artifacts_missing")
+        frozen_task_sha = self.config.get("authority_generation_id")
+        if (
+            not isinstance(frozen_task_sha, str)
+            or SHA256_RE.fullmatch(frozen_task_sha) is None
+        ):
+            frozen_task_sha = capture_sha
+        skill_binding = self._multi_agent_skill_binding()
+        runtime_binding = {
+            "subject": candidate.subject,
+            "capture_id": candidate.capture_id,
+            "plan_id": "PLAN-" + analysis_sha256_value(
+                {
+                    "capture_sha256": capture_sha,
+                    "initial_report_sha256": terra_initial["report_sha256"],
+                }
+            )[:24].upper(),
+            "frozen_task_sha256": frozen_task_sha,
+            "release_id": str(self.config["authority_release_id"]),
+            "activation_id": self._multi_agent_activation_id(candidate.subject),
+            "authority_snapshot_sha256": str(
+                first_session["authority_snapshot_manifest_sha256"]
+            ),
+            "generation": str(first_session["generation"]),
+            "orchestrate_skill": skill_binding,
+            "terra_agent_contract_sha256": analysis_sha256_value(
+                {
+                    "role": self.config.get("models", {}).get("terra_analysis"),
+                    "schema_sha256": sha256_file(schema_paths["terra_initial"]),
+                }
+            ),
+            "created_at": utc_now(),
+            "allowed_task_artifact_ids": [str(value) for value in artifact_ids],
+            "allowed_mcp_tools": [
+                "get_task_context", "read_task_artifact", "list_records",
+                "get_records", "search_records", "query_relations",
+            ],
+            "query_constraints": {
+                "subject": candidate.subject,
+                "independent_read_session_per_branch": True,
+                "formal_write_count": 0,
+            },
+            "maximum_calls": 48,
+            "maximum_records": 512,
+            "maximum_bytes": int(profile["max_output_bytes"]),
+            "completion_requirements": [
+                "task_context_read", "all_task_artifacts_read",
+                "at_least_one_library_query", "investigation_report_returned",
+            ],
+            "failure_policy": "fail_closed",
+        }
+        plan = build_sealed_read_plan_from_draft(
+            initial_draft, runtime_binding=runtime_binding
+        )
+
+        class BranchWorker:
+            def __init__(inner_self) -> None:
+                inner_self.lock = threading.Lock()
+                inner_self.preopened = {
+                    str(first_branch["branch_id"]): (first_child, first_context)
+                }
+                inner_self.drafts: dict[str, dict[str, Any]] = {}
+                inner_self.receipts: dict[str, dict[str, Any]] = {}
+                inner_self.attempts: dict[str, dict[str, Any]] = {}
+                inner_self.children: list[CodexRunner] = [first_child]
+                inner_self.sessions: set[str] = set()
+
+            def run(
+                inner_self,
+                request: Mapping[str, Any],
+                *,
+                wave_index: int,
+                cancellation: threading.Event,
+            ) -> dict[str, Any]:
+                branch_id = str(request["branch_id"])
+                child: CodexRunner | None = None
+                context: Mapping[str, Any] | None = None
+                result: StructuredStageResult | None = None
+                receipt: dict[str, Any] | None = None
+                execute_started = False
+                branch_started = time.monotonic()
+                try:
+                    with inner_self.lock:
+                        pair = inner_self.preopened.pop(branch_id, None)
+                    if cancellation.is_set() or self._cancel_requested.is_set():
+                        if pair is None:
+                            return self._multi_agent_branch_failure(
+                                request,
+                                wave_index=wave_index,
+                                error=PreprocessorError(
+                                    "branch_cancelled_before_start"
+                                ),
+                            )
+                        child, context = pair
+                        raise PreprocessorError(
+                            "branch_cancelled_before_start"
+                        )
+                    if pair is None:
+                        child = self._new_multi_agent_branch_runner(
+                            candidate, branch_id
+                        )
+                        with inner_self.lock:
+                            inner_self.children.append(child)
+                        context = child._background_context(candidate)
+                    else:
+                        child, context = pair
+                    if not isinstance(context, Mapping):
+                        raise PreprocessorError("multi_agent_read_session_missing")
+                    session = context.get("mcp_read_session")
+                    if not isinstance(session, Mapping):
+                        raise PreprocessorError("multi_agent_read_session_missing")
+                    session_id = str(session.get("read_session_id") or "")
+                    with inner_self.lock:
+                        if not session_id or session_id in inner_self.sessions:
+                            raise PreprocessorError(
+                                "multi_agent_read_session_not_independent"
+                            )
+                        inner_self.sessions.add(session_id)
+                    if (
+                        session.get("generation") != plan["generation"]
+                        or session.get("authority_snapshot_manifest_sha256")
+                        != plan["authority_snapshot_sha256"]
+                        or session.get("artifact_ids")
+                        != request["branch"]["allowed_task_artifact_ids"]
+                    ):
+                        raise PreprocessorError("multi_agent_branch_authority_drift")
+                    prompt = (
+                        "Produce one strict Luna investigation draft for only "
+                        "this branch. Use the subject MCP, call get_task_context, "
+                        "read all allowed task artifacts, then perform the planned "
+                        "library investigation. Cite only evidence refs returned "
+                        "in this read session. formal_write_count=0.\n"
+                        + json.dumps(
+                            {
+                                "subject": candidate.subject,
+                                "capture_id": candidate.capture_id,
+                                "terra_initial": terra_initial,
+                                "sealed_plan_sha256": plan["plan_sha256"],
+                                "branch": request["branch"],
+                                "read_session": self._processing_prompt_context(
+                                    context
+                                ),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    )
+                    stage_name = f"{candidate.subject}_luna_analysis"
+                    execute_started = True
+                    result = child._execute_prompt(
+                        prompt=prompt,
+                        output_schema=schema_paths["luna"],
+                        image_paths=(),
+                        stage_name=stage_name,
+                        max_prompt_bytes=int(profile["max_prompt_bytes"]),
+                        max_output_bytes=int(profile["max_output_bytes"]),
+                        allowed_evidence_refs=(),
+                        bind_evidence_schema=False,
+                        subject=candidate.subject,
+                        processing_context=context,
+                        model_role="luna_analysis",
+                        enforce_output_schema=True,
+                    )
+                    with inner_self.lock:
+                        inner_self.attempts[branch_id] = {
+                            "provider_request_count": result.provider_request_count,
+                            "mcp_tool_call_count": result.mcp_tool_call_count,
+                            "model_call_count": 1,
+                            "duration_ms": result.duration_ms,
+                            "raw_output_object_sha256": (
+                                result.raw_output_object_sha256
+                            ),
+                            "raw_output_object_ref": result.raw_output_object_ref,
+                            "stage_execution_receipt_sha256": (
+                                result.stage_execution_receipt_sha256
+                            ),
+                            "stage_execution_receipt_ref": (
+                                result.stage_execution_receipt_ref
+                            ),
+                            "status": "executed",
+                            "formal_write_count": 0,
+                        }
+                    draft = validate_luna_investigation_draft(
+                        result.payload,
+                        subject=candidate.subject,
+                        capture_id=candidate.capture_id,
+                        branch_id=branch_id,
+                    )
+                    receipt = child._stage_receipt(
+                        result,
+                        prompt_version=stage_name,
+                        prompt_sha256=sha256_text(prompt),
+                        schema_sha256=str(result.schema_sha256),
+                        result_sha256=analysis_sha256_value(draft),
+                        processing_context=context,
+                        requested_model="gpt-5.6-luna",
+                        requested_reasoning_effort="max",
+                        normalization_warnings=result.normalization_warnings,
+                    )
+                    receipt["branch_id"] = branch_id
+                    receipt["provider_stage_name"] = stage_name
+                    host = child._processing_host
+                    if host is None:
+                        raise PreprocessorError(
+                            "multi_agent_processing_host_missing"
+                        )
+                    grounding = receipt.get("mcp_grounding_manifest")
+                    items = (
+                        grounding.get("items")
+                        if isinstance(grounding, Mapping)
+                        else None
+                    )
+                    if not isinstance(items, list) or not items:
+                        raise PreprocessorError(
+                            "multi_agent_branch_grounding_missing"
+                        )
+                    evidence = []
+                    for item in items:
+                        if not isinstance(item, Mapping):
+                            raise PreprocessorError(
+                                "multi_agent_branch_grounding_invalid"
+                            )
+                        source_sha = item.get("source_hash")
+                        if (
+                            not isinstance(source_sha, str)
+                            or SHA256_RE.fullmatch(source_sha) is None
+                        ):
+                            source_sha = analysis_sha256_value(item)
+                        evidence.append(
+                            {
+                                "evidence_ref": str(item["evidence_ref"]),
+                                "source_sha256": source_sha,
+                            }
+                        )
+                    actual_refs = {row["evidence_ref"] for row in evidence}
+                    if not set(draft["evidence_refs"]) <= actual_refs:
+                        raise PreprocessorError(
+                            "multi_agent_luna_evidence_binding_invalid"
+                        )
+                    finalized = host.finalize_investigation_read_session(
+                        subject=candidate.subject,
+                        context=context,
+                        branch_id=branch_id,
+                        stage_receipt=receipt,
+                    )
+                    core = {
+                        "schema_version": "read_branch_result_v1",
+                        "plan_id": request["plan_id"],
+                        "plan_sha256": request["plan_sha256"],
+                        "request_sha256": request["request_sha256"],
+                        "branch_id": branch_id,
+                        "subject": request["subject"],
+                        "capture_id": request["capture_id"],
+                        "frozen_task_sha256": request["frozen_task_sha256"],
+                        "release_id": request["release_id"],
+                        "activation_id": request["activation_id"],
+                        "authority_snapshot_sha256": request[
+                            "authority_snapshot_sha256"
+                        ],
+                        "generation": request["generation"],
+                        "status": "succeeded",
+                        "required": request["branch"]["required"],
+                        "purpose": request["branch"]["purpose"],
+                        "child_agent_id": "LUNA-" + session_id,
+                        "parent_agent_id": "TERRA-" + plan["plan_id"],
+                        "read_session_id": session_id,
+                        "mcp_launcher_pid": None,
+                        "mcp_launcher_pgid": None,
+                        "wave_index": wave_index,
+                        "calls": [
+                            copy.deepcopy(dict(call))
+                            for call in result.mcp_calls
+                        ],
+                        "evidence": evidence,
+                        "findings": copy.deepcopy(draft["findings"]),
+                        "conflicts": copy.deepcopy(draft["conflicts"]),
+                        "missing_evidence": copy.deepcopy(
+                            draft["missing_evidence"]
+                        ),
+                        "pagination_closed": receipt.get(
+                            "pagination_coverage_complete"
+                        ) is True,
+                        "duration_ms": float(result.duration_ms),
+                        "gate_decision": {
+                            "allowed": True,
+                            "scope": "task_bound_luna_investigation",
+                        },
+                        "formal_write_count": 0,
+                    }
+                    from read_branch import sha256_value as branch_sha256_value
+
+                    branch_result = {
+                        **core,
+                        "result_sha256": branch_sha256_value(core),
+                    }
+                    receipt["final_session_receipt_sha256"] = finalized[
+                        "receipt_sha256"
+                    ]
+                    receipt["final_session_receipt_ref"] = finalized[
+                        "receipt_ref"
+                    ]
+                    with inner_self.lock:
+                        inner_self.drafts[branch_id] = draft
+                        inner_self.receipts[branch_id] = receipt
+                        inner_self.attempts[branch_id] = {
+                            **inner_self.attempts.get(branch_id, {}),
+                            "provider_request_count": receipt[
+                                "provider_request_count"
+                            ],
+                            "mcp_tool_call_count": receipt[
+                                "mcp_tool_call_count"
+                            ],
+                            "model_call_count": 1,
+                            "duration_ms": result.duration_ms,
+                            "status": "succeeded",
+                            "formal_write_count": 0,
+                        }
+                    return branch_result
+                except Exception as exc:
+                    code = str(getattr(exc, "code", "branch_worker_exception"))
+                    terminal_status = (
+                        "timed_out"
+                        if "timeout" in code or "timed_out" in code
+                        else "cancelled"
+                        if "cancel" in code
+                        else "failed"
+                    )
+                    failure_receipt: dict[str, Any] | None = None
+                    if isinstance(context, Mapping) and child is not None:
+                        host = child._processing_host
+                        if host is not None:
+                            diagnostic = getattr(exc, "diagnostic", None)
+                            diagnostic_map = (
+                                dict(diagnostic)
+                                if isinstance(diagnostic, Mapping)
+                                else {}
+                            )
+                            if result is not None and receipt is None:
+                                try:
+                                    signed = host.sign_model_mcp_calls(
+                                        subject=candidate.subject,
+                                        stage_name=(
+                                            f"{candidate.subject}_luna_analysis"
+                                        ),
+                                        context=context,
+                                        calls=[
+                                            copy.deepcopy(call)
+                                            for call in result.mcp_calls
+                                        ],
+                                        transcript_sha256=str(
+                                            result.mcp_transcript_sha256
+                                        ),
+                                    )
+                                    session = context["mcp_read_session"]
+                                    receipt = {
+                                        "status": "ready",
+                                        "branch_id": branch_id,
+                                        "provider_stage_name": (
+                                            f"{candidate.subject}_luna_analysis"
+                                        ),
+                                        "read_session_id": session[
+                                            "read_session_id"
+                                        ],
+                                        "read_session_manifest_sha256": session[
+                                            "manifest_sha256"
+                                        ],
+                                        "evidence_generation": session[
+                                            "generation"
+                                        ],
+                                        "evidence_authority_fingerprint": session[
+                                            "authority_fingerprint"
+                                        ],
+                                        "mcp_call_receipt_sha256": signed[
+                                            "receipt_sha256"
+                                        ],
+                                        "mcp_call_receipt_ref": signed[
+                                            "receipt_ref"
+                                        ],
+                                        "mcp_transcript_sha256": (
+                                            result.mcp_transcript_sha256
+                                        ),
+                                        "mcp_transcript_ref": (
+                                            result.mcp_transcript_ref
+                                        ),
+                                        "raw_output_object_sha256": (
+                                            result.raw_output_object_sha256
+                                        ),
+                                        "raw_output_object_ref": (
+                                            result.raw_output_object_ref
+                                        ),
+                                        "stage_execution_receipt_sha256": (
+                                            result.stage_execution_receipt_sha256
+                                        ),
+                                        "stage_execution_receipt_ref": (
+                                            result.stage_execution_receipt_ref
+                                        ),
+                                        "mcp_tool_call_count": (
+                                            result.mcp_tool_call_count
+                                        ),
+                                        "provider_request_count": (
+                                            result.provider_request_count
+                                        ),
+                                        "pagination_coverage_complete": True,
+                                        "formal_write_count": 0,
+                                    }
+                                except Exception:
+                                    receipt = None
+                            if receipt is not None:
+                                mcp_count = int(
+                                    receipt.get("mcp_tool_call_count") or 0
+                                )
+                                provider_count = int(
+                                    receipt.get("provider_request_count") or 0
+                                )
+                                model_count = 1
+                                artifacts = {
+                                    "mcp_call_receipt_sha256": receipt.get(
+                                        "mcp_call_receipt_sha256"
+                                    ),
+                                    "mcp_call_receipt_ref": receipt.get(
+                                        "mcp_call_receipt_ref"
+                                    ),
+                                    "mcp_transcript_sha256": receipt.get(
+                                        "mcp_transcript_sha256"
+                                    ),
+                                    "mcp_transcript_ref": receipt.get(
+                                        "mcp_transcript_ref"
+                                    ),
+                                    "raw_output_object_sha256": receipt.get(
+                                        "raw_output_object_sha256"
+                                    ),
+                                    "raw_output_object_ref": receipt.get(
+                                        "raw_output_object_ref"
+                                    ),
+                                    "stage_execution_receipt_sha256": receipt.get(
+                                        "stage_execution_receipt_sha256"
+                                    ),
+                                    "stage_execution_receipt_ref": receipt.get(
+                                        "stage_execution_receipt_ref"
+                                    ),
+                                    "provider_request_count": provider_count,
+                                    "mcp_tool_call_count": mcp_count,
+                                    "model_call_count": model_count,
+                                    "pagination_coverage_complete": bool(
+                                        receipt.get(
+                                            "pagination_coverage_complete"
+                                        )
+                                    ),
+                                    "formal_write_count": 0,
+                                }
+                            else:
+                                raw_sha = diagnostic_map.get(
+                                    "raw_output_object_sha256"
+                                )
+                                raw_ref = diagnostic_map.get(
+                                    "raw_output_object_ref"
+                                )
+                                execution_sha = diagnostic_map.get(
+                                    "stage_execution_receipt_sha256"
+                                )
+                                execution_ref = diagnostic_map.get(
+                                    "stage_execution_receipt_ref"
+                                )
+                                model_count = int(
+                                    bool(execute_started or raw_sha or execution_sha)
+                                )
+                                provider_count = model_count
+                                mcp_count = 0
+                                artifacts = {
+                                    "raw_output_object_sha256": raw_sha,
+                                    "raw_output_object_ref": raw_ref,
+                                    "stage_execution_receipt_sha256": (
+                                        execution_sha
+                                    ),
+                                    "stage_execution_receipt_ref": execution_ref,
+                                    "provider_request_count": provider_count,
+                                    "mcp_tool_call_count": 0,
+                                    "model_call_count": model_count,
+                                    "pagination_coverage_complete": False,
+                                    "formal_write_count": 0,
+                                }
+                                artifacts = {
+                                    key: value for key, value in artifacts.items()
+                                    if value is not None
+                                }
+                                if model_count:
+                                    session = context["mcp_read_session"]
+                                    receipt = {
+                                        "status": terminal_status,
+                                        "branch_id": branch_id,
+                                        "provider_stage_name": (
+                                            f"{candidate.subject}_luna_analysis"
+                                        ),
+                                        "read_session_id": session[
+                                            "read_session_id"
+                                        ],
+                                        "read_session_manifest_sha256": session[
+                                            "manifest_sha256"
+                                        ],
+                                        "evidence_generation": session[
+                                            "generation"
+                                        ],
+                                        "evidence_authority_fingerprint": session[
+                                            "authority_fingerprint"
+                                        ],
+                                        "mcp_call_receipt_sha256": None,
+                                        "mcp_transcript_sha256": None,
+                                        "mcp_tool_call_count": 0,
+                                        "provider_request_count": model_count,
+                                        "formal_write_count": 0,
+                                    }
+                            try:
+                                finalized_failure = (
+                                    host.finalize_failed_investigation_read_session(
+                                        subject=candidate.subject,
+                                        context=context,
+                                        branch_id=branch_id,
+                                        error_code=(
+                                            code
+                                            if re.fullmatch(
+                                                r"[A-Za-z][A-Za-z0-9_.:-]{0,95}",
+                                                code,
+                                            )
+                                            else "branch_worker_exception"
+                                        ),
+                                        stage_receipt=receipt,
+                                        status=terminal_status,
+                                        execution_artifacts=artifacts,
+                                    )
+                                )
+                                failure_receipt = {
+                                    "status": terminal_status,
+                                    "branch_id": branch_id,
+                                    "error_code": code,
+                                    "provider_request_count": provider_count,
+                                    "mcp_tool_call_count": mcp_count,
+                                    "model_call_count": model_count,
+                                    "final_session_receipt_sha256": (
+                                        finalized_failure["receipt_sha256"]
+                                    ),
+                                    "final_session_receipt_ref": (
+                                        finalized_failure["receipt_ref"]
+                                    ),
+                                    "execution_artifacts": artifacts,
+                                    "duration_ms": round(
+                                        (time.monotonic() - branch_started) * 1000,
+                                        3,
+                                    ),
+                                    "formal_write_count": 0,
+                                }
+                            except Exception as closure_exc:
+                                failure_receipt = {
+                                    "status": terminal_status,
+                                    "branch_id": branch_id,
+                                    "error_code": code,
+                                    "session_closure_error_code": str(
+                                        getattr(
+                                            closure_exc,
+                                            "code",
+                                            "investigation_failure_closure_failed",
+                                        )
+                                    ),
+                                    "provider_request_count": provider_count,
+                                    "mcp_tool_call_count": mcp_count,
+                                    "model_call_count": model_count,
+                                    "duration_ms": round(
+                                        (time.monotonic() - branch_started) * 1000,
+                                        3,
+                                    ),
+                                    "formal_write_count": 0,
+                                }
+                    if failure_receipt is not None:
+                        with inner_self.lock:
+                            inner_self.receipts[branch_id] = failure_receipt
+                            inner_self.attempts[branch_id] = copy.deepcopy(
+                                failure_receipt
+                            )
+                    terminal = self._multi_agent_branch_failure(
+                        request, wave_index=wave_index, error=exc
+                    )
+                    terminal_core = {
+                        key: copy.deepcopy(value)
+                        for key, value in terminal.items()
+                        if key != "result_sha256"
+                    }
+                    if failure_receipt is not None:
+                        terminal_core["read_session_id"] = (
+                            context.get("mcp_read_session", {}).get(
+                                "read_session_id"
+                            )
+                            if isinstance(context, Mapping)
+                            else None
+                        )
+                        terminal_core["duration_ms"] = failure_receipt[
+                            "duration_ms"
+                        ]
+                        terminal_core["findings"] = [{
+                            "kind": "technical_diagnostic",
+                            "error_code": code,
+                            "failure_session_receipt_sha256": (
+                                failure_receipt.get(
+                                    "final_session_receipt_sha256"
+                                )
+                            ),
+                            "failure_session_receipt_ref": failure_receipt.get(
+                                "final_session_receipt_ref"
+                            ),
+                            "execution_artifacts": copy.deepcopy(
+                                failure_receipt.get("execution_artifacts") or {}
+                            ),
+                        }]
+                    from read_branch import sha256_value as branch_sha256_value
+
+                    return {
+                        **terminal_core,
+                        "result_sha256": branch_sha256_value(terminal_core),
+                    }
+
+        branch_worker = BranchWorker()
+        fanout = ReadFanoutScheduler(
+            physical_slots=min(
+                int(profile["physical_branch_slots"]),
+                len(plan["branches"]),
+            )
+        ).run(plan, branch_worker)
+        branch_results = [copy.deepcopy(dict(row)) for row in fanout["results"]]
+        bundle = build_read_bundle(plan, fanout)
+        successful = [row for row in branch_results if row["status"] == "succeeded"]
+        if not successful:
+            # Preserve the complete diagnostic set even though no final package
+            # may claim technical completion.
+            store.publish_analysis_object(
+                terra_initial,
+                ref_prefix="study-intake-terra-initial-analysis",
+            )
+            store.publish_analysis_object(
+                bundle, ref_prefix="study-intake-read-bundle"
+            )
+            for row in branch_results:
+                store.publish_analysis_object(
+                    row, ref_prefix="study-intake-luna-diagnostic-record"
+                )
+            raise PreprocessorError("multi_agent_all_luna_failed")
+
+        reports: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+        luna_outputs: list[dict[str, Any]] = []
+        for result in branch_results:
+            branch_id = str(result["branch_id"])
+            if result["status"] != "succeeded":
+                diagnostics.append(result)
+                luna_outputs.append(result)
+                continue
+            draft = branch_worker.drafts[branch_id]
+            receipt = branch_worker.receipts[branch_id]
+            context_receipt_ref = receipt.get("mcp_read_session_receipt_ref")
+            final_receipt_ref = receipt.get("final_session_receipt_ref")
+            execution_artifacts = {
+                "read_session_id": receipt["read_session_id"],
+                "read_session_manifest_sha256": receipt[
+                    "read_session_manifest_sha256"
+                ],
+                "opened_session_receipt_ref": context_receipt_ref,
+                "final_session_receipt_ref": final_receipt_ref,
+                "mcp_transcript_sha256": receipt["mcp_transcript_sha256"],
+                "mcp_transcript_ref": receipt["mcp_transcript_ref"],
+                "mcp_call_receipt_sha256": receipt[
+                    "mcp_call_receipt_sha256"
+                ],
+                "mcp_call_receipt_ref": receipt["mcp_call_receipt_ref"],
+                "raw_output_sha256": receipt["raw_output_object_sha256"],
+                "raw_output_ref": receipt["raw_output_object_ref"],
+                "stage_execution_receipt_sha256": receipt[
+                    "stage_execution_receipt_sha256"
+                ],
+                "stage_execution_receipt_ref": receipt[
+                    "stage_execution_receipt_ref"
+                ],
+                "normalization_receipt_sha256": receipt[
+                    "stage_normalization_receipt_sha256"
+                ],
+                "normalization_receipt_ref": receipt[
+                    "stage_normalization_receipt_ref"
+                ],
+            }
+            report = build_luna_investigation_report_v2(
+                plan=plan,
+                read_bundle=bundle,
+                branch_result=result,
+                summary=draft["summary"],
+                confidence=draft["confidence"],
+                execution_artifacts=execution_artifacts,
+            )
+            reports.append(report)
+            luna_outputs.append(report)
+
+        terra_input = build_terra_final_input_v2(
+            plan=plan,
+            read_bundle=bundle,
+            branch_results=branch_results,
+            luna_reports=reports,
+            diagnostic_records=diagnostics,
+        )
+        presented = [
+            {
+                "branch_id": row["branch_id"],
+                "input_kind": (
+                    "report" if row["outcome"] == "report" else "diagnostic"
+                ),
+            }
+            for row in terra_input["branch_coverage"]
+        ]
+        final_prompt = (
+            "Produce one strict Terra final draft. Read every complete Luna "
+            "report and every diagnostic below. Do not query any subject "
+            "database. Assess every branch in the presented order and preserve "
+            "unresolved conflicts and evidence gaps. formal_write_count=0.\n"
+            + json.dumps(
+                {
+                    "subject": candidate.subject,
+                    "capture_id": candidate.capture_id,
+                    "frozen_capture": capture,
+                    "terra_initial": terra_initial,
+                    "sealed_plan": plan,
+                    "read_bundle": bundle,
+                    "luna_reports": terra_input["luna_reports"],
+                    "luna_diagnostics": terra_input["luna_diagnostics"],
+                    "presented_branches": presented,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        final_result = self._execute_prompt(
+            prompt=final_prompt,
+            output_schema=schema_paths["terra_final"],
+            image_paths=(),
+            stage_name=f"{candidate.subject}_critical_review",
+            max_prompt_bytes=int(profile["max_prompt_bytes"]),
+            max_output_bytes=int(profile["max_output_bytes"]),
+            allowed_evidence_refs=(),
+            bind_evidence_schema=False,
+            subject=None,
+            processing_context=None,
+            model_role="terra_critical_review",
+            enforce_output_schema=True,
+        )
+        final_draft = validate_terra_final_draft(
+            final_result.payload,
+            subject=candidate.subject,
+            capture_id=candidate.capture_id,
+            presented_branches=presented,
+        )
+        final_receipt = self._stage_receipt(
+            final_result,
+            prompt_version="multi-agent-terra-final-v1",
+            prompt_sha256=sha256_text(final_prompt),
+            schema_sha256=str(final_result.schema_sha256),
+            result_sha256=analysis_sha256_value(final_draft),
+            requested_model="gpt-5.6-terra",
+            requested_reasoning_effort="max",
+            normalization_warnings=final_result.normalization_warnings,
+        )
+        final_receipt["provider_stage_name"] = (
+            f"{candidate.subject}_critical_review"
+        )
+        assessment_by_id = {
+            str(row["branch_id"]): row for row in final_draft["branch_assessments"]
+        }
+        terra_final = build_terra_final_report_v2(
+            terra_input=terra_input,
+            summary=final_draft["subject_sections"]["learning_summary"],
+            branch_assessments=[
+                {
+                    "branch_id": row["branch_id"],
+                    "outcome": row["outcome"],
+                    "disposition": assessment_by_id[row["branch_id"]][
+                        "disposition"
+                    ],
+                    "rationale": assessment_by_id[row["branch_id"]][
+                        "assessment"
+                    ],
+                }
+                for row in terra_input["branch_coverage"]
+            ],
+            subject_analysis={
+                "subject": candidate.subject,
+                "sections": [
+                    {
+                        "kind": key,
+                        "summary": value,
+                        "details": [],
+                        "evidence_refs": [],
+                        "confidence": "unknown",
+                    }
+                    for key, value in final_draft["subject_sections"].items()
+                ],
+                "formal_write_count": 0,
+            },
+            proposals=[{"summary": value} for value in final_draft["proposals"]],
+            conflicts=[{"summary": value} for value in final_draft["conflicts"]],
+            evidence_gaps=final_draft["gaps"],
+            sol_checklist=final_draft["checklist"],
+            warnings=final_draft["warnings"],
+        )
+        candidate_package = build_analysis_candidate(bundle)
+        issue_codes = sorted(
+            {
+                str(row.get("error_code") or row["status"])
+                for row in diagnostics
+            }
+        )
+        review = review_candidate(
+            bundle,
+            candidate_package,
+            outcome=("issues_found" if diagnostics or issue_codes else "accepted"),
+            issue_codes=issue_codes,
+            recommended_follow_up_reads=(),
+        )
+        legacy_handoff = build_sol_handoff(bundle, candidate_package, review)
+        sol_handoff = build_sol_handoff_v3(
+            legacy_handoff=legacy_handoff,
+            terra_input=terra_input,
+            terra_final_report=terra_final,
+        )
+        def terra_execution_binding(
+            receipt: Mapping[str, Any], provider_stage_name: str
+        ) -> dict[str, Any]:
+            return {
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "provider_stage_name": provider_stage_name,
+                "raw_output_sha256": receipt["raw_output_object_sha256"],
+                "raw_output_ref": receipt["raw_output_object_ref"],
+                "stage_execution_receipt_sha256": receipt[
+                    "stage_execution_receipt_sha256"
+                ],
+                "stage_execution_receipt_ref": receipt[
+                    "stage_execution_receipt_ref"
+                ],
+                "normalization_receipt_sha256": receipt[
+                    "stage_normalization_receipt_sha256"
+                ],
+                "normalization_receipt_ref": receipt[
+                    "stage_normalization_receipt_ref"
+                ],
+                "formal_write_count": 0,
+            }
+        package = publish_analysis_package_v2(
+            store,
+            capture=capture,
+            plan=plan,
+            read_bundle=bundle,
+            branch_results=branch_results,
+            terra_initial=terra_initial,
+            luna_outputs=luna_outputs,
+            terra_final=terra_final,
+            sol_handoff=sol_handoff,
+            terra_initial_execution=terra_execution_binding(
+                initial_receipt, f"{candidate.subject}_analysis"
+            ),
+            terra_final_execution=terra_execution_binding(
+                final_receipt, f"{candidate.subject}_critical_review"
+            ),
+        )
+        reopened = reopen_analysis_package_v2(
+            store, str(package["package_sha256"])
+        )
+        if reopened.get("package_id") != package.get("package_id"):
+            raise PreprocessorError("analysis_package_v2_reopen_invalid")
+
+        stage_rows: list[dict[str, Any]] = [
+            {
+                "stage": "terra_initial",
+                "provider_stage_name": f"{candidate.subject}_analysis",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "formal_write_count": 0,
+            }
+        ]
+        for branch in plan["branches"]:
+            branch_id = str(branch["branch_id"])
+            result = next(
+                row for row in branch_results if row["branch_id"] == branch_id
+            )
+            row = {
+                "stage": "luna_investigation_" + safe_component(branch_id),
+                "provider_stage_name": f"{candidate.subject}_luna_analysis",
+                "requested_model": "gpt-5.6-luna",
+                "requested_reasoning_effort": "max",
+                "status": result["status"],
+                "formal_write_count": 0,
+            }
+            if result["status"] == "succeeded":
+                report = next(
+                    item for item in reports if item["branch_id"] == branch_id
+                )
+                row.update(
+                    {
+                        "report_sha256": report["report_sha256"],
+                        "report_ref": (
+                            "study-intake-luna-investigation-report://sha256/"
+                            + report["report_sha256"]
+                        ),
+                    }
+                )
+            else:
+                row["error_code"] = result.get("error_code")
+            stage_rows.append(row)
+        stage_rows.append(
+            {
+                "stage": "terra_final",
+                "provider_stage_name": f"{candidate.subject}_critical_review",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "formal_write_count": 0,
+            }
+        )
+        luna_receipts: dict[str, dict[str, Any]] = {}
+        for result in branch_results:
+            branch_id = str(result["branch_id"])
+            if branch_id in branch_worker.receipts:
+                luna_receipts[branch_id] = copy.deepcopy(
+                    branch_worker.receipts[branch_id]
+                )
+            else:
+                luna_receipts[branch_id] = {
+                    "status": result["status"],
+                    "branch_id": branch_id,
+                    "error_code": result.get("error_code"),
+                    "diagnostic_result_sha256": result["result_sha256"],
+                    "formal_write_count": 0,
+                }
+        stage_receipts = {
+            "terra_initial": initial_receipt,
+            "luna_investigations": luna_receipts,
+            "terra_final": final_receipt,
+            "analysis_package_stages": stage_rows,
+        }
+        child_results = [
+            receipt for receipt in branch_worker.receipts.values()
+            if isinstance(receipt, Mapping)
+        ]
+        active_children = []
+        for child in branch_worker.children:
+            with child._process_lock:
+                active_children.extend(
+                    process for process in child._active_processes
+                    if process.poll() is None
+                )
+        if active_children:
+            raise PreprocessorError("multi_agent_branch_process_leak")
+        return ModelResult(
+            analysis=package,
+            duration_ms=(
+                initial_result.duration_ms
+                + final_result.duration_ms
+                + sum(int(row.get("duration_ms") or 0) for row in child_results)
+            ),
+            runtime_model=final_result.runtime_model,
+            runtime_reasoning_effort=final_result.runtime_reasoning_effort,
+            runtime_metadata_provenance=final_result.runtime_metadata_provenance,
+            pipeline_status="multi_agent_analysis_package_ready",
+            draft_analysis=terra_initial,
+            critical_review=terra_final,
+            stage_receipts=stage_receipts,
+            semantic_stage_count=2 + len(successful),
+            provider_request_count=(
+                initial_result.provider_request_count
+                + final_result.provider_request_count
+                + sum(
+                    int(row.get("provider_request_count") or 0)
+                    for row in child_results
+                )
+            ),
+            mcp_tool_call_count=sum(
+                int(row.get("mcp_tool_call_count") or 0)
+                for row in child_results
+            ),
+        )
+
     def run_analysis_package_v1(self, candidate: Candidate) -> ModelResult:
         """Run Terra -> Luna -> Terra final and persist AnalysisPackageV1."""
 
@@ -25311,19 +26736,22 @@ class CodexRunner:
         )
 
     def run(self, candidate: Candidate) -> ModelResult:
-        consumer_chain = self.config.get("consumer_stage_chain")
+        successor = self.config.get("analysis_package_v2")
         if (
-            isinstance(consumer_chain, Mapping)
-            and consumer_chain.get("enabled") is True
-            and self.config.get("execution_mode") == "live_authorized"
+            isinstance(successor, Mapping)
+            and successor.get("enabled") is True
+            and self.config.get("execution_mode")
+            in {"live_authorized", "fixture", "hosted_synthetic"}
         ):
-            analysis_package = self.config.get("analysis_package_v1")
-            if (
-                isinstance(analysis_package, Mapping)
-                and analysis_package.get("enabled") is True
-            ):
-                return self.run_analysis_package_v1(candidate)
-            raise PreprocessorError("consumer_stage_chain_live_driver_not_integrated")
+            return self.run_analysis_package_v2(candidate)
+        if any(
+            isinstance(self.config.get(key), Mapping)
+            and self.config[key].get("enabled") is True
+            for key in ("consumer_stage_chain", "analysis_package_v1")
+        ):
+            raise PreprocessorError("retired_analysis_route_not_available")
+        if self.config.get("execution_mode") == "live_authorized":
+            raise PreprocessorError("analysis_package_v2_required")
         if candidate.subject == "english":
             return self._run_english(candidate)
         math_profile = self.config.get(MATH_V2_PROFILE)
@@ -26540,12 +27968,6 @@ class Worker:
             dict(config.get("fixture_execution") or {})
         )
         model_config["models"] = copy.deepcopy(dict(config.get("models") or {}))
-        model_config["consumer_stage_chain"] = copy.deepcopy(
-            dict(config.get("consumer_stage_chain") or {})
-        )
-        model_config["analysis_package_v1"] = copy.deepcopy(
-            dict(config.get("analysis_package_v1") or {})
-        )
         model_config["analysis_package_v2"] = copy.deepcopy(
             dict(config.get("analysis_package_v2") or {})
         )

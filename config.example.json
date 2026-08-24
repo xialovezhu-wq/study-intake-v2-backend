@@ -82,30 +82,6 @@
       "tool_policy_path": "${RELEASE_ROOT}/plugin/kaoyan-study-intake/agents/terra-critical-review-tool-policy.json"
     }
   },
-  "consumer_stage_chain": {
-    "enabled": true,
-    "stages": [
-      {
-        "stage": "terra_analysis",
-        "role": "terra_analysis"
-      },
-      {
-        "stage": "luna_analysis",
-        "role": "luna_analysis"
-      },
-      {
-        "stage": "terra_critical_review",
-        "role": "terra_critical_review"
-      }
-    ],
-    "formal_write_count": 0
-  },
-  "analysis_package_v1": {
-    "enabled": true,
-    "stage_output_schema": "${RELEASE_ROOT}/schemas/analysis-stage-report-v2.json",
-    "max_prompt_bytes": 262144,
-    "max_output_bytes": 262144
-  },
   "analysis_package_v2": {
     "enabled": true,
     "terra_initial_output_schema": "${RELEASE_ROOT}/schemas/terra-initial-draft-v1.json",
@@ -173,7 +149,7 @@
     "shadow_evaluation_target_count": 20,
     "analysis_output_schema": "${RELEASE_ROOT}/schemas/luna-math-analysis-v2.json",
     "critical_review_output_schema": "${RELEASE_ROOT}/schemas/luna-math-critical-review-v3.json",
-    "package_output_schema": "${RELEASE_ROOT}/schemas/preprocess-package-v3.json",
+    "package_output_schema": "${RELEASE_ROOT}/schemas/preprocess-package-v4.json",
     "analysis_prompt_version": "study-intake-math-deep-analysis-v2",
     "critical_review_prompt_version": "study-intake-math-critical-review-v3-patch-only",
     "soft_runtime_warning_seconds": 3600,
@@ -212,7 +188,7 @@
     "enabled": true,
     "analysis_output_schema": "${RELEASE_ROOT}/schemas/luna-analysis-v2.json",
     "critical_review_output_schema": "${RELEASE_ROOT}/schemas/luna-critical-review-v2.json",
-    "package_output_schema": "${RELEASE_ROOT}/schemas/preprocess-package-v3.json",
+    "package_output_schema": "${RELEASE_ROOT}/schemas/preprocess-package-v4.json",
     "controlled_contract_path": "${RELEASE_ROOT}/schemas/luna-cs408-controlled-contract-v3.json",
     "analysis_prompt_version": "study-intake-cs408-deep-analysis-v2",
     "critical_review_prompt_version": "study-intake-cs408-critical-review-v2",
@@ -227,7 +203,7 @@
     "enabled": true,
     "analysis_output_schema": "${RELEASE_ROOT}/schemas/luna-english-candidate-draft-v1.json",
     "critical_review_output_schema": "${RELEASE_ROOT}/schemas/luna-english-critical-review-v1.json",
-    "package_output_schema": "${RELEASE_ROOT}/schemas/preprocess-package-v3.json",
+    "package_output_schema": "${RELEASE_ROOT}/schemas/preprocess-package-v4.json",
     "controlled_contract_path": "${RELEASE_ROOT}/schemas/luna-english-controlled-contract-v1.json",
     "analysis_prompt_version": "study-intake-english-luna-analysis-v1",
     "critical_review_prompt_version": "study-intake-english-luna-critical-review-v2",

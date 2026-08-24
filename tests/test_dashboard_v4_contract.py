@@ -209,6 +209,132 @@ class DashboardProjectionV4ContractTests(unittest.TestCase):
         )
 
 
+class DashboardMultiAgentV2ProjectionTests(unittest.TestCase):
+    @staticmethod
+    def package() -> dict:
+        stages = [
+            {
+                "stage": "terra_initial",
+                "provider_stage_name": "math_analysis",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "formal_write_count": 0,
+            },
+            {
+                "stage": "luna_investigation_evidence",
+                "provider_stage_name": "math_luna_analysis",
+                "requested_model": "gpt-5.6-luna",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "report_sha256": "1" * 64,
+                "report_ref": (
+                    "study-intake-luna-investigation-report://sha256/"
+                    + "1" * 64
+                ),
+                "formal_write_count": 0,
+            },
+            {
+                "stage": "luna_investigation_method",
+                "provider_stage_name": "math_luna_analysis",
+                "requested_model": "gpt-5.6-luna",
+                "requested_reasoning_effort": "max",
+                "status": "failed",
+                "error_code": "provider_call_failed",
+                "formal_write_count": 0,
+            },
+            {
+                "stage": "luna_investigation_conflict",
+                "provider_stage_name": "math_luna_analysis",
+                "requested_model": "gpt-5.6-luna",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "report_sha256": "2" * 64,
+                "report_ref": (
+                    "study-intake-luna-investigation-report://sha256/"
+                    + "2" * 64
+                ),
+                "formal_write_count": 0,
+            },
+            {
+                "stage": "terra_final",
+                "provider_stage_name": "math_critical_review",
+                "requested_model": "gpt-5.6-terra",
+                "requested_reasoning_effort": "max",
+                "status": "succeeded",
+                "formal_write_count": 0,
+            },
+        ]
+        return {
+            "schema_version": "study-intake-preprocess-package-v4",
+            "subject": "math",
+            "formal_write_count": 0,
+            "analysis_package_binding": {
+                "schema_version": "study-intake-analysis-package-binding-v1",
+                "id": "ANPKG2-" + "A" * 24,
+                "sha256": "3" * 64,
+                "ref": "study-intake-analysis-package://sha256/" + "3" * 64,
+            },
+            "model_contract": {
+                "mode": "multi_agent_v2",
+                "outer_stage_model": "gpt-5.6-terra",
+                "investigation_model": "gpt-5.6-luna",
+                "reasoning_effort": "max",
+                "dispatcher_visible_stage_count": 2,
+            },
+            "analysis": {
+                "schema_version": "terra_initial_analysis_v1",
+                "formal_write_count": 0,
+            },
+            "critical_review": {
+                "schema_version": "terra_final_report_v2",
+                "report_sha256": "4" * 64,
+                "formal_write_count": 0,
+            },
+            "stage_runtime": {
+                "analysis": {"analysis_package_stages": copy.deepcopy(stages)},
+                "critical_review": {
+                    "analysis_package_stages": copy.deepcopy(stages)
+                },
+            },
+        }
+
+    def test_authoritative_v2_package_projects_two_report_layers(self) -> None:
+        value = dashboard._analysis_package_v2_projection(self.package())
+        self.assertEqual(value, {
+            "analysis_package_schema_version": (
+                "study-intake-analysis-package-v2"
+            ),
+            "luna_report_count": 2,
+            "luna_diagnostic_count": 1,
+            "terra_final_report_sha256": "4" * 64,
+            "terra_final_schema_version": "terra_final_report_v2",
+        })
+
+    def test_tampered_or_legacy_package_only_hides_optional_projection(self) -> None:
+        legacy = {
+            "schema_version": "study-intake-preprocess-package-v3",
+            "formal_write_count": 0,
+        }
+        self.assertEqual(dashboard._analysis_package_v2_projection(legacy), {})
+        for mutate in (
+            lambda value: value["critical_review"].__setitem__(
+                "report_sha256", "tampered"
+            ),
+            lambda value: value["stage_runtime"]["analysis"][
+                "analysis_package_stages"
+            ][1].__setitem__("report_sha256", "5" * 64),
+            lambda value: value["stage_runtime"]["critical_review"][
+                "analysis_package_stages"
+            ][2].__setitem__("status", "succeeded"),
+        ):
+            package = self.package()
+            mutate(package)
+            self.assertEqual(
+                dashboard._analysis_package_v2_projection(package), {}
+            )
+
+
 class DashboardTaskDetailV2ContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.detail = {
@@ -308,6 +434,55 @@ class DashboardTaskDetailV2ContractTests(unittest.TestCase):
         })
         self.assertEqual(value["evidence"]["authority_snapshot_sha256"], "7" * 64)
         self.assertEqual(value["progress"]["stall_probe_status"], "healthy")
+        self.assertEqual(value["formal_write"]["formal_write_count"], 0)
+
+    def test_v2_report_projection_is_side_channel_only(self) -> None:
+        package = DashboardMultiAgentV2ProjectionTests.package()
+        authoritative = {
+            "completion": {
+                "unit_sha256": self.item["unit_sha256"],
+                "lease_fence": self.item["fence"],
+                "subject": self.item["subject"],
+                "capture_id": self.item["capture_id"],
+                "release_id": self.item["release_id"],
+                "outcome": "succeeded",
+                "package_sha256": "8" * 64,
+                "receipt_sha256": "9" * 64,
+            },
+            "package": package,
+        }
+        projected: dict[str, object] = {}
+        with (
+            mock.patch.object(
+                dashboard,
+                "_verify_completion_authority",
+                return_value=authoritative,
+            ),
+            mock.patch.object(
+                dashboard, "_verify_content_member_authority", return_value=None
+            ),
+            mock.patch.object(
+                dashboard, "_load_dispatch_events", return_value=([], [])
+            ),
+        ):
+            value = dashboard._public_dispatch_task_detail(
+                self.detail,
+                item=self.item,
+                runtime_root=ROOT,
+                include_raw=False,
+                detail_authority_verified=True,
+                output_schema_version=dashboard.TASK_DETAIL_SCHEMA_VERSION,
+                analysis_package_projection_out=projected,
+            )
+        schema = json.loads(
+            (ROOT / "schemas/dashboard-task-detail-v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(value), set(schema["required"]))
+        self.assertEqual(projected["luna_report_count"], 2)
+        self.assertEqual(projected["luna_diagnostic_count"], 1)
+        self.assertEqual(value["terminal"]["status"], "not_terminal")
         self.assertEqual(value["formal_write"]["formal_write_count"], 0)
 
     def test_public_v2_is_not_accepted_as_internal_v2(self) -> None:

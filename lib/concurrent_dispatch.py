@@ -65,6 +65,7 @@ DISPATCH_RULE_VERSION = DISPATCH_CONTRACT_SCHEMA
 FROZEN_TASK_SCHEMA = "study-intake-frozen-task-v1"
 LEASE_SCHEMA = "study-intake-dispatch-lease-v1"
 PACKAGE_SCHEMA = "study-intake-preprocess-package-v3"
+PACKAGE_SCHEMA_V4 = "study-intake-preprocess-package-v4"
 REVIEW_PACKAGE_SCHEMA = "study-intake-review-candidate-package-v1"
 RECEIPT_SCHEMA = "study-intake-concurrent-receipt-v1"
 COMPLETION_SCHEMA = "study-intake-concurrent-completion-v2"
@@ -87,6 +88,9 @@ MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA = (
 )
 MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V2 = (
     "study-intake-model-stage-execution-receipt-v2"
+)
+MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V3 = (
+    "study-intake-model-stage-execution-receipt-v3"
 )
 MODEL_STAGE_NORMALIZATION_RECEIPT_SCHEMA = (
     "study-intake-model-stage-normalization-receipt-v1"
@@ -8105,6 +8109,437 @@ class LeaseStore:
         )
         return contract, queue_entry
 
+    def _verify_analysis_package_v2_successor_locked(
+        self,
+        package: Mapping[str, Any],
+        *,
+        task: FrozenTask,
+        expected_outer_package_sha256: str,
+        report: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Deep-reopen the Multi-Agent V2 object behind one v4 envelope.
+
+        The dispatcher-visible Terra stages intentionally do not own MCP read
+        sessions.  Production acceptance therefore follows the immutable
+        AnalysisPackageV2 binding and its three-or-four Luna branch objects,
+        while the legacy v3 envelope continues to use its two-stage MCP gate.
+        """
+
+        error_code = "production_canary_analysis_package_v2_invalid"
+        try:
+            from analysis_package_v1 import (
+                AnalysisPackageError,
+                AnalysisPackageStore,
+                sha256_value as analysis_sha256_value,
+            )
+            from analysis_package_v2 import reopen_analysis_package_v2
+            from multi_agent_report_contract import (
+                MultiAgentReportContractError,
+                _validate_read_bundle,
+                validate_dual_report_plan,
+                validate_luna_investigation_report_v2,
+            )
+
+            binding = package.get("analysis_package_binding")
+            analysis = package.get("analysis")
+            critical = package.get("critical_review")
+            stage_runtime = package.get("stage_runtime")
+            if (
+                package.get("schema_version") != PACKAGE_SCHEMA_V4
+                or package.get("unit_sha256") != task.unit_sha256
+                or package.get("formal_write_count") != 0
+                or not isinstance(binding, Mapping)
+                or set(binding) != {"schema_version", "id", "sha256", "ref"}
+                or binding.get("schema_version")
+                != "study-intake-analysis-package-binding-v1"
+                or re.fullmatch(
+                    r"ANPKG2-[A-F0-9]{24}", str(binding.get("id") or "")
+                )
+                is None
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(binding.get("sha256") or "")
+                )
+                is None
+                or binding.get("ref")
+                != "study-intake-analysis-package://sha256/"
+                + str(binding.get("sha256"))
+                or not isinstance(analysis, Mapping)
+                or not isinstance(critical, Mapping)
+                or analysis.get("analysis_package_binding") != binding
+                or critical.get("analysis_package_binding") != binding
+                or analysis.get("schema_version")
+                != "terra_initial_analysis_v1"
+                or critical.get("schema_version") != "terra_final_report_v2"
+                or analysis.get("formal_write_count") != 0
+                or critical.get("formal_write_count") != 0
+                or not isinstance(stage_runtime, Mapping)
+                or set(stage_runtime) != {"analysis", "critical_review"}
+            ):
+                raise DispatchError(error_code)
+
+            analysis_runtime = stage_runtime.get("analysis")
+            critical_runtime = stage_runtime.get("critical_review")
+            if (
+                not isinstance(analysis_runtime, Mapping)
+                or not isinstance(critical_runtime, Mapping)
+                or analysis_runtime.get("mcp_tool_call_count") != 0
+                or critical_runtime.get("mcp_tool_call_count") != 0
+                or analysis_runtime.get("requested_model") != "gpt-5.6-terra"
+                or critical_runtime.get("requested_model") != "gpt-5.6-terra"
+                or analysis_runtime.get("requested_reasoning_effort")
+                != REQUIRED_REASONING_EFFORT
+                or critical_runtime.get("requested_reasoning_effort")
+                != REQUIRED_REASONING_EFFORT
+            ):
+                raise DispatchError(error_code)
+            analysis_topology = analysis_runtime.get(
+                "analysis_package_stages"
+            )
+            critical_topology = critical_runtime.get(
+                "analysis_package_stages"
+            )
+            if (
+                not isinstance(analysis_topology, list)
+                or critical_topology != analysis_topology
+                or len(analysis_topology) not in {5, 6}
+            ):
+                raise DispatchError(error_code)
+
+            store = AnalysisPackageStore(self.runtime_root)
+            inner = reopen_analysis_package_v2(
+                store, str(binding["sha256"])
+            )
+            plan = store.reopen_analysis_object(
+                str(inner["plan"]["sha256"])
+            )
+            read_bundle = store.reopen_analysis_object(
+                str(inner["read_bundle"]["sha256"])
+            )
+            checked_plan = validate_dual_report_plan(plan)
+            outputs = inner.get("luna_outputs")
+            plan_branches = checked_plan.get("branches")
+            if (
+                inner.get("package_id") != binding.get("id")
+                or inner.get("subject") != package.get("subject")
+                or inner.get("capture_id") != package.get("capture_id")
+                or inner.get("status") != "ready_for_nightly"
+                or inner.get("formal_write_count") != 0
+                or not isinstance(outputs, list)
+                or len(outputs) not in {3, 4}
+                or not isinstance(plan_branches, list)
+                or len(plan_branches) != len(outputs)
+            ):
+                raise DispatchError(error_code)
+
+            branch_ids = [
+                str(row.get("branch_id") or "")
+                if isinstance(row, Mapping)
+                else ""
+                for row in plan_branches
+            ]
+            output_ids = [
+                str(row.get("branch_id") or "")
+                if isinstance(row, Mapping)
+                else ""
+                for row in outputs
+            ]
+            if (
+                any(not branch_id for branch_id in branch_ids)
+                or len(branch_ids) != len(set(branch_ids))
+                or output_ids != branch_ids
+            ):
+                raise DispatchError(error_code)
+
+            branch_results: list[dict[str, Any]] = []
+            reopened_outputs: list[dict[str, Any]] = []
+            for output_binding in outputs:
+                if not isinstance(output_binding, Mapping):
+                    raise DispatchError(error_code)
+                branch_result = store.reopen_analysis_object(
+                    str(output_binding.get("branch_result_sha256") or "")
+                )
+                output = store.reopen_analysis_object(
+                    str(output_binding.get("sha256") or "")
+                )
+                result_core = {
+                    key: copy.deepcopy(value)
+                    for key, value in branch_result.items()
+                    if key != "result_sha256"
+                }
+                if (
+                    branch_result.get("branch_id")
+                    != output_binding.get("branch_id")
+                    or branch_result.get("result_sha256")
+                    != analysis_sha256_value(result_core)
+                    or branch_result.get("formal_write_count") != 0
+                    or output.get("branch_id")
+                    != output_binding.get("branch_id")
+                    or output.get("schema_version")
+                    != output_binding.get("schema_version")
+                ):
+                    raise DispatchError(error_code)
+                branch_results.append(branch_result)
+                reopened_outputs.append(output)
+            _validate_read_bundle(
+                read_bundle,
+                plan=plan,
+                branch_results=branch_results,
+            )
+
+            successful_count = 0
+            observed_mcp_calls = 0
+            successful_sessions: list[str] = []
+            successful_authority_fingerprints: list[str] = []
+            mcp_stage_grounding: dict[str, Any] = {}
+            subject = str(package.get("subject") or "")
+            for index, (
+                branch_id,
+                output_binding,
+                branch_result,
+                output,
+            ) in enumerate(
+                zip(
+                    branch_ids,
+                    outputs,
+                    branch_results,
+                    reopened_outputs,
+                ),
+                start=1,
+            ):
+                status = branch_result.get("status")
+                calls = branch_result.get("calls")
+                if (
+                    status not in {
+                        "succeeded",
+                        "failed",
+                        "cancelled",
+                        "timed_out",
+                    }
+                    or not isinstance(calls, list)
+                ):
+                    raise DispatchError(error_code)
+                observed_mcp_calls += len(calls)
+                stage_name = "luna_investigation_" + _safe_component(
+                    branch_id
+                )
+                topology_row = analysis_topology[index]
+                if (
+                    not isinstance(topology_row, Mapping)
+                    or topology_row.get("stage") != stage_name
+                    or topology_row.get("provider_stage_name")
+                    != f"{subject}_luna_analysis"
+                    or topology_row.get("requested_model") != "gpt-5.6-luna"
+                    or topology_row.get("requested_reasoning_effort")
+                    != REQUIRED_REASONING_EFFORT
+                    or topology_row.get("status") != status
+                    or topology_row.get("formal_write_count") != 0
+                ):
+                    raise DispatchError(error_code)
+
+                kind = output_binding.get("kind")
+                report_sha256 = output.get("report_sha256")
+                read_session_id: str | None = None
+                if kind == "investigation_report":
+                    if status != "succeeded" or not calls:
+                        raise DispatchError(error_code)
+                    if output.get("schema_version") != (
+                        "luna_investigation_report_v2"
+                    ):
+                        raise DispatchError(error_code)
+                    validate_luna_investigation_report_v2(
+                        output,
+                        plan=plan,
+                        read_bundle=read_bundle,
+                        branch_result=branch_result,
+                    )
+                    execution_artifacts = output.get(
+                        "execution_artifacts"
+                    )
+                    read_session_id = (
+                        str(execution_artifacts.get("read_session_id"))
+                        if isinstance(execution_artifacts, Mapping)
+                        else None
+                    )
+                    session_manifest_sha256 = (
+                        execution_artifacts.get(
+                            "read_session_manifest_sha256"
+                        )
+                        if isinstance(execution_artifacts, Mapping)
+                        else None
+                    )
+                    if not isinstance(session_manifest_sha256, str):
+                        raise DispatchError(error_code)
+                    _validate_unit_sha256(session_manifest_sha256)
+                    session_path = (
+                        self.runtime_root
+                        / "private"
+                        / "mcp-read-sessions"
+                        / "sha256"
+                        / session_manifest_sha256[:2]
+                        / f"{session_manifest_sha256}.json"
+                    )
+                    try:
+                        session_manifest = json.loads(
+                            session_path.read_text(encoding="utf-8")
+                        )
+                    except (
+                        OSError,
+                        UnicodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        raise DispatchError(error_code) from exc
+                    if session_path.is_symlink() or not isinstance(
+                        session_manifest, Mapping
+                    ):
+                        raise DispatchError(error_code)
+                    session_core = {
+                        key: copy.deepcopy(value)
+                        for key, value in session_manifest.items()
+                        if key != "manifest_sha256"
+                    }
+                    authority_fingerprint = session_manifest.get(
+                        "authority_fingerprint"
+                    )
+                    if (
+                        session_manifest.get("manifest_sha256")
+                        != session_manifest_sha256
+                        or analysis_sha256_value(session_core)
+                        != session_manifest_sha256
+                        or session_manifest.get("read_session_id")
+                        != read_session_id
+                        or session_manifest.get("subject") != subject
+                        or session_manifest.get("capture_id")
+                        != package.get("capture_id")
+                        or session_manifest.get("generation")
+                        != plan.get("generation")
+                        or session_manifest.get(
+                            "authority_snapshot_manifest_sha256"
+                        )
+                        != plan.get("authority_snapshot_sha256")
+                        or not isinstance(authority_fingerprint, str)
+                        or re.fullmatch(
+                            r"[0-9a-f]{64}", authority_fingerprint
+                        )
+                        is None
+                        or session_manifest.get("formal_write_count") != 0
+                    ):
+                        raise DispatchError(error_code)
+                    if (
+                        not isinstance(read_session_id, str)
+                        or not read_session_id
+                        or topology_row.get("report_sha256")
+                        != report_sha256
+                        or topology_row.get("report_ref")
+                        != "study-intake-luna-investigation-report://sha256/"
+                        + str(report_sha256)
+                        or topology_row.get("error_code") is not None
+                    ):
+                        raise DispatchError(error_code)
+                    successful_count += 1
+                    successful_sessions.append(read_session_id)
+                    successful_authority_fingerprints.append(
+                        authority_fingerprint
+                    )
+                elif kind == "diagnostic_record":
+                    if (
+                        status == "succeeded"
+                        or output != branch_result
+                        or output_binding.get("sha256")
+                        != output_binding.get("branch_result_sha256")
+                        or topology_row.get("report_sha256") is not None
+                        or topology_row.get("report_ref") is not None
+                        or topology_row.get("error_code")
+                        != branch_result.get("error_code")
+                    ):
+                        raise DispatchError(error_code)
+                else:
+                    raise DispatchError(error_code)
+                mcp_stage_grounding[stage_name] = {
+                    "branch_id": branch_id,
+                    "branch_result_sha256": branch_result["result_sha256"],
+                    "status": status,
+                    "read_session_id": read_session_id,
+                    "mcp_tool_call_count": len(calls),
+                    "report_sha256": (
+                        report_sha256
+                        if kind == "investigation_report"
+                        else None
+                    ),
+                }
+
+            if (
+                successful_count < 1
+                or observed_mcp_calls < 1
+                or len(set(successful_sessions)) != successful_count
+                or len(set(successful_authority_fingerprints)) != 1
+            ):
+                raise DispatchError(error_code)
+            expected_terra_rows = (
+                (
+                    analysis_topology[0],
+                    "terra_initial",
+                    f"{subject}_analysis",
+                ),
+                (
+                    analysis_topology[-1],
+                    "terra_final",
+                    f"{subject}_critical_review",
+                ),
+            )
+            if any(
+                not isinstance(row, Mapping)
+                or row.get("stage") != stage_name
+                or row.get("provider_stage_name") != provider_stage_name
+                or row.get("requested_model") != "gpt-5.6-terra"
+                or row.get("requested_reasoning_effort")
+                != REQUIRED_REASONING_EFFORT
+                or row.get("status") != "succeeded"
+                or row.get("formal_write_count") != 0
+                for row, stage_name, provider_stage_name in expected_terra_rows
+            ):
+                raise DispatchError(error_code)
+
+            if report is not None and (
+                report.get("schema_version")
+                != "study-intake-dispatch-report-v3"
+                or report.get("unit_sha256") != task.unit_sha256
+                or report.get("package_sha256")
+                != expected_outer_package_sha256
+                or report.get("analysis_package_binding") != binding
+                or report.get("analysis") != analysis
+                or report.get("critical_review") != critical
+                or report.get("terra_initial") != analysis
+                or report.get("terra_final") != critical
+                or report.get("stage_runtime") != stage_runtime
+                or report.get("formal_write_count") != 0
+            ):
+                raise DispatchError(error_code)
+
+            generation = str(plan.get("generation") or "")
+            if not generation:
+                raise DispatchError(error_code)
+            return {
+                "analysis_package_binding": copy.deepcopy(dict(binding)),
+                "observed_mcp_tool_call_count": observed_mcp_calls,
+                "read_session_id": successful_sessions[0],
+                "evidence_generation": generation,
+                "evidence_authority_fingerprint": (
+                    successful_authority_fingerprints[0]
+                ),
+                "mcp_stage_grounding": mcp_stage_grounding,
+            }
+        except DispatchError:
+            raise
+        except (
+            AnalysisPackageError,
+            MultiAgentReportContractError,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise DispatchError(error_code) from exc
+
     def finish_production_canary_task(
         self,
         task: FrozenTask,
@@ -8220,6 +8655,7 @@ class LeaseStore:
             task_declared_evidence_refs_sha256: str | None = None
             process_execution: dict[str, Any] | None = None
             ordinary_succeeded = False
+            successor_succeeded = False
             quality_reviewable = reviewable
             if isinstance(completion, Mapping):
                 if (
@@ -8329,9 +8765,15 @@ class LeaseStore:
                         and quality_package.get("formal_write_eligible")
                         is False
                     )
+                    successor_succeeded = bool(
+                        _sha256_bytes(quality_package_bytes) == package_sha256
+                        and isinstance(quality_package, Mapping)
+                        and quality_package.get("schema_version")
+                        == PACKAGE_SCHEMA_V4
+                    )
                 ordinary_succeeded = succeeded and not quality_success
                 quality_reviewable = reviewable or quality_success
-                if ordinary_succeeded:
+                if ordinary_succeeded and not successor_succeeded:
                     if not isinstance(runtime, Mapping):
                         raise DispatchError(
                             "production_canary_mcp_grounding_missing"
@@ -8575,7 +9017,12 @@ class LeaseStore:
                         or package.get("unit_sha256") != task.unit_sha256
                         or (
                             ordinary_succeeded
-                            and package.get("schema_version") != PACKAGE_SCHEMA
+                            and package.get("schema_version")
+                            != (
+                                PACKAGE_SCHEMA_V4
+                                if successor_succeeded
+                                else PACKAGE_SCHEMA
+                            )
                         )
                         or (
                             quality_reviewable
@@ -8716,6 +9163,53 @@ class LeaseStore:
                     ):
                         raise DispatchError(
                             "production_canary_report_reopen_failed"
+                        )
+                    if successor_succeeded:
+                        successor_evidence = (
+                            self._verify_analysis_package_v2_successor_locked(
+                                package,
+                                task=task,
+                                expected_outer_package_sha256=str(
+                                    package_sha256
+                                ),
+                                report=report_value,
+                            )
+                        )
+                        observed_mcp_calls = int(
+                            successor_evidence[
+                                "observed_mcp_tool_call_count"
+                            ]
+                        )
+                        read_session_id = str(
+                            successor_evidence["read_session_id"]
+                        )
+                        evidence_generation = str(
+                            successor_evidence["evidence_generation"]
+                        )
+                        evidence_authority_fingerprint = str(
+                            successor_evidence[
+                                "evidence_authority_fingerprint"
+                            ]
+                        )
+                        mcp_stage_grounding = copy.deepcopy(
+                            successor_evidence["mcp_stage_grounding"]
+                        )
+                        raw_task_refs = task.frozen_payload.get(
+                            "allowed_evidence_refs"
+                        )
+                        if not isinstance(raw_task_refs, list) or not all(
+                            isinstance(ref, str) and ref
+                            for ref in raw_task_refs
+                        ):
+                            raise DispatchError(
+                                "production_canary_task_evidence_refs_invalid"
+                            )
+                        task_declared_evidence_refs_sha256 = (
+                            _sha256_bytes(
+                                _canonical_bytes(
+                                    sorted(set(raw_task_refs))
+                                )
+                            )
                         )
                     report_reopen_status = "json_markdown_package_verified"
                 if quality_reviewable:
@@ -9128,8 +9622,11 @@ class LeaseStore:
                 updated["last_analysis_status"] = "completed"
                 updated["last_critical_review_status"] = (
                     "completed"
-                    if isinstance(mcp_stage_grounding, Mapping)
-                    and "critical_review" in mcp_stage_grounding
+                    if successor_succeeded
+                    or (
+                        isinstance(mcp_stage_grounding, Mapping)
+                        and "critical_review" in mcp_stage_grounding
+                    )
                     else "not_started"
                 )
                 # production-canary-state-v3 is historical and immutable.
@@ -9143,7 +9640,10 @@ class LeaseStore:
                 updated["last_evidence_authority_fingerprint"] = (
                     evidence_authority_fingerprint
                 )
-                if isinstance(mcp_stage_grounding, Mapping):
+                if (
+                    isinstance(mcp_stage_grounding, Mapping)
+                    and not successor_succeeded
+                ):
                     if isinstance(
                         mcp_stage_grounding.get("analysis"), Mapping
                     ):
@@ -13748,7 +14248,29 @@ class LeaseStore:
             or provider_process_exit_sha256 is None
         ):
             raise DispatchError("model_stage_execution_process_closure_missing")
-        if execution_status == "completed" and any(
+        task_subject = str(task.frozen_payload.get("subject") or "")
+        terra_mcp_free_completed = bool(
+            execution_status == "completed"
+            and requested_model == "gpt-5.6-terra"
+            and task_subject in {"math", "cs408", "english"}
+            and stage_name
+            in {
+                f"{task_subject}_analysis",
+                f"{task_subject}_critical_review",
+            }
+            and all(value == 0 for value in counts)
+            and last_mcp_error_code is None
+            and all(
+                value is None
+                for value in (
+                    authority_snapshot_manifest_sha256,
+                    mcp_grounding_manifest_sha256,
+                    mcp_transport_sha256,
+                    mcp_transcript_sha256,
+                )
+            )
+        )
+        if execution_status == "completed" and not terra_mcp_free_completed and any(
             value is None
             for value in (
                 raw_output_object_sha256,
@@ -13817,7 +14339,9 @@ class LeaseStore:
             receipt = self._seal(
                 {
                     "schema_version": (
-                        MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V2
+                        MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V3
+                        if terra_mcp_free_completed
+                        else MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA_V2
                         if requested_model == "gpt-5.6-terra"
                         or _is_luna_analysis_provider_stage(provider_stage)
                         else MODEL_STAGE_EXECUTION_RECEIPT_SCHEMA
@@ -14824,6 +15348,111 @@ class LeaseStore:
             published_error_code = (
                 None if quality_review_success else error_code
             )
+            analysis_package_successor = bool(
+                analysis is not None and analysis.analysis_package_stages
+            )
+            analysis_package_binding: dict[str, Any] | None = None
+            if analysis_package_successor:
+                if critical_review is None:
+                    raise DispatchError("analysis_package_dispatch_incomplete")
+                analysis_binding = analysis.payload.get(
+                    "analysis_package_binding"
+                )
+                critical_binding = critical_review.payload.get(
+                    "analysis_package_binding"
+                )
+                topology = analysis.analysis_package_stages
+                topology_rows_valid = (
+                    len(topology) in {5, 6}
+                    and all(isinstance(row, Mapping) for row in topology)
+                )
+                topology_names = (
+                    [str(row.get("stage") or "") for row in topology]
+                    if topology_rows_valid
+                    else []
+                )
+                if (
+                    not isinstance(analysis_binding, Mapping)
+                    or set(analysis_binding)
+                    != {"schema_version", "id", "sha256", "ref"}
+                    or analysis_binding.get("schema_version")
+                    != "study-intake-analysis-package-binding-v1"
+                    or not isinstance(analysis_binding.get("id"), str)
+                    or re.fullmatch(
+                        r"ANPKG2-[A-F0-9]{24}",
+                        str(analysis_binding.get("id") or ""),
+                    )
+                    is None
+                    or not isinstance(analysis_binding.get("sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(analysis_binding.get("sha256") or ""),
+                    )
+                    is None
+                    or analysis_binding.get("ref")
+                    != "study-intake-analysis-package://sha256/"
+                    + str(analysis_binding.get("sha256"))
+                    or critical_binding != analysis_binding
+                    or critical_review.analysis_package_stages != topology
+                    or analysis.requested_model != "gpt-5.6-terra"
+                    or critical_review.requested_model != "gpt-5.6-terra"
+                    or analysis.requested_reasoning_effort
+                    != REQUIRED_REASONING_EFFORT
+                    or critical_review.requested_reasoning_effort
+                    != REQUIRED_REASONING_EFFORT
+                    or analysis.payload.get("schema_version")
+                    != "terra_initial_analysis_v1"
+                    or critical_review.payload.get("schema_version")
+                    != "terra_final_report_v2"
+                    or analysis.payload.get("formal_write_count") != 0
+                    or critical_review.payload.get("formal_write_count") != 0
+                    or not topology_rows_valid
+                    or topology_names[0] != "terra_initial"
+                    or topology_names[-1] != "terra_final"
+                    or len(topology_names) != len(set(topology_names))
+                    or any(
+                        re.fullmatch(
+                            r"luna_investigation_[A-Za-z0-9][A-Za-z0-9_.-]*",
+                            name,
+                        )
+                        is None
+                        for name in topology_names[1:-1]
+                    )
+                    or topology[0].get("provider_stage_name")
+                    != f"{subject}_analysis"
+                    or topology[-1].get("provider_stage_name")
+                    != f"{subject}_critical_review"
+                    or any(
+                        row.get("provider_stage_name")
+                        != f"{subject}_luna_analysis"
+                        for row in topology[1:-1]
+                    )
+                    or topology[0].get("requested_model")
+                    != "gpt-5.6-terra"
+                    or topology[-1].get("requested_model")
+                    != "gpt-5.6-terra"
+                    or any(
+                        row.get("requested_model") != "gpt-5.6-luna"
+                        for row in topology[1:-1]
+                    )
+                    or any(
+                        row.get("requested_reasoning_effort")
+                        != REQUIRED_REASONING_EFFORT
+                        or row.get("formal_write_count") != 0
+                        for row in topology
+                    )
+                ):
+                    raise DispatchError(
+                        "analysis_package_dispatch_binding_invalid"
+                    )
+                analysis_package_binding = copy.deepcopy(
+                    dict(analysis_binding)
+                )
+            elif (
+                critical_review is not None
+                and critical_review.analysis_package_stages
+            ):
+                raise DispatchError("analysis_package_dispatch_binding_invalid")
             if outcome == "succeeded" or reviewable:
                 if analysis is None or critical_review is None:
                     if not reviewable or analysis is None:
@@ -14831,7 +15460,11 @@ class LeaseStore:
                 _validate_unit_sha256(str(release_id or ""))
                 package = {
                     "schema_version": (
-                        REVIEW_PACKAGE_SCHEMA if reviewable else PACKAGE_SCHEMA
+                        PACKAGE_SCHEMA_V4
+                        if analysis_package_successor
+                        else REVIEW_PACKAGE_SCHEMA
+                        if reviewable
+                        else PACKAGE_SCHEMA
                     ),
                     "unit_sha256": lease.unit_sha256,
                     "lease_fence": lease.fence,
@@ -14842,8 +15475,20 @@ class LeaseStore:
                     "loaded_core_sha256": loaded_core_sha256,
                     "task": task.as_dict(),
                     "model_contract": {
-                        "model": REQUIRED_MODEL,
-                        "reasoning_effort": REQUIRED_REASONING_EFFORT,
+                        **(
+                            {
+                                "mode": "multi_agent_v2",
+                                "outer_stage_model": "gpt-5.6-terra",
+                                "investigation_model": "gpt-5.6-luna",
+                                "reasoning_effort": REQUIRED_REASONING_EFFORT,
+                                "dispatcher_visible_stage_count": 2,
+                            }
+                            if analysis_package_successor
+                            else {
+                                "model": REQUIRED_MODEL,
+                                "reasoning_effort": REQUIRED_REASONING_EFFORT,
+                            }
+                        )
                     },
                     "pipeline": (
                         ["analysis", "critical_review"]
@@ -14866,6 +15511,10 @@ class LeaseStore:
                     },
                     "formal_write_count": 0,
                 }
+                if analysis_package_successor:
+                    package["analysis_package_binding"] = copy.deepcopy(
+                        analysis_package_binding
+                    )
                 if reviewable:
                     warning_rows = [
                         copy.deepcopy(dict(row))
@@ -14923,7 +15572,9 @@ class LeaseStore:
                 )
                 report_json = {
                     "schema_version": (
-                        "study-intake-review-candidate-terminal-v1"
+                        "study-intake-dispatch-report-v3"
+                        if analysis_package_successor
+                        else "study-intake-review-candidate-terminal-v1"
                         if reviewable
                         else "study-intake-dispatch-report-v2"
                     ),
@@ -14941,6 +15592,23 @@ class LeaseStore:
                     ),
                     "formal_write_count": 0,
                 }
+                if analysis_package_successor:
+                    report_json.update(
+                        {
+                            "analysis_package_binding": copy.deepcopy(
+                                analysis_package_binding
+                            ),
+                            "terra_initial": copy.deepcopy(
+                                dict(analysis.payload)
+                            ),
+                            "terra_final": copy.deepcopy(
+                                dict(critical_review.payload)
+                            ),
+                            "stage_runtime": copy.deepcopy(
+                                package["stage_runtime"]
+                            ),
+                        }
+                    )
                 if critical_review is None:
                     report_json["critical_review"] = None
                 if reviewable:
@@ -14982,8 +15650,13 @@ class LeaseStore:
                     "study-intake-report://sha256/" + report_json_sha256
                 )
                 markdown = (
-                    f"# {subject} Luna report\n\n"
-                    f"- capture_id: {capture_id}\n"
+                    f"# {subject} "
+                    + (
+                        "Multi-Agent V2 report\n\n"
+                        if analysis_package_successor
+                        else "Luna report\n\n"
+                    )
+                    + f"- capture_id: {capture_id}\n"
                     f"- unit_sha256: {lease.unit_sha256}\n"
                     f"- report_json_ref: {report_json_ref}\n"
                     f"- package_ref: {package_ref}\n"
@@ -15404,6 +16077,20 @@ class LeaseStore:
                     and package_frozen.get("capture_id") == capture_id
                     else None
                 )
+                expected_package_model_contract = (
+                    {
+                        "mode": "multi_agent_v2",
+                        "outer_stage_model": "gpt-5.6-terra",
+                        "investigation_model": "gpt-5.6-luna",
+                        "reasoning_effort": REQUIRED_REASONING_EFFORT,
+                        "dispatcher_visible_stage_count": 2,
+                    }
+                    if package.get("schema_version") == PACKAGE_SCHEMA_V4
+                    else {
+                        "model": REQUIRED_MODEL,
+                        "reasoning_effort": REQUIRED_REASONING_EFFORT,
+                    }
+                )
                 if (
                     package.get("unit_sha256") != owner_common["unit_sha256"]
                     or package.get("lease_fence") != owner_common["lease_fence"]
@@ -15422,10 +16109,7 @@ class LeaseStore:
                         )
                     )
                     or package.get("model_contract")
-                    != {
-                        "model": REQUIRED_MODEL,
-                        "reasoning_effort": REQUIRED_REASONING_EFFORT,
-                    }
+                    != expected_package_model_contract
                 ):
                     raise DispatchError("package_binding_mismatch")
                 if (
@@ -15468,6 +16152,12 @@ class LeaseStore:
                             "authority_stage_runtime_binding_mismatch"
                         )
                     StageResult.coerce({"payload": {}, **dict(runtime)})
+                if package.get("schema_version") == PACKAGE_SCHEMA_V4:
+                    self._verify_analysis_package_v2_successor_locked(
+                        package,
+                        task=FrozenTask.from_mapping(package["task"]),
+                        expected_outer_package_sha256=str(package_sha256),
+                    )
             elif completion.get("outcome") == "succeeded":
                 raise DispatchError("successful_completion_package_missing")
             member_publication: dict[str, Any] | None = None

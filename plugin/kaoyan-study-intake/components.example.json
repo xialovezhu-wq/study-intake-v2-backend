@@ -235,24 +235,6 @@
         "tool_policy": "agents/terra-critical-review-tool-policy.json"
       }
     },
-    "consumer_stage_chain": {
-      "enabled": true,
-      "stages": [
-        {
-          "stage": "terra_analysis",
-          "role": "terra_analysis"
-        },
-        {
-          "stage": "luna_analysis",
-          "role": "luna_analysis"
-        },
-        {
-          "stage": "terra_critical_review",
-          "role": "terra_critical_review"
-        }
-      ],
-      "formal_write_count": 0
-    },
     "logical_branch_limit": null,
     "physical_concurrency_mode": "dynamic",
     "overflow_policy": "queue_in_waves",

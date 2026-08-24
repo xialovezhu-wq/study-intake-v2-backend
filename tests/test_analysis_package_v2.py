@@ -39,6 +39,36 @@ from read_bundle import build_read_bundle  # noqa: E402
 
 
 class AnalysisPackageV2Tests(unittest.TestCase):
+    @staticmethod
+    def _terra_execution(phase: str, seed: str) -> dict:
+        stage = {
+            "initial": "math_analysis",
+            "final": "math_critical_review",
+        }[phase]
+        raw_sha = seed * 64
+        execution_sha = chr(ord(seed) + 1) * 64
+        normalization_sha = chr(ord(seed) + 2) * 64
+        return {
+            "requested_model": "gpt-5.6-terra",
+            "requested_reasoning_effort": "max",
+            "provider_stage_name": stage,
+            "raw_output_sha256": raw_sha,
+            "raw_output_ref": (
+                "study-intake-direct-model-stage-raw://sha256/" + raw_sha
+            ),
+            "stage_execution_receipt_sha256": execution_sha,
+            "stage_execution_receipt_ref": (
+                "study-intake-direct-model-stage-execution://sha256/"
+                + execution_sha
+            ),
+            "normalization_receipt_sha256": normalization_sha,
+            "normalization_receipt_ref": (
+                "study-intake-direct-model-stage-normalization://sha256/"
+                + normalization_sha
+            ),
+            "formal_write_count": 0,
+        }
+
     def _inputs(self, count: int = 3) -> dict:
         read_plan = plan(count)
         read_bundle = bundle(read_plan)
@@ -88,7 +118,9 @@ class AnalysisPackageV2Tests(unittest.TestCase):
         return {
             "capture": capture, "plan": read_plan, "read_bundle": read_bundle,
             "branch_results": results, "terra_initial": initial,
+            "terra_initial_execution": self._terra_execution("initial", "1"),
             "luna_outputs": reports, "terra_final": final,
+            "terra_final_execution": self._terra_execution("final", "4"),
             "sol_handoff": handoff,
         }
 
@@ -99,6 +131,14 @@ class AnalysisPackageV2Tests(unittest.TestCase):
                 package = publish_analysis_package_v2(store, **self._inputs(count))
                 self.assertEqual(len(package["luna_outputs"]), count)
                 self.assertNotIn("summary", package["luna_outputs"][0])
+                self.assertEqual(
+                    package["terra_initial_execution"]["provider_stage_name"],
+                    "math_analysis",
+                )
+                self.assertEqual(
+                    package["terra_final_execution"]["provider_stage_name"],
+                    "math_critical_review",
+                )
                 reopened = reopen_analysis_package_v2(
                     store, package["package_sha256"]
                 )
@@ -268,6 +308,81 @@ class AnalysisPackageV2Tests(unittest.TestCase):
                 AnalysisPackageError, "analysis_object_no_clobber_conflict"
             ):
                 publish_analysis_package_v2(store, **changed)
+
+    def test_terra_execution_bindings_are_required_and_fail_closed(self) -> None:
+        mutations = []
+        for field, changed in (
+            ("requested_model", "gpt-5.6-luna"),
+            ("requested_reasoning_effort", "high"),
+            ("provider_stage_name", "math_critical_review"),
+            ("formal_write_count", 1),
+        ):
+            value = self._terra_execution("initial", "1")
+            value[field] = changed
+            mutations.append(value)
+        missing = self._terra_execution("initial", "1")
+        missing.pop("raw_output_ref")
+        mutations.append(missing)
+        extra = self._terra_execution("initial", "1")
+        extra["unexpected"] = True
+        mutations.append(extra)
+        bad_ref = self._terra_execution("initial", "1")
+        bad_ref["normalization_receipt_ref"] = (
+            "study-intake-direct-model-stage-normalization://sha256/" + "f" * 64
+        )
+        mutations.append(bad_ref)
+        for index, execution in enumerate(mutations):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as folder:
+                values = self._inputs(3)
+                values["terra_initial_execution"] = execution
+                with self.assertRaisesRegex(
+                    AnalysisPackageError,
+                    "terra_execution_(binding|artifact)_invalid",
+                ):
+                    publish_analysis_package_v2(
+                        AnalysisPackageStore(Path(folder)), **values
+                    )
+
+    def test_deep_reopen_rejects_terra_execution_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = AnalysisPackageStore(Path(folder))
+            package = publish_analysis_package_v2(store, **self._inputs(3))
+            tampered = {
+                key: copy.deepcopy(value)
+                for key, value in package.items()
+                if key not in {"package_sha256", "package_ref"}
+            }
+            tampered["terra_final_execution"]["provider_stage_name"] = (
+                "english_critical_review"
+            )
+            digest, _ = store._publish(
+                store.package_root,
+                tampered,
+                "study-intake-analysis-package",
+            )
+            with self.assertRaisesRegex(
+                AnalysisPackageError, "terra_execution_binding_invalid"
+            ):
+                reopen_analysis_package_v2(store, digest)
+
+    def test_changed_terra_execution_cannot_clobber_v2_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = AnalysisPackageStore(Path(folder))
+            values = self._inputs(3)
+            first = publish_analysis_package_v2(store, **values)
+            changed = copy.deepcopy(values)
+            changed["terra_final_execution"] = self._terra_execution("final", "7")
+            with self.assertRaisesRegex(
+                AnalysisPackageError, "analysis_object_no_clobber_conflict"
+            ):
+                publish_analysis_package_v2(store, **changed)
+            self.assertEqual(
+                reopen_analysis_package_v2(store, first["package_sha256"]),
+                {
+                    key: value for key, value in first.items()
+                    if key not in {"package_sha256", "package_ref"}
+                },
+            )
 
     def test_new_schema_mirrors_and_package_instance(self) -> None:
         for name in ("terra-initial-analysis-v1.json", "analysis-package-v2.json"):

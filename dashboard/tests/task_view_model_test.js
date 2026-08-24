@@ -8,6 +8,7 @@ const {
   assertItemsResponse,
   deriveLane,
   itemToViewModel,
+  analysisPackageProjection,
   assertDetailResponse,
   detailEvidence,
   detailSections,
@@ -62,8 +63,34 @@ assert.ok(sections.luna_provider.some((line) => line.includes("Provider") && lin
 assert.ok(sections.mcp.some((line) => line.includes("MCP") && line.includes("不复制 Analysis")));
 assert.ok(sections.quality_findings.includes("critical_review.execution_status=not_started"));
 
+const multiAgentPayload = structuredClone(detailPayload);
+Object.assign(multiAgentPayload.item, {
+  analysis_package_schema_version: "study-intake-analysis-package-v2",
+  luna_report_count: 3,
+  luna_diagnostic_count: 1,
+  terra_final_report_sha256: "8".repeat(64),
+  terra_final_schema_version: "terra_final_report_v2",
+});
+const multiAgentDetail = assertDetailResponse(multiAgentPayload, english);
+const multiAgentSections = detailSections(english, multiAgentDetail);
+assert.equal(multiAgentDetail.analysis_package_projection.luna_report_count, 3);
+assert.ok(multiAgentSections.luna_provider.includes("Luna 独立调查报告：3 份"));
+assert.ok(multiAgentSections.luna_provider.includes("Luna 失败诊断：1 份"));
+assert.ok(multiAgentSections.report.some((line) => line.includes("Terra 最终报告")));
+
+const tamperedProjection = {
+  ...multiAgentPayload.item,
+  terra_final_report_sha256: "tampered",
+};
+assert.equal(analysisPackageProjection(tamperedProjection), null);
+const tamperedPayload = structuredClone(multiAgentPayload);
+tamperedPayload.item.terra_final_report_sha256 = "tampered";
+const degradedDetail = assertDetailResponse(tamperedPayload, english);
+assert.equal(degradedDetail.analysis_package_projection, undefined);
+assert.ok(!detailSections(english, degradedDetail).summary.some((line) => line.includes("Multi-Agent V2")));
+
 const missingField = { ...itemsPayload.items[0] };
 delete missingField.execution_status;
 assert.throws(() => deriveLane(missingField), DashboardContractError);
 
-console.log("task_view_model_test: 18 assertions passed");
+console.log("task_view_model_test: 26 assertions passed");

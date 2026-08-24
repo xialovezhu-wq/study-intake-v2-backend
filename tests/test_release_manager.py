@@ -56,6 +56,17 @@ class ReleaseManagerTests(unittest.TestCase):
         (self.source / "schemas" / "preprocess-package-v3.json").write_text(
             "{}\n", encoding="utf-8"
         )
+        (self.source / "schemas" / "preprocess-package-v4.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        for schema_name in (
+            "terra-initial-draft-v1.json",
+            "luna-investigation-draft-v1.json",
+            "terra-final-draft-v1.json",
+        ):
+            (self.source / "schemas" / schema_name).write_text(
+                "{}\n", encoding="utf-8"
+            )
         for role in release.REQUIRED_MODEL_CONTRACT["roles"].values():
             for key in ("agent_config", "tool_policy"):
                 relative = Path(role[key])
@@ -119,19 +130,34 @@ class ReleaseManagerTests(unittest.TestCase):
                     "model": "gpt-5.6-luna",
                     "reasoning_effort": "max",
                 },
+                "analysis_package_v2": {
+                    "enabled": True,
+                    "terra_initial_output_schema": (
+                        "${RELEASE_ROOT}/schemas/terra-initial-draft-v1.json"
+                    ),
+                    "luna_investigation_output_schema": (
+                        "${RELEASE_ROOT}/schemas/luna-investigation-draft-v1.json"
+                    ),
+                    "terra_final_output_schema": (
+                        "${RELEASE_ROOT}/schemas/terra-final-draft-v1.json"
+                    ),
+                    "physical_branch_slots": 4,
+                    "max_prompt_bytes": 524288,
+                    "max_output_bytes": 524288,
+                },
                 "math_deep_v2": {
                     "package_output_schema": (
-                        "${RELEASE_ROOT}/schemas/preprocess-package-v3.json"
+                        "${RELEASE_ROOT}/schemas/preprocess-package-v4.json"
                     )
                 },
                 "cs408_deep_v2": {
                     "package_output_schema": (
-                        "${RELEASE_ROOT}/schemas/preprocess-package-v3.json"
+                        "${RELEASE_ROOT}/schemas/preprocess-package-v4.json"
                     )
                 },
                 "english_two_pass_v1": {
                     "package_output_schema": (
-                        "${RELEASE_ROOT}/schemas/preprocess-package-v3.json"
+                        "${RELEASE_ROOT}/schemas/preprocess-package-v4.json"
                     )
                 },
                 "adapters": {
@@ -2074,7 +2100,7 @@ class ReleaseManagerTests(unittest.TestCase):
                 release.verify_release(Path(str(built["release_dir"])))
             live_probe.assert_called_once()
 
-    def test_target_config_requires_all_three_package_v3_bindings(self) -> None:
+    def test_target_config_requires_v2_route_and_all_three_package_v4_bindings(self) -> None:
         template = json.loads(
             (self.source / "config.example.json").read_text(encoding="utf-8")
         )
@@ -2098,6 +2124,44 @@ class ReleaseManagerTests(unittest.TestCase):
                 invalid[profile_name]["package_output_schema"] = str(
                     self.source / "schemas" / "preprocess-package-v2.json"
                 )
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "release_target_contract_invalid"
+                ):
+                    release._validate_target_release_config(
+                        invalid, release_root=self.source
+                    )
+
+        missing_v2 = json.loads(json.dumps(config))
+        missing_v2.pop("analysis_package_v2")
+        with self.assertRaisesRegex(
+            release.ReleaseError, "release_target_contract_invalid"
+        ):
+            release._validate_target_release_config(
+                missing_v2, release_root=self.source
+            )
+
+        for key, value in (
+            ("enabled", False),
+            ("physical_branch_slots", 3.0),
+            ("physical_branch_slots", True),
+        ):
+            with self.subTest(v2_key=key, value=value):
+                invalid = json.loads(json.dumps(config))
+                invalid["analysis_package_v2"][key] = value
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "release_target_contract_invalid"
+                ):
+                    release._validate_target_release_config(
+                        invalid, release_root=self.source
+                    )
+
+        for retired_key, value in (
+            ("analysis_package_v1", {"enabled": True}),
+            ("consumer_stage_chain", {"enabled": True}),
+        ):
+            with self.subTest(retired_key=retired_key):
+                invalid = json.loads(json.dumps(config))
+                invalid[retired_key] = value
                 with self.assertRaisesRegex(
                     release.ReleaseError, "release_target_contract_invalid"
                 ):

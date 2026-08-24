@@ -1,13 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.invalid/study-intake/mcp-investigation-session-receipt-v1.json",
-  "title": "Proposal-only single-Luna investigation read-session receipt",
+  "title": "Proposal-only single-Luna investigation read-session terminal receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "phase", "subject", "branch_id", "provider_stage_name", "processing_binding_sha256", "read_session_id", "read_session_manifest_sha256", "generation", "authority_fingerprint", "mcp_call_receipt_sha256", "mcp_transcript_sha256", "model_mcp_tool_call_count", "provider_request_count", "provider_request_count_status", "pagination_coverage_complete", "opened_receipt_sha256", "proposal_only", "created_at", "formal_write_count", "hmac_key_id", "hmac_sha256"],
+  "required": ["schema_version", "phase", "subject", "branch_id", "provider_stage_name", "processing_binding_sha256", "read_session_id", "read_session_manifest_sha256", "generation", "authority_fingerprint", "provider_request_count", "provider_request_count_status", "pagination_coverage_complete", "opened_receipt_sha256", "proposal_only", "created_at", "formal_write_count", "hmac_key_id", "hmac_sha256"],
   "properties": {
     "schema_version": {"const": "mcp_investigation_session_receipt_v1"},
-    "phase": {"const": "investigation_complete"},
+    "phase": {"enum": ["investigation_complete", "investigation_failed", "investigation_cancelled", "investigation_timed_out"]},
+    "terminal_status": {"enum": ["failed", "cancelled", "timed_out"]},
+    "error_code": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,95}$"},
     "subject": {"enum": ["math", "cs408", "english"]},
     "branch_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"},
     "provider_stage_name": {"enum": ["math_luna_analysis", "cs408_luna_analysis", "english_luna_analysis"]},
@@ -16,12 +18,21 @@
     "read_session_manifest_sha256": {"$ref": "#/$defs/sha"},
     "generation": {"type": "string", "minLength": 1, "maxLength": 160},
     "authority_fingerprint": {"$ref": "#/$defs/sha"},
-    "mcp_call_receipt_sha256": {"$ref": "#/$defs/sha"},
-    "mcp_transcript_sha256": {"$ref": "#/$defs/sha"},
+    "mcp_call_receipt_sha256": {"$ref": "#/$defs/nullable_sha"},
+    "mcp_call_receipt_ref": {"$ref": "#/$defs/nullable_ref"},
+    "mcp_transcript_sha256": {"$ref": "#/$defs/nullable_sha"},
+    "mcp_transcript_ref": {"$ref": "#/$defs/nullable_ref"},
+    "raw_output_object_sha256": {"$ref": "#/$defs/nullable_sha"},
+    "raw_output_object_ref": {"$ref": "#/$defs/nullable_ref"},
+    "stage_execution_receipt_sha256": {"$ref": "#/$defs/nullable_sha"},
+    "stage_execution_receipt_ref": {"$ref": "#/$defs/nullable_ref"},
     "model_mcp_tool_call_count": {"type": "integer", "minimum": 1},
-    "provider_request_count": {"type": "integer", "minimum": 2},
-    "provider_request_count_status": {"const": "derived_from_codex_tool_loop"},
-    "pagination_coverage_complete": {"const": true},
+    "mcp_tool_call_count": {"type": "integer", "minimum": 0},
+    "model_call_count": {"type": "integer", "minimum": 0, "maximum": 1},
+    "provider_request_count": {"type": "integer", "minimum": 0},
+    "provider_request_count_status": {"enum": ["derived_from_codex_tool_loop", "actual_terminal_counts"]},
+    "mcp_call_succeeded": {"type": "boolean"},
+    "pagination_coverage_complete": {"type": "boolean"},
     "opened_receipt_sha256": {"$ref": "#/$defs/sha"},
     "proposal_only": {"const": true},
     "created_at": {"type": "string", "format": "date-time"},
@@ -32,7 +43,38 @@
   "allOf": [
     {"if": {"properties": {"subject": {"const": "math"}}}, "then": {"properties": {"provider_stage_name": {"const": "math_luna_analysis"}}}},
     {"if": {"properties": {"subject": {"const": "cs408"}}}, "then": {"properties": {"provider_stage_name": {"const": "cs408_luna_analysis"}}}},
-    {"if": {"properties": {"subject": {"const": "english"}}}, "then": {"properties": {"provider_stage_name": {"const": "english_luna_analysis"}}}}
+    {"if": {"properties": {"subject": {"const": "english"}}}, "then": {"properties": {"provider_stage_name": {"const": "english_luna_analysis"}}}},
+    {
+      "if": {"properties": {"phase": {"const": "investigation_complete"}}, "required": ["phase"]},
+      "then": {
+        "required": ["mcp_call_receipt_sha256", "mcp_transcript_sha256", "model_mcp_tool_call_count"],
+        "properties": {
+          "provider_request_count": {"minimum": 2},
+          "provider_request_count_status": {"const": "derived_from_codex_tool_loop"},
+          "pagination_coverage_complete": {"const": true}
+        },
+        "not": {"anyOf": [
+          {"required": ["terminal_status"]}, {"required": ["error_code"]},
+          {"required": ["mcp_call_receipt_ref"]}, {"required": ["mcp_transcript_ref"]},
+          {"required": ["raw_output_object_sha256"]}, {"required": ["raw_output_object_ref"]},
+          {"required": ["stage_execution_receipt_sha256"]}, {"required": ["stage_execution_receipt_ref"]},
+          {"required": ["mcp_tool_call_count"]}, {"required": ["model_call_count"]}
+        ]}
+      },
+      "else": {
+        "required": ["terminal_status", "error_code", "mcp_call_receipt_sha256", "mcp_call_receipt_ref", "mcp_transcript_sha256", "mcp_transcript_ref", "raw_output_object_sha256", "raw_output_object_ref", "stage_execution_receipt_sha256", "stage_execution_receipt_ref", "mcp_tool_call_count", "model_call_count", "mcp_call_succeeded"],
+        "properties": {
+          "provider_request_count_status": {"const": "actual_terminal_counts"}
+        }
+      }
+    },
+    {"if": {"properties": {"phase": {"const": "investigation_failed"}}}, "then": {"properties": {"terminal_status": {"const": "failed"}}}},
+    {"if": {"properties": {"phase": {"const": "investigation_cancelled"}}}, "then": {"properties": {"terminal_status": {"const": "cancelled"}}}},
+    {"if": {"properties": {"phase": {"const": "investigation_timed_out"}}}, "then": {"properties": {"terminal_status": {"const": "timed_out"}}}}
   ],
-  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullable_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "nullable_ref": {"type": ["string", "null"], "pattern": "^study-intake-[a-z0-9-]+://sha256/[0-9a-f]{64}$"}
+  }
 }

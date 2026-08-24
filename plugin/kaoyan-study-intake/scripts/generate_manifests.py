@@ -69,6 +69,7 @@ REQUIRED_RUNTIME_SCHEMAS = {
     "dashboard-task-detail-v2.json",
     "dispatch-report-v1.json",
     "dispatch-report-v2.json",
+    "dispatch-report-v3.json",
     "dispatch-task-detail-v2.json",
     "dispatch-task-event-v2.json",
     "en-p0-006-remediation-gate-v1.json",
@@ -119,11 +120,13 @@ REQUIRED_RUNTIME_SCHEMAS = {
     "promotion-preview-v1.json",
     "validation-console-technical-status-v1.json",
     "model-stage-execution-receipt-v1.json",
+    "model-stage-execution-receipt-v3.json",
     "model-stage-normalization-receipt-v1.json",
     "model-stage-raw-chain-manifest-v1.json",
     "model-stage-raw-chunk-v1.json",
     "model-stage-raw-output-v1.json",
     "preprocess-package-v3.json",
+    "preprocess-package-v4.json",
     "producer-dispatch-input-v1.json",
     "producer-dispatch-input-v2.json",
     "production-canary-activation-receipt-v1.json",
@@ -1248,9 +1251,8 @@ def validate_registry_contract(
                 config_path=ROOT / str(value["agent_config"]),
                 policy_path=ROOT / str(value["tool_policy"]),
             )
-    chain = multi_agent.get("consumer_stage_chain")
-    if chain is not None:
-        _validate_consumer_stage_chain(chain, role_names=set(roles))
+    if "consumer_stage_chain" in multi_agent:
+        raise SystemExit("retired consumer stage chain must be absent")
     fixture_contracts = registry.get("fixture_contracts")
     if (
         not isinstance(fixture_contracts, dict)

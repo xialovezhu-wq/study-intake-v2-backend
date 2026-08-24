@@ -873,7 +873,8 @@ def build_terra_final_report_v2(
             or set(row) != {"branch_id", "outcome", "disposition", "rationale"}
             or row.get("outcome") != coverage[index].get("outcome")
             or row.get("disposition") not in {
-                "adopt", "modify", "reject", "uncertain", "diagnostic_only"
+                "adopt", "modify", "reject", "request_more_evidence",
+                "uncertain", "diagnostic_only"
             }
             or not isinstance(row.get("rationale"), str) or not row["rationale"]
             for index, row in enumerate(assessments)

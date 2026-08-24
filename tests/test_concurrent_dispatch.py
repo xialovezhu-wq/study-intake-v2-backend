@@ -58,6 +58,7 @@ from preprocessor_core import (  # noqa: E402
     Worker,
 )
 from processing_plugin import ProcessingPluginHost  # noqa: E402
+from process_identity import kernel_process_start_token  # noqa: E402
 from preprocess_dispatcher import (  # noqa: E402
     MAX_DISCOVERY_LATENCY_SECONDS,
     ProductionDispatchRuntime,
@@ -74,6 +75,10 @@ from fixtures.process_lifecycle import (  # noqa: E402
     stop_process,
 )
 from tests.portable_plugin_fixture import build_portable_plugin_fixture
+from test_multi_agent_analysis_package_live import (  # noqa: E402
+    _FakeLiveRunner,
+    _candidate as multi_agent_candidate,
+)
 
 
 def frozen_task(index: int, *, subject: str = "math") -> FrozenTask:
@@ -398,6 +403,355 @@ class ConcurrentDispatchTests(unittest.TestCase):
         self.assertEqual([result.outcome for result in results], ["succeeded"] * count)
         self.assertTrue(dispatcher.drain(5))
         self.assertEqual(len(coordinator.critical_entered), count)
+
+    def _publish_successor_dispatch(
+        self,
+        *,
+        index: int = 950,
+        binding_mutation=None,
+        critical_binding_mutation=None,
+        topology_mutation=None,
+        provider_closure: bool = False,
+    ):
+        task = frozen_task(index, subject="math")
+        store = LeaseStore(self.runtime)
+        claimed = store.claim(task.unit_sha256, "successor-owner", subject="math")
+        assert claimed.lease is not None
+        model_result = _FakeLiveRunner(
+            runtime_root=self.runtime,
+            branch_count=3,
+            subject="math",
+            capture_id=str(task.frozen_payload["capture_id"]),
+        ).run_analysis_package_v2(
+            multi_agent_candidate(
+                subject="math",
+                capture_id=str(task.frozen_payload["capture_id"]),
+            )
+        )
+        inner_package = model_result.analysis
+        binding = {
+            "schema_version": "study-intake-analysis-package-binding-v1",
+            "id": inner_package["package_id"],
+            "sha256": inner_package["package_sha256"],
+            "ref": inner_package["package_ref"],
+        }
+        if binding_mutation is not None:
+            binding_mutation(binding)
+        critical_binding = copy.deepcopy(binding)
+        if critical_binding_mutation is not None:
+            critical_binding_mutation(critical_binding)
+        topology = copy.deepcopy(
+            model_result.stage_receipts["analysis_package_stages"]
+        )
+        if topology_mutation is not None:
+            topology_mutation(topology)
+
+        def result(payload, current_binding):
+            return StageResult(
+                payload={
+                    **payload,
+                    "formal_write_count": 0,
+                    "analysis_package_binding": current_binding,
+                },
+                runtime_model="gpt-5.6-terra",
+                runtime_reasoning_effort="max",
+                runtime_metadata_provenance="codex_json_attestation_v1",
+                runtime_identity_status="confirmed",
+                provider_request_count=1,
+                requested_model="gpt-5.6-terra",
+                requested_reasoning_effort="max",
+                analysis_package_stages=tuple(copy.deepcopy(topology)),
+            )
+
+        analysis = result(
+            model_result.draft_analysis,
+            binding,
+        )
+        critical = result(
+            model_result.critical_review,
+            critical_binding,
+        )
+        publish_kwargs = {
+            "task": task,
+            "outcome": "succeeded",
+            "error_code": None,
+            "analysis": analysis,
+            "critical_review": critical,
+            "started_at": "2026-08-24T00:00:00Z",
+            "finished_at": "2026-08-24T00:00:01Z",
+        }
+        if provider_closure:
+            marker = (
+                store.task_process_identity_latest_root / task.unit_sha256
+                / f"fence-{claimed.lease.fence}.json"
+            )
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}\n")
+            closure = {
+                "provider_process_identity_sha256": "1" * 64,
+                "provider_process_identity_path": "/tmp/provider-identity",
+                "provider_process_exit_sha256": "2" * 64,
+                "provider_process_exit_path": "/tmp/provider-exit",
+                "provider_pid": 2001,
+                "provider_pgid": 2001,
+                "process_start_token": "token",
+                "returncode": 0,
+                "termination_reason": "completed",
+                "reaped": True,
+                "process_absent": True,
+                "pgid_absent": True,
+            }
+            provider_rows = {
+                "math_analysis": copy.deepcopy(closure),
+                "math_critical_review": {
+                    **copy.deepcopy(closure),
+                    "provider_process_identity_sha256": "3" * 64,
+                    "provider_process_exit_sha256": "4" * 64,
+                },
+            }
+            supervisor_closure = {
+                "supervisor_process_identity_sha256": "5" * 64,
+                "supervisor_process_identity_path": "/tmp/supervisor-identity",
+                "supervisor_process_exit_sha256": "6" * 64,
+                "supervisor_process_exit_path": "/tmp/supervisor-exit",
+                "supervisor_pid": 2000,
+                "supervisor_pgid": 2000,
+                "process_start_token": "supervisor-token",
+                "launch_nonce": "7" * 32,
+                "launched_at": "2026-08-24T00:00:00Z",
+                "finished_at": "2026-08-24T00:00:01Z",
+                "returncode": 0,
+                "termination_reason": "completed",
+                "reaped": True,
+                "process_absent": True,
+                "pgid_absent": True,
+            }
+            with (
+                mock.patch.object(
+                    store,
+                    "_task_process_closure_locked",
+                    return_value=supervisor_closure,
+                ),
+                mock.patch.object(
+                    store,
+                    "_read_verified_content_addressed_locked",
+                    return_value={
+                        "executable_path": str(
+                            ROOT / "bin" / "preprocess_task_runner.py"
+                        )
+                    },
+                ),
+                mock.patch.object(
+                    store,
+                    "_provider_process_closures_locked",
+                    return_value=provider_rows,
+                ),
+            ):
+                completion = store.publish_terminal(
+                    claimed.lease, **publish_kwargs
+                )
+        else:
+            completion = store.publish_terminal(claimed.lease, **publish_kwargs)
+        package = json.loads(Path(completion["package_path"]).read_text())
+        report_path = (
+            self.runtime / "dispatch" / "reports" / "json"
+            / "sha256"
+            / completion["report_json_sha256"][:2]
+            / f"{completion['report_json_sha256']}.json"
+        )
+        report = json.loads(report_path.read_text())
+        return completion, package, report, analysis, critical
+
+    def _publish_canary_dispatch(
+        self,
+        *,
+        index: int,
+        successor: bool,
+        failures: set[str] = frozenset(),
+        topology_mutation=None,
+    ):
+        candidate = core_candidate(index, subject="cs408")
+
+        class ScanWorker:
+            release_id = "a" * 64
+
+            def __init__(self, _config):
+                pass
+
+            def eligible_candidates(
+                self, requested_subject, _study_date, **_kwargs
+            ):
+                if requested_subject != "cs408":
+                    raise AssertionError("scanner crossed subject boundary")
+                return [(candidate, "eligible")]
+
+        config = {
+            "runtime_root": str(self.runtime),
+            "timezone": "Asia/Shanghai",
+            "model": {
+                "model": REQUIRED_MODEL,
+                "reasoning_effort": REQUIRED_REASONING_EFFORT,
+            },
+            "analysis_package_v2": {"enabled": True},
+        }
+        frozen, decisions = scan_eligible_candidates(
+            config,
+            "cs408",
+            worker_factory=ScanWorker,
+            publish_evidence_readiness=False,
+        )
+        self.assertEqual(len(frozen), 1, decisions)
+        task = frozen[0].task
+        store = LeaseStore(self.runtime)
+        store.begin_subject_drain("cs408")
+        store.activate_production_canary(
+            "cs408",
+            release_id="a" * 64,
+            producer_authority=_producer_authority_from_processing_contract(
+                "cs408", "a" * 64, "9" * 64
+            ),
+            activated_at="2026-08-04T00:00:00Z",
+        )
+        store.materialize_production_canary_task(task)
+        owner_id = f"dispatcher-{os.getpid()}-{'0' * 32}"
+        claimed = store.claim(
+            task.unit_sha256,
+            owner_id,
+            subject="cs408",
+            task=task,
+            production_canary=True,
+            now="2026-08-06T00:00:00Z",
+        )
+        self.assertIsNotNone(claimed.lease)
+        lease = claimed.lease
+        assert lease is not None
+        context_root = (
+            self.runtime
+            / "dispatch/contexts"
+            / task.unit_sha256
+            / f"fence-{lease.fence}"
+        )
+        context_root.mkdir(parents=True, exist_ok=True)
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(1)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        registration = register_process(child, require_private_group=True)
+        launched_at = dt.datetime.now(dt.timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        try:
+            identity = store.publish_task_process_identity(
+                task,
+                lease,
+                child_pid=registration.pid,
+                child_pgid=registration.pgid,
+                process_start_token=kernel_process_start_token(
+                    registration.pid
+                ),
+                launch_nonce="1" * 32,
+                launched_at=launched_at,
+                argv=[sys.executable, "-c", "import time; time.sleep(1)"],
+                executable_path=Path(sys.executable),
+                start_new_session=True,
+            )
+            stdout, stderr = child.communicate(timeout=3)
+        finally:
+            if child.poll() is None:
+                stdout, stderr = stop_process(registration)
+        self.assertTrue(process_absent(registration))
+        finished_at = dt.datetime.now(dt.timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        store.publish_task_process_exit(
+            task,
+            lease,
+            process_identity_sha256=identity["process_identity_sha256"],
+            process_identity_path=identity["process_identity_path"],
+            returncode=int(child.returncode or 0),
+            termination_reason="completed",
+            reaped=True,
+            process_absent=True,
+            pgid_absent=True,
+            stdout_sha256=hashlib.sha256(stdout or b"").hexdigest(),
+            stdout_size=len(stdout or b""),
+            stderr_sha256=hashlib.sha256(stderr or b"").hexdigest(),
+            stderr_size=len(stderr or b""),
+            finished_at=finished_at,
+        )
+
+        if successor:
+            model_result = _FakeLiveRunner(
+                runtime_root=self.runtime,
+                branch_count=3,
+                failures=failures,
+                subject="cs408",
+                capture_id=candidate.capture_id,
+            ).run_analysis_package_v2(candidate)
+            inner_package = model_result.analysis
+            binding = {
+                "schema_version": (
+                    "study-intake-analysis-package-binding-v1"
+                ),
+                "id": inner_package["package_id"],
+                "sha256": inner_package["package_sha256"],
+                "ref": inner_package["package_ref"],
+            }
+            topology = copy.deepcopy(
+                model_result.stage_receipts["analysis_package_stages"]
+            )
+            if topology_mutation is not None:
+                topology_mutation(topology)
+
+            def terra_result(payload):
+                return StageResult(
+                    payload={
+                        **copy.deepcopy(dict(payload)),
+                        "analysis_package_binding": copy.deepcopy(binding),
+                    },
+                    runtime_model="gpt-5.6-terra",
+                    runtime_reasoning_effort="max",
+                    runtime_metadata_provenance=(
+                        "codex_json_attestation_v1"
+                    ),
+                    runtime_identity_status="confirmed",
+                    provider_request_count=1,
+                    mcp_tool_call_count=0,
+                    model_call_count=1,
+                    requested_model="gpt-5.6-terra",
+                    requested_reasoning_effort="max",
+                    analysis_package_stages=tuple(topology),
+                )
+
+            analysis = terra_result(model_result.draft_analysis)
+            critical = terra_result(model_result.critical_review)
+        else:
+            analysis = stage_result("analysis", task)
+            critical = stage_result("critical_review", task)
+
+        for event in (
+            "analysis_submitted",
+            "analysis_completed",
+            "critical_started",
+            "critical_completed",
+        ):
+            store.record_task_event(task, lease, event)
+        completion = store.publish_terminal(
+            lease,
+            task=task,
+            outcome="succeeded",
+            error_code=None,
+            analysis=analysis,
+            critical_review=critical,
+            started_at=launched_at,
+            finished_at=finished_at,
+        )
+        store.record_task_event(task, lease, "published")
+        return store, task, completion
 
     def test_ten_unique_tasks_all_enter_before_release(self) -> None:
         self._assert_unbounded_batch(10, "mixed")
@@ -1848,6 +2202,289 @@ class ConcurrentDispatchTests(unittest.TestCase):
         self.assertEqual(
             json.dumps(serialized, sort_keys=True, separators=(",", ":")),
             json.dumps(_stage_runtime(baseline), sort_keys=True, separators=(",", ":")),
+        )
+
+    def test_successor_dispatch_publishes_v4_v3_and_completion_v2(self) -> None:
+        completion, package, report, analysis, critical = (
+            self._publish_successor_dispatch()
+        )
+        self.assertEqual(
+            package["schema_version"], "study-intake-preprocess-package-v4"
+        )
+        self.assertEqual(
+            report["schema_version"], "study-intake-dispatch-report-v3"
+        )
+        self.assertEqual(
+            completion["schema_version"], "study-intake-concurrent-completion-v2"
+        )
+        self.assertEqual(package["pipeline"], ["analysis", "critical_review"])
+        self.assertEqual(package["analysis"], dict(analysis.payload))
+        self.assertEqual(package["critical_review"], dict(critical.payload))
+        self.assertEqual(
+            package["analysis_package_binding"],
+            analysis.payload["analysis_package_binding"],
+        )
+        self.assertEqual(
+            report["analysis_package_binding"],
+            package["analysis_package_binding"],
+        )
+        self.assertEqual(report["terra_initial"], package["analysis"])
+        self.assertEqual(report["terra_final"], package["critical_review"])
+        self.assertEqual(package["model_contract"], {
+            "mode": "multi_agent_v2",
+            "outer_stage_model": "gpt-5.6-terra",
+            "investigation_model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+            "dispatcher_visible_stage_count": 2,
+        })
+        self.assertEqual(
+            package["stage_runtime"]["analysis"]["analysis_package_stages"],
+            package["stage_runtime"]["critical_review"][
+                "analysis_package_stages"
+            ],
+        )
+        self.assertEqual(
+            len(package["stage_runtime"]["analysis"]["analysis_package_stages"]),
+            5,
+        )
+        reopened = LeaseStore(self.runtime).verify_authoritative_completion(
+            "math", "CAP-0950", expected_release_id="a" * 64
+        )
+        self.assertEqual(
+            reopened["package"]["schema_version"],
+            "study-intake-preprocess-package-v4",
+        )
+
+    def test_successor_authoritative_reopen_deep_checks_inner_package(
+        self,
+    ) -> None:
+        completion, package, _report, _analysis, _critical = (
+            self._publish_successor_dispatch(index=954)
+        )
+        store = LeaseStore(self.runtime)
+        verified = store.verify_authoritative_completion(
+            "math",
+            "CAP-0954",
+            expected_release_id="a" * 64,
+        )
+        self.assertEqual(
+            verified["package"]["analysis_package_binding"],
+            package["analysis_package_binding"],
+        )
+        digest = package["analysis_package_binding"]["sha256"]
+        inner_path = (
+            self.runtime
+            / "dispatch/analysis-packages/sha256"
+            / digest[:2]
+            / f"{digest}.json"
+        )
+        inner_path.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            DispatchError,
+            "production_canary_analysis_package_v2_invalid",
+        ):
+            store.verify_authoritative_completion(
+                "math",
+                "CAP-0954",
+                expected_release_id="a" * 64,
+                expected_unit_sha256=completion["unit_sha256"],
+            )
+
+    def test_successor_canary_accepts_luna_grounding_without_terra_mcp(
+        self,
+    ) -> None:
+        store, task, completion = self._publish_canary_dispatch(
+            index=955,
+            successor=True,
+            failures={"branch-02"},
+        )
+        result = store.finish_production_canary_task(
+            task,
+            outcome="succeeded",
+            error_code=None,
+            completion=completion,
+        )
+        self.assertEqual(result["state"], "continuous_concurrent_unlocked")
+        terminal = json.loads(
+            Path(result["terminal_receipt_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(terminal["outcome"], "succeeded")
+        self.assertGreaterEqual(terminal["observed_mcp_tool_call_count"], 1)
+        self.assertEqual(
+            terminal["evidence_authority_fingerprint"],
+            hashlib.sha256(b"authority:shared").hexdigest(),
+        )
+        self.assertEqual(len(terminal["mcp_stage_grounding"]), 3)
+        self.assertEqual(
+            sorted(
+                row["status"]
+                for row in terminal["mcp_stage_grounding"].values()
+            ),
+            ["failed", "succeeded", "succeeded"],
+        )
+        self.assertTrue(
+            all(
+                name.startswith("luna_investigation_")
+                for name in terminal["mcp_stage_grounding"]
+            )
+        )
+        package = json.loads(Path(completion["package_path"]).read_text())
+        self.assertEqual(
+            package["stage_runtime"]["analysis"]["mcp_tool_call_count"],
+            0,
+        )
+        self.assertEqual(
+            package["stage_runtime"]["critical_review"][
+                "mcp_tool_call_count"
+            ],
+            0,
+        )
+
+    def test_successor_canary_rejects_luna_topology_without_valid_success(
+        self,
+    ) -> None:
+        def remove_success(topology):
+            for row in topology[1:-1]:
+                row["status"] = "failed"
+                row["error_code"] = "synthetic_failure"
+                row.pop("report_sha256", None)
+                row.pop("report_ref", None)
+
+        store, task, completion = self._publish_canary_dispatch(
+            index=956,
+            successor=True,
+            topology_mutation=remove_success,
+        )
+        with self.assertRaisesRegex(
+            DispatchError,
+            "production_canary_analysis_package_v2_invalid",
+        ):
+            store.finish_production_canary_task(
+                task,
+                outcome="succeeded",
+                error_code=None,
+                completion=completion,
+            )
+
+    def test_legacy_v3_canary_still_requires_outer_stage_mcp(self) -> None:
+        store, task, completion = self._publish_canary_dispatch(
+            index=957,
+            successor=False,
+        )
+        with self.assertRaisesRegex(
+            DispatchError,
+            "production_canary_mcp_grounding_missing",
+        ):
+            store.finish_production_canary_task(
+                task,
+                outcome="succeeded",
+                error_code=None,
+                completion=completion,
+            )
+
+    def test_successor_dispatch_artifacts_validate_against_new_schemas(self) -> None:
+        _completion, package, report, _analysis, _critical = (
+            self._publish_successor_dispatch(index=951)
+        )
+        validator_python = Path("/opt/miniconda3/envs/dl/bin/python")
+        self.assertTrue(validator_python.is_file())
+        script = r"""
+import json, sys
+from jsonschema import Draft202012Validator
+request = json.load(sys.stdin)
+schema = request["schema"]
+Draft202012Validator.check_schema(schema)
+errors = sorted(
+    Draft202012Validator(schema).iter_errors(request["instance"]),
+    key=lambda error: tuple(str(item) for item in error.absolute_path),
+)
+json.dump([error.message for error in errors], sys.stdout)
+"""
+        for schema_name, instance in (
+            ("preprocess-package-v4.json", package),
+            ("dispatch-report-v3.json", report),
+        ):
+            schema = json.loads((ROOT / "schemas" / schema_name).read_text())
+            completed = subprocess.run(
+                [str(validator_python), "-c", script],
+                input=json.dumps({"schema": schema, "instance": instance}),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout), [])
+
+    def test_successor_dispatch_provider_closure_stays_two_outer_stages(self) -> None:
+        completion, _package, _report, _analysis, _critical = (
+            self._publish_successor_dispatch(index=953, provider_closure=True)
+        )
+        execution = completion["process_execution"]
+        self.assertTrue(execution["provider_process_closure_required"])
+        self.assertEqual(
+            set(execution["provider_stages"]),
+            {"math_analysis", "math_critical_review"},
+        )
+        self.assertNotIn("math_luna_analysis", execution["provider_stages"])
+
+    def test_successor_dispatch_rejects_binding_and_topology_mismatch(self) -> None:
+        cases = (
+            {
+                "critical_binding_mutation": lambda binding: binding.update(
+                    {"sha256": "c" * 64}
+                )
+            },
+            {
+                "binding_mutation": lambda binding: binding.update(
+                    {"id": "ANPKG2-INVALID"}
+                )
+            },
+            {
+                "topology_mutation": lambda topology: topology[1].update(
+                    {"provider_stage_name": "english_luna_analysis"}
+                )
+            },
+            {
+                "topology_mutation": lambda topology: topology[2].update(
+                    {"stage": topology[1]["stage"]}
+                )
+            },
+        )
+        for index, changes in enumerate(cases, start=960):
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                DispatchError, "analysis_package_dispatch_binding_invalid"
+            ):
+                self._publish_successor_dispatch(index=index, **changes)
+
+    def test_legacy_dispatch_stays_v3_v2_without_successor_fields(self) -> None:
+        dispatcher = ConcurrentDispatcher(
+            self.runtime,
+            lambda _task, _context: BehaviorRunner("ok"),
+            stage_timeout_seconds=1,
+        )
+        result = dispatcher.submit(frozen_task(952)).wait(2)
+        completion = result.completion
+        package = json.loads(Path(completion["package_path"]).read_text())
+        report_path = (
+            self.runtime / "dispatch" / "reports" / "json"
+            / "sha256"
+            / completion["report_json_sha256"][:2]
+            / f"{completion['report_json_sha256']}.json"
+        )
+        report = json.loads(report_path.read_text())
+        self.assertEqual(
+            package["schema_version"], "study-intake-preprocess-package-v3"
+        )
+        self.assertEqual(
+            report["schema_version"], "study-intake-dispatch-report-v2"
+        )
+        self.assertNotIn("analysis_package_binding", package)
+        self.assertNotIn("terra_initial", report)
+        self.assertEqual(
+            completion["schema_version"], "study-intake-concurrent-completion-v2"
         )
 
     def test_receipt_and_package_are_immutable_content_addressed(self) -> None:

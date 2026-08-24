@@ -52,6 +52,7 @@ SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
         "dashboard-projection-v5.json",
         "dashboard-task-detail-v2.json",
         "dispatch-report-v2.json",
+        "dispatch-report-v3.json",
         "dispatch-task-detail-v2.json",
         "dispatch-task-event-v2.json",
         "english-quick-flush-intent-v1.json",
@@ -67,11 +68,13 @@ SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
         "mcp-authority-snapshot-v2.json",
         "mcp-read-session-v4.json",
         "model-stage-execution-receipt-v1.json",
+        "model-stage-execution-receipt-v3.json",
         "model-stage-normalization-receipt-v1.json",
         "model-stage-raw-chain-manifest-v1.json",
         "model-stage-raw-chunk-v1.json",
         "model-stage-raw-output-v1.json",
         "preprocess-package-v3.json",
+        "preprocess-package-v4.json",
         "producer-dispatch-input-v2.json",
         "production-canary-state-v3.json",
         "production-canary-terminal-index-v3.json",
@@ -1674,6 +1677,35 @@ class ModelStageSchemaRoundTripTests(unittest.TestCase):
                     provider_returncode=0,
                     duration_ms=25,
                 )
+                terra_execution_refs = store.publish_model_stage_execution_receipt(
+                    frozen,
+                    decision.lease,
+                    stage_name="math_analysis",
+                    execution_status="completed",
+                    raw_output_object_sha256=str(
+                        raw_refs["raw_output_object_sha256"]
+                    ),
+                    raw_output_object_ref=str(raw_refs["raw_output_object_ref"]),
+                    provider_process_identity_sha256=str(
+                        closure["provider_process_identity_sha256"]
+                    ),
+                    provider_process_exit_sha256=str(
+                        closure["provider_process_exit_sha256"]
+                    ),
+                    authority_snapshot_manifest_sha256=None,
+                    mcp_grounding_manifest_sha256=None,
+                    mcp_transport_sha256=None,
+                    mcp_transcript_sha256=None,
+                    attempted_mcp_tool_call_count=0,
+                    successful_mcp_tool_call_count=0,
+                    grounding_mcp_tool_call_count=0,
+                    failed_mcp_tool_call_count=0,
+                    last_mcp_error_code=None,
+                    provider_returncode=0,
+                    duration_ms=20,
+                    requested_model="gpt-5.6-terra",
+                    requested_reasoning_effort="max",
+                )
                 normalization_refs = (
                     store.publish_model_stage_normalization_receipt(
                         frozen,
@@ -1707,6 +1739,9 @@ class ModelStageSchemaRoundTripTests(unittest.TestCase):
                 )
                 execution_value = self._read_published(
                     str(execution_refs["stage_execution_receipt_path"])
+                )
+                terra_execution_value = self._read_published(
+                    str(terra_execution_refs["stage_execution_receipt_path"])
                 )
                 normalization_value = self._read_published(
                     str(
@@ -1765,6 +1800,18 @@ class ModelStageSchemaRoundTripTests(unittest.TestCase):
             schema_name="model-stage-execution-receipt-v1.json",
             value=execution_value,
             missing_key="authority_snapshot_manifest_sha256",
+            wrong_type_key="attempted_mcp_tool_call_count",
+            pseudo_sha_path=(
+                "execution_binding",
+                "provider_process_identity_sha256",
+            ),
+            authority_purpose_path=("authority", "purpose"),
+        )
+        assert_positive_and_negatives(
+            self,
+            schema_name="model-stage-execution-receipt-v3.json",
+            value=terra_execution_value,
+            missing_key="raw_output_object_sha256",
             wrong_type_key="attempted_mcp_tool_call_count",
             pseudo_sha_path=(
                 "execution_binding",

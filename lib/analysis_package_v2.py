@@ -23,6 +23,29 @@ from multi_agent_report_contract import (
 
 PACKAGE_SCHEMA = "study-intake-analysis-package-v2"
 TERRA_INITIAL_SCHEMA = "terra_initial_analysis_v1"
+TERRA_MODEL = "gpt-5.6-terra"
+TERRA_REASONING_EFFORT = "max"
+TERRA_EXECUTION_KEYS = {
+    "requested_model", "requested_reasoning_effort", "provider_stage_name",
+    "raw_output_sha256", "raw_output_ref",
+    "stage_execution_receipt_sha256", "stage_execution_receipt_ref",
+    "normalization_receipt_sha256", "normalization_receipt_ref",
+    "formal_write_count",
+}
+TERRA_REF_PREFIXES = {
+    "raw_output": (
+        "study-intake-model-stage-raw-output://sha256/",
+        "study-intake-direct-model-stage-raw://sha256/",
+    ),
+    "stage_execution_receipt": (
+        "study-intake-model-stage-execution://sha256/",
+        "study-intake-direct-model-stage-execution://sha256/",
+    ),
+    "normalization_receipt": (
+        "study-intake-model-stage-normalization://sha256/",
+        "study-intake-direct-model-stage-normalization://sha256/",
+    ),
+}
 
 
 def _binding(*, kind: str, schema: str, digest: str, ref: str) -> dict[str, str]:
@@ -32,6 +55,38 @@ def _binding(*, kind: str, schema: str, digest: str, ref: str) -> dict[str, str]
         "sha256": digest,
         "ref": ref,
     }
+
+
+def _validate_terra_execution(
+    value: Mapping[str, Any], *, subject: str, phase: str
+) -> dict[str, Any]:
+    expected_stage = {
+        "initial": f"{subject}_analysis",
+        "final": f"{subject}_critical_review",
+    }.get(phase)
+    if (
+        expected_stage is None
+        or not isinstance(value, Mapping)
+        or set(value) != TERRA_EXECUTION_KEYS
+        or value.get("requested_model") != TERRA_MODEL
+        or value.get("requested_reasoning_effort") != TERRA_REASONING_EFFORT
+        or value.get("provider_stage_name") != expected_stage
+        or value.get("formal_write_count") != 0
+    ):
+        raise AnalysisPackageError("terra_execution_binding_invalid")
+    checked = copy.deepcopy(dict(value))
+    for stem, prefixes in TERRA_REF_PREFIXES.items():
+        digest = checked.get(f"{stem}_sha256")
+        ref = checked.get(f"{stem}_ref")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or not isinstance(ref, str)
+            or not any(ref == prefix + digest for prefix in prefixes)
+        ):
+            raise AnalysisPackageError("terra_execution_artifact_invalid")
+    return checked
 
 
 def build_terra_initial_analysis(
@@ -131,8 +186,12 @@ def publish_analysis_package_v2(
     store: AnalysisPackageStore, *, capture: Mapping[str, Any],
     plan: Mapping[str, Any], read_bundle: Mapping[str, Any],
     branch_results: Sequence[Mapping[str, Any]],
-    terra_initial: Mapping[str, Any], luna_outputs: Sequence[Mapping[str, Any]],
-    terra_final: Mapping[str, Any], sol_handoff: Mapping[str, Any],
+    terra_initial: Mapping[str, Any],
+    terra_initial_execution: Mapping[str, Any],
+    luna_outputs: Sequence[Mapping[str, Any]],
+    terra_final: Mapping[str, Any],
+    terra_final_execution: Mapping[str, Any],
+    sol_handoff: Mapping[str, Any],
 ) -> dict[str, Any]:
     checked_capture = validate_durable_capture(capture)
     checked_plan = validate_dual_report_plan(plan)
@@ -146,6 +205,12 @@ def publish_analysis_package_v2(
     ):
         raise AnalysisPackageError("analysis_package_v2_binding_invalid")
     initial = _validate_terra_initial(terra_initial, capture=checked_capture, plan=plan)
+    initial_execution = _validate_terra_execution(
+        terra_initial_execution, subject=checked_capture["subject"], phase="initial"
+    )
+    final_execution = _validate_terra_execution(
+        terra_final_execution, subject=checked_capture["subject"], phase="final"
+    )
     results = {row.get("branch_id"): row for row in branch_results}
     outputs = {row.get("branch_id"): row for row in luna_outputs}
     branch_ids = [row["branch_id"] for row in checked_plan["branches"]]
@@ -309,10 +374,12 @@ def publish_analysis_package_v2(
         "plan": _binding(kind="sealed_plan", schema=str(checked_plan["schema_version"]), digest=plan_sha, ref=plan_ref),
         "read_bundle": _binding(kind="read_bundle", schema=str(read_bundle["schema_version"]), digest=bundle_sha, ref=bundle_ref),
         "terra_initial": _binding(kind="terra_initial", schema=TERRA_INITIAL_SCHEMA, digest=initial_sha, ref=initial_ref),
+        "terra_initial_execution": initial_execution,
         "luna_outputs": output_bindings,
         "ordered_luna_reports": report_bindings,
         "ordered_luna_diagnostics": diagnostic_bindings,
         "terra_final": _binding(kind="terra_final", schema=str(final["schema_version"]), digest=final_sha, ref=final_ref),
+        "terra_final_execution": final_execution,
         "sol_handoff": _binding(kind="sol_handoff", schema=str(handoff["schema_version"]), digest=handoff_sha, ref=handoff_ref),
         "status": "ready_for_nightly", "formal_write_count": 0,
     }
@@ -322,8 +389,29 @@ def publish_analysis_package_v2(
 
 def reopen_analysis_package_v2(store: AnalysisPackageStore, digest: str) -> dict[str, Any]:
     package = store.reopen_package(digest)
-    if package.get("schema_version") != PACKAGE_SCHEMA or package.get("formal_write_count") != 0:
+    expected_package_keys = {
+        "schema_version", "package_id", "capture_id", "subject", "study_date",
+        "captured_at", "capture_intake_date", "capture", "plan", "read_bundle",
+        "terra_initial", "terra_initial_execution", "luna_outputs",
+        "ordered_luna_reports", "ordered_luna_diagnostics", "terra_final",
+        "terra_final_execution", "sol_handoff", "status", "formal_write_count",
+    }
+    if (
+        set(package) != expected_package_keys
+        or package.get("schema_version") != PACKAGE_SCHEMA
+        or package.get("status") != "ready_for_nightly"
+        or package.get("formal_write_count") != 0
+    ):
         raise AnalysisPackageError("analysis_package_v2_invalid")
+    subject = package.get("subject")
+    if subject not in {"math", "cs408", "english"}:
+        raise AnalysisPackageError("analysis_package_v2_invalid")
+    _validate_terra_execution(
+        package.get("terra_initial_execution"), subject=str(subject), phase="initial"
+    )
+    _validate_terra_execution(
+        package.get("terra_final_execution"), subject=str(subject), phase="final"
+    )
     for key in ("capture", "plan", "read_bundle", "terra_initial", "terra_final", "sol_handoff"):
         binding = package.get(key)
         if not isinstance(binding, Mapping):

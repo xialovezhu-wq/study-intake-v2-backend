@@ -704,6 +704,93 @@ class ProcessingPluginHostTests(unittest.TestCase):
         )
         return context, stage_receipt, finalized
 
+    def _failed_investigation_stage(
+        self, subject: str = "math", branch_id: str = "branch-failed"
+    ) -> tuple[dict, dict, dict]:
+        context = self._open(subject)
+        session = context["mcp_read_session"]
+        provider_stage_name = f"{subject}_luna_analysis"
+        arguments = {"collection": "catalog", "page_size": 1}
+        result = {
+            "subject": subject,
+            "generation": session["generation"],
+            "authority_fingerprint": session["authority_fingerprint"],
+            "read_session": {
+                "read_session_id": session["read_session_id"],
+                "manifest_sha256": session["manifest_sha256"],
+                "capture_id": session["capture_id"],
+                "capture_manifest_sha256": session["capture_manifest_sha256"],
+                "artifact_ids": session["artifact_ids"],
+            },
+            "read_route": self._model_route(session),
+            "total_count": 1,
+            "returned_count": 1,
+            "offset": 0,
+            "next_cursor": None,
+            "truncated": False,
+            "complete": True,
+            "formal_write_count": 0,
+        }
+        call = {
+            "sequence": 1,
+            "server": {
+                "math": "kaoyan_math_read",
+                "cs408": "kaoyan_cs408_read",
+                "english": "kaoyan_english_read",
+            }[subject],
+            "tool": "list_records",
+            "arguments": arguments,
+            "arguments_sha256": self._json_digest(arguments),
+            "result": result,
+            "result_sha256": self._json_digest(result),
+        }
+        transcript_sha256 = "e" * 64
+        signed = self.host.sign_model_mcp_calls(
+            subject=subject,
+            stage_name=provider_stage_name,
+            context=context,
+            calls=[call],
+            transcript_sha256=transcript_sha256,
+            failure_reason="investigation_failed",
+        )
+        stage_receipt = {
+            "status": "failed",
+            "branch_id": branch_id,
+            "provider_stage_name": provider_stage_name,
+            "read_session_id": session["read_session_id"],
+            "read_session_manifest_sha256": session["manifest_sha256"],
+            "evidence_generation": session["generation"],
+            "evidence_authority_fingerprint": session[
+                "authority_fingerprint"
+            ],
+            "mcp_call_receipt_sha256": signed["receipt_sha256"],
+            "mcp_transcript_sha256": transcript_sha256,
+            "mcp_tool_call_count": 1,
+            "provider_request_count": 2,
+            "pagination_coverage_complete": False,
+            "formal_write_count": 0,
+        }
+        raw_sha256 = "f" * 64
+        execution_artifacts = {
+            "mcp_call_receipt_sha256": signed["receipt_sha256"],
+            "mcp_call_receipt_ref": signed["receipt_ref"],
+            "mcp_transcript_sha256": transcript_sha256,
+            "mcp_transcript_ref": (
+                "study-intake-mcp-stage-transcript://sha256/"
+                + transcript_sha256
+            ),
+            "raw_output_object_sha256": raw_sha256,
+            "raw_output_object_ref": (
+                "study-intake-model-stage-raw-output://sha256/" + raw_sha256
+            ),
+            "provider_request_count": 2,
+            "mcp_tool_call_count": 1,
+            "model_call_count": 1,
+            "pagination_coverage_complete": False,
+            "formal_write_count": 0,
+        }
+        return context, stage_receipt, execution_artifacts
+
     def test_session_validation_reuses_authority_without_semantic_prefetch(self) -> None:
         context = self._open("math")
         with mock.patch.object(self.host, "_call", side_effect=AssertionError("validation called MCP")) as call:
@@ -1928,6 +2015,128 @@ class ProcessingPluginHostTests(unittest.TestCase):
             },
         )
         self.assertEqual(reopened["phase"], "complete")
+
+    def test_failed_investigation_closes_before_model_with_zero_counts(self) -> None:
+        context = self._open("math")
+        finalized = self.host.finalize_failed_investigation_read_session(
+            subject="math",
+            context=context,
+            branch_id="branch-before-model",
+            error_code="provider_not_started",
+        )
+        receipt = self.host.validate_failed_investigation_read_session(
+            subject="math",
+            context=context,
+            branch_id="branch-before-model",
+            finalized=finalized,
+        )
+        self.assertEqual(receipt["phase"], "investigation_failed")
+        self.assertEqual(receipt["provider_request_count"], 0)
+        self.assertEqual(receipt["mcp_tool_call_count"], 0)
+        self.assertEqual(receipt["model_call_count"], 0)
+        self.assertIsNone(receipt["mcp_call_receipt_sha256"])
+        self.assertEqual(receipt["formal_write_count"], 0)
+
+    def test_failed_investigation_binds_available_calls_and_artifacts(self) -> None:
+        context, stage, artifacts = self._failed_investigation_stage("cs408")
+        finalized = self.host.finalize_failed_investigation_read_session(
+            subject="cs408",
+            context=context,
+            branch_id="branch-failed",
+            error_code="provider_output_invalid",
+            stage_receipt=stage,
+            execution_artifacts=artifacts,
+        )
+        receipt = self.host.validate_failed_investigation_read_session(
+            subject="cs408",
+            context=context,
+            branch_id="branch-failed",
+            finalized=finalized,
+        )
+        self.assertEqual(receipt["provider_request_count"], 2)
+        self.assertEqual(receipt["mcp_tool_call_count"], 1)
+        self.assertEqual(receipt["model_call_count"], 1)
+        self.assertEqual(
+            receipt["mcp_call_receipt_sha256"],
+            stage["mcp_call_receipt_sha256"],
+        )
+        self.assertFalse(receipt["pagination_coverage_complete"])
+
+    def test_cancelled_investigation_has_signed_terminal_phase(self) -> None:
+        context = self._open("english")
+        finalized = self.host.finalize_failed_investigation_read_session(
+            subject="english",
+            context=context,
+            branch_id="branch-cancelled",
+            error_code="user_cancelled",
+            status="cancelled",
+        )
+        receipt = self.host.validate_failed_investigation_read_session(
+            subject="english",
+            context=context,
+            branch_id="branch-cancelled",
+            finalized=finalized,
+        )
+        self.assertEqual(receipt["phase"], "investigation_cancelled")
+        self.assertEqual(receipt["terminal_status"], "cancelled")
+        self.assertTrue(receipt["proposal_only"])
+
+    def test_failed_investigation_rejects_tamper_wrong_session_and_error(self) -> None:
+        context = self._open("math")
+        finalized = self.host.finalize_failed_investigation_read_session(
+            subject="math",
+            context=context,
+            branch_id="branch-terminal",
+            error_code="timed_out",
+            status="timed_out",
+        )
+        tampered = copy.deepcopy(finalized)
+        tampered["receipt"]["error_code"] = "different_error"
+        with self.assertRaisesRegex(
+            ProcessingPluginError, "mcp_investigation_failure_receipt_invalid"
+        ):
+            self.host.validate_failed_investigation_read_session(
+                subject="math",
+                context=context,
+                branch_id="branch-terminal",
+                finalized=tampered,
+            )
+        with self.assertRaisesRegex(
+            ProcessingPluginError, "mcp_investigation_failure_receipt_invalid"
+        ):
+            self.host.validate_failed_investigation_read_session(
+                subject="math",
+                context=self._open("math"),
+                branch_id="branch-terminal",
+                finalized=finalized,
+            )
+        for error_code in ("", "bad error", "../unsafe"):
+            with self.subTest(error_code=error_code), self.assertRaisesRegex(
+                ProcessingPluginError,
+                "mcp_investigation_failure_finalization_invalid",
+            ):
+                self.host.finalize_failed_investigation_read_session(
+                    subject="math",
+                    context=context,
+                    branch_id="branch-terminal",
+                    error_code=error_code,
+                )
+
+    def test_failure_closure_keeps_success_and_two_stage_receipts_compatible(self) -> None:
+        context, _stage, successful = self._investigation_read_session("math")
+        success_receipt = self.host.validate_final_investigation_read_session(
+            subject="math",
+            context=context,
+            branch_id="branch-1",
+            finalized=successful,
+        )
+        self.assertEqual(success_receipt["phase"], "investigation_complete")
+        publication, stages = self._published_read_session("math")
+        self.assertEqual(
+            stages["read_session"]["receipt"]["schema_version"],
+            "mcp_read_session_receipt_v1",
+        )
+        self.assertEqual(publication["semantic_stage_count"], 2)
 
     def test_published_read_session_reopens_only_persisted_calls(self) -> None:
         publication, stage_receipts = self._published_read_session("math")

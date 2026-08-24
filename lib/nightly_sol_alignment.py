@@ -5,12 +5,14 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import hashlib
+import hmac
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from analysis_package_v1 import (
     AnalysisPackageError,
@@ -18,6 +20,13 @@ from analysis_package_v1 import (
     PACKAGE_SCHEMA,
     canonical_bytes,
     sha256_value,
+    validate_durable_capture,
+)
+from analysis_package_v2 import (
+    PACKAGE_SCHEMA as PACKAGE_V2_SCHEMA,
+    _validate_terra_execution,
+    _validate_terra_initial,
+    reopen_analysis_package_v2,
 )
 from isolated_authority_publishers import (
     IndependentUserIntentPublisher,
@@ -29,9 +38,19 @@ from subject_sol_contract import (
     SubjectSolRuntimeStore,
     _document_sha256,
 )
+from multi_agent_report_contract import (
+    _validate_diagnostic_record,
+    _validate_read_bundle,
+    validate_dual_report_plan,
+    validate_luna_investigation_report,
+    validate_luna_investigation_report_v2,
+    validate_sol_handoff_v3,
+    validate_terra_final_report_v2,
+)
 
 
 BATCH_SCHEMA = "study-intake-nightly-sol-batch-v2"
+V2_HANDOFF_SCHEMA = "study-intake-nightly-multi-agent-handoff-v1"
 RESULT_SCHEMA = "study-intake-nightly-sol-adapter-result-v1"
 AUTHORIZATION_SCHEMA = "study-intake-nightly-command-authorization-v1"
 SUBJECT_LABELS = {"数学": "math", "408": "cs408", "英语": "english"}
@@ -39,6 +58,7 @@ ABSOLUTE_COMMAND = re.compile(
     r"^开始 (\d{4}-\d{2}-\d{2}) (数学|408|英语)正式入库$"
 )
 TODAY_COMMAND = re.compile(r"^开始今天的(数学|408|英语)正式入库$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class NightlySolError(ValueError):
@@ -144,7 +164,7 @@ def validate_command_authorization(
 
 
 def _package_binding(package: Mapping[str, Any]) -> dict[str, str]:
-    if package.get("schema_version") != PACKAGE_SCHEMA:
+    if package.get("schema_version") not in {PACKAGE_SCHEMA, PACKAGE_V2_SCHEMA}:
         raise NightlySolError("analysis_package_invalid")
     digest = hashlib.sha256(canonical_bytes(package)).hexdigest()
     return {
@@ -152,6 +172,912 @@ def _package_binding(package: Mapping[str, Any]) -> dict[str, str]:
         "package_sha256": digest,
         "package_ref": "study-intake-analysis-package://sha256/" + digest,
     }
+
+
+def _binding_object(
+    store: AnalysisPackageStore,
+    binding: Mapping[str, Any],
+    *,
+    capture: bool = False,
+    code: str,
+) -> dict[str, Any]:
+    digest = _sha(binding.get("sha256"), code)
+    expected_prefix = (
+        "study-intake-durable-capture://sha256/"
+        if capture
+        else {
+            "sealed_plan": "study-intake-orchestration-read-plan://sha256/",
+            "read_bundle": "study-intake-read-bundle://sha256/",
+            "terra_initial": "study-intake-terra-initial-analysis://sha256/",
+            "terra_final": "study-intake-terra-final-report://sha256/",
+            "sol_handoff": "study-intake-sol-handoff-envelope://sha256/",
+        }.get(str(binding.get("kind")))
+    )
+    if expected_prefix is None or binding.get("ref") != expected_prefix + digest:
+        raise NightlySolError(code)
+    try:
+        value = (
+            store.reopen_capture(digest)
+            if capture
+            else store.reopen_analysis_object(digest)
+        )
+    except AnalysisPackageError as exc:
+        raise NightlySolError(code) from exc
+    if value.get("schema_version") != binding.get("schema_version"):
+        raise NightlySolError(code)
+    return value
+
+
+def _content_addressed_json(
+    path: Path, digest: str, code: str, *, allow_raw: bool = False
+) -> dict[str, Any]:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise NightlySolError(code) from exc
+    if path.is_symlink() or hashlib.sha256(payload).hexdigest() != digest:
+        raise NightlySolError(code)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        value = None
+    if not isinstance(value, dict):
+        if not allow_raw:
+            raise NightlySolError(code)
+        try:
+            raw_text = payload.decode("utf-8")
+        except UnicodeError as exc:
+            raise NightlySolError(code) from exc
+        return {
+            "artifact_sha256": digest,
+            "payload_format": "utf8_raw_provider_output",
+            "raw_text": raw_text,
+        }
+    return value
+
+
+def _artifact_candidates(root: Path, digest: str) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob(f"{digest}.json")
+        if path.is_file() and not path.is_symlink()
+    ) if root.is_dir() else []
+
+
+def _artifact_from_ref(
+    store: AnalysisPackageStore,
+    *,
+    digest: str,
+    ref: str,
+    code: str,
+) -> dict[str, Any]:
+    checked_digest = _sha(digest, code)
+    routes = {
+        "study-intake-direct-model-stage-raw://sha256/": (
+            "private/reports/direct-model-stage-raw", True, True
+        ),
+        "study-intake-direct-model-stage-execution://sha256/": (
+            "private/reports/direct-model-stage-execution", False, False
+        ),
+        "study-intake-direct-model-stage-normalization://sha256/": (
+            "private/reports/direct-model-stage-normalization", False, False
+        ),
+        "study-intake-model-stage-raw-output://sha256/": (
+            "dispatch/model-stage-raw-outputs", True, True
+        ),
+        "study-intake-model-stage-execution://sha256/": (
+            "dispatch/model-stage-execution-receipts", True, False
+        ),
+        "study-intake-model-stage-normalization://sha256/": (
+            "dispatch/model-stage-normalization-receipts", True, False
+        ),
+        "study-intake-mcp-stage-transcript://sha256/": (
+            "private/reports/mcp-stage-transcripts", False, False
+        ),
+        "study-intake-mcp-read-session-call://sha256/": (
+            "dispatch/mcp-read-session-call-receipts", False, False
+        ),
+        "study-intake-mcp-read-session://sha256/": (
+            "dispatch/mcp-read-session-receipts", False, False
+        ),
+        "study-intake-mcp-investigation-session://sha256/": (
+            "dispatch/mcp-read-session-receipts", False, False
+        ),
+    }
+    route = next(
+        (
+            (prefix, relative, recursive, allow_raw)
+            for prefix, (relative, recursive, allow_raw) in routes.items()
+            if ref == prefix + checked_digest
+        ),
+        None,
+    )
+    if route is None:
+        raise NightlySolError(code)
+    _prefix, relative, recursive, allow_raw = route
+    base = store.root / relative
+    direct = base / "sha256" / checked_digest[:2] / f"{checked_digest}.json"
+    candidates = (
+        _artifact_candidates(base, checked_digest)
+        if recursive
+        else [direct]
+    )
+    if not candidates:
+        raise NightlySolError(code)
+    values = [
+        _content_addressed_json(
+            path, checked_digest, code, allow_raw=allow_raw
+        )
+        for path in candidates
+    ]
+    if any(value != values[0] for value in values[1:]):
+        raise NightlySolError(code)
+    return values[0]
+
+
+def _authority_key(store: AnalysisPackageStore) -> bytes:
+    path = store.root / "dispatch/state/authority.key"
+    try:
+        node = path.lstat()
+        key = path.read_bytes()
+    except OSError as exc:
+        raise NightlySolError("multi_agent_authority_key_missing") from exc
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or stat.S_IMODE(node.st_mode) != 0o600
+        or len(key) != 32
+    ):
+        raise NightlySolError("multi_agent_authority_key_invalid")
+    return key
+
+
+def _verify_hmac_receipt(
+    value: Mapping[str, Any], *, key: bytes, purpose: str, code: str
+) -> dict[str, Any]:
+    core = {
+        name: copy.deepcopy(item)
+        for name, item in value.items()
+        if name not in {"hmac_key_id", "hmac_sha256"}
+    }
+    expected = hmac.new(
+        key,
+        canonical_bytes({"purpose": purpose, "payload": core}),
+        hashlib.sha256,
+    ).hexdigest()
+    if (
+        value.get("hmac_key_id") != hashlib.sha256(key).hexdigest()
+        or not hmac.compare_digest(str(value.get("hmac_sha256") or ""), expected)
+        or value.get("formal_write_count") != 0
+    ):
+        raise NightlySolError(code)
+    return copy.deepcopy(dict(value))
+
+
+def _read_session_manifest(
+    store: AnalysisPackageStore, digest: str
+) -> dict[str, Any]:
+    checked = _sha(digest, "multi_agent_read_session_manifest_invalid")
+    path = (
+        store.root / "private/mcp-read-sessions/sha256"
+        / checked[:2] / f"{checked}.json"
+    )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise NightlySolError("multi_agent_read_session_manifest_invalid") from exc
+    core = {
+        name: copy.deepcopy(item)
+        for name, item in value.items()
+        if name != "manifest_sha256"
+    } if isinstance(value, Mapping) else {}
+    if (
+        path.is_symlink()
+        or not isinstance(value, dict)
+        or value.get("manifest_sha256") != checked
+        or sha256_value(core) != checked
+        or value.get("formal_write_count") != 0
+    ):
+        raise NightlySolError("multi_agent_read_session_manifest_invalid")
+    return value
+
+
+def _all_strings(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, Mapping):
+        result: set[str] = set()
+        for item in value.values():
+            result.update(_all_strings(item))
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        result = set()
+        for item in value:
+            result.update(_all_strings(item))
+        return result
+    return set()
+
+
+def _digest_from_ref(ref: Any, prefixes: Sequence[str], code: str) -> str:
+    if not isinstance(ref, str):
+        raise NightlySolError(code)
+    for prefix in prefixes:
+        if ref.startswith(prefix):
+            digest = ref[len(prefix):]
+            if SHA256_RE.fullmatch(digest):
+                return digest
+    raise NightlySolError(code)
+
+
+def _execution_chain(
+    store: AnalysisPackageStore,
+    *,
+    binding: Mapping[str, Any],
+    provider_stage_name: str,
+    capture_id: str,
+    code: str,
+) -> dict[str, Any]:
+    raw = _artifact_from_ref(
+        store,
+        digest=str(binding["raw_output_sha256"]),
+        ref=str(binding["raw_output_ref"]),
+        code=code,
+    )
+    execution = _artifact_from_ref(
+        store,
+        digest=str(binding["stage_execution_receipt_sha256"]),
+        ref=str(binding["stage_execution_receipt_ref"]),
+        code=code,
+    )
+    normalization = _artifact_from_ref(
+        store,
+        digest=str(binding["normalization_receipt_sha256"]),
+        ref=str(binding["normalization_receipt_ref"]),
+        code=code,
+    )
+    semantic_stage_name = (
+        "critical_review"
+        if provider_stage_name.endswith("_critical_review")
+        else "analysis"
+    )
+    provider_stage_names = {
+        str(value)
+        for value in (
+            execution.get("provider_stage_name"),
+            normalization.get("provider_stage_name"),
+        )
+        if value is not None
+    }
+    semantic_stage_names = {
+        str(value)
+        for value in (
+            execution.get("stage_name"), normalization.get("stage_name")
+        )
+        if value is not None
+    }
+    raw_digests = {
+        value
+        for value in (
+            execution.get("raw_output_object_sha256"),
+            execution.get("raw_output_sha256"),
+            normalization.get("raw_output_object_sha256"),
+            normalization.get("raw_output_sha256"),
+        )
+        if value is not None
+    }
+    execution_digests = {
+        value
+        for value in (
+            normalization.get("execution_receipt_sha256"),
+            normalization.get("stage_execution_receipt_sha256"),
+        )
+        if value is not None
+    }
+    execution_bindings = [
+        dict(value)
+        for value in (
+            raw.get("execution_binding"),
+            execution.get("execution_binding"),
+            normalization.get("execution_binding"),
+        )
+        if isinstance(value, Mapping)
+    ]
+    if (
+        provider_stage_names and provider_stage_names != {provider_stage_name}
+        or semantic_stage_names
+        and not semantic_stage_names <= {provider_stage_name, semantic_stage_name}
+        or raw_digests and raw_digests != {binding["raw_output_sha256"]}
+        or execution_digests
+        and execution_digests != {binding["stage_execution_receipt_sha256"]}
+        or execution.get("formal_write_count") != 0
+        or normalization.get("formal_write_count") != 0
+        or raw.get("formal_write_count") not in {None, 0}
+        or execution_bindings
+        and (
+            any(value != execution_bindings[0] for value in execution_bindings[1:])
+            or execution_bindings[0].get("subject")
+            != provider_stage_name.split("_", 1)[0]
+            or execution_bindings[0].get("capture_id") != capture_id
+            or execution_bindings[0].get("provider_stage_name")
+            != provider_stage_name
+        )
+    ):
+        raise NightlySolError(code)
+    return {
+        "binding": copy.deepcopy(dict(binding)),
+        "raw_output": raw,
+        "stage_execution_receipt": execution,
+        "normalization_receipt": normalization,
+    }
+
+
+def _luna_success_handoff(
+    store: AnalysisPackageStore,
+    *,
+    key: bytes,
+    plan: Mapping[str, Any],
+    read_bundle: Mapping[str, Any],
+    branch: Mapping[str, Any],
+    package_binding: Mapping[str, Any],
+    branch_result: Mapping[str, Any],
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    branch_id = str(branch["branch_id"])
+    if (
+        package_binding.get("kind") != "investigation_report"
+        or package_binding.get("branch_id") != branch_id
+        or package_binding.get("report_sha256") != report.get("report_sha256")
+    ):
+        raise NightlySolError("multi_agent_luna_report_binding_invalid")
+    checked_report = (
+        validate_luna_investigation_report_v2(
+            report,
+            plan=plan,
+            read_bundle=read_bundle,
+            branch_result=branch_result,
+        )
+        if report.get("schema_version") == "luna_investigation_report_v2"
+        else validate_luna_investigation_report(
+            report,
+            plan=plan,
+            read_bundle=read_bundle,
+            branch_result=branch_result,
+        )
+    )
+    artifacts = checked_report.get("execution_artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise NightlySolError("multi_agent_luna_execution_artifacts_missing")
+    session = _read_session_manifest(
+        store, str(artifacts["read_session_manifest_sha256"])
+    )
+    if (
+        session.get("read_session_id") != artifacts.get("read_session_id")
+        or session.get("read_session_id") != branch_result.get("read_session_id")
+        or session.get("subject") != plan.get("subject")
+        or session.get("capture_id") != plan.get("capture_id")
+        or session.get("candidate_release_id") != plan.get("release_id")
+        or session.get("generation") != plan.get("generation")
+        or session.get("artifact_ids") != branch.get("allowed_task_artifact_ids")
+        or (
+            session.get("authority_snapshot_manifest_sha256") is not None
+            and session.get("authority_snapshot_manifest_sha256")
+            != plan.get("authority_snapshot_sha256")
+        )
+    ):
+        raise NightlySolError("multi_agent_read_session_binding_invalid")
+    opened_sha = _digest_from_ref(
+        artifacts.get("opened_session_receipt_ref"),
+        ("study-intake-mcp-read-session://sha256/",),
+        "multi_agent_opened_session_receipt_invalid",
+    )
+    opened = _verify_hmac_receipt(
+        _artifact_from_ref(
+            store,
+            digest=opened_sha,
+            ref=str(artifacts["opened_session_receipt_ref"]),
+            code="multi_agent_opened_session_receipt_invalid",
+        ),
+        key=key,
+        purpose="mcp-read-session-receipt-v1",
+        code="multi_agent_opened_session_receipt_invalid",
+    )
+    final_sha = _digest_from_ref(
+        artifacts.get("final_session_receipt_ref"),
+        ("study-intake-mcp-investigation-session://sha256/",),
+        "multi_agent_final_session_receipt_invalid",
+    )
+    final = _verify_hmac_receipt(
+        _artifact_from_ref(
+            store,
+            digest=final_sha,
+            ref=str(artifacts["final_session_receipt_ref"]),
+            code="multi_agent_final_session_receipt_invalid",
+        ),
+        key=key,
+        purpose="mcp-investigation-session-receipt-v1",
+        code="multi_agent_final_session_receipt_invalid",
+    )
+    transcript = _artifact_from_ref(
+        store,
+        digest=str(artifacts["mcp_transcript_sha256"]),
+        ref=str(artifacts["mcp_transcript_ref"]),
+        code="multi_agent_mcp_transcript_invalid",
+    )
+    call_receipt_raw = _artifact_from_ref(
+        store,
+        digest=str(artifacts["mcp_call_receipt_sha256"]),
+        ref=str(artifacts["mcp_call_receipt_ref"]),
+        code="multi_agent_mcp_call_receipt_invalid",
+    )
+    call_purpose = {
+        "mcp_stage_call_receipt_v1": "mcp-read-session-model-calls-v1",
+        "mcp_stage_call_receipt_v2": "mcp-read-session-model-calls-v2",
+    }.get(str(call_receipt_raw.get("schema_version")))
+    if call_purpose is None:
+        raise NightlySolError("multi_agent_mcp_call_receipt_invalid")
+    call_receipt = _verify_hmac_receipt(
+        call_receipt_raw,
+        key=key,
+        purpose=call_purpose,
+        code="multi_agent_mcp_call_receipt_invalid",
+    )
+    execution = _execution_chain(
+        store,
+        binding={
+            "raw_output_sha256": artifacts["raw_output_sha256"],
+            "raw_output_ref": artifacts["raw_output_ref"],
+            "stage_execution_receipt_sha256": artifacts[
+                "stage_execution_receipt_sha256"
+            ],
+            "stage_execution_receipt_ref": artifacts[
+                "stage_execution_receipt_ref"
+            ],
+            "normalization_receipt_sha256": artifacts[
+                "normalization_receipt_sha256"
+            ],
+            "normalization_receipt_ref": artifacts[
+                "normalization_receipt_ref"
+            ],
+        },
+        provider_stage_name=f"{plan['subject']}_luna_analysis",
+        capture_id=str(plan["capture_id"]),
+        code="multi_agent_luna_execution_chain_invalid",
+    )
+    evidence_refs = {
+        str(row.get("evidence_ref"))
+        for row in branch_result.get("evidence", [])
+        if isinstance(row, Mapping)
+    }
+    if (
+        opened.get("phase") != "opened"
+        or opened.get("read_session_id") != session["read_session_id"]
+        or opened.get("read_session_manifest_sha256") != session["manifest_sha256"]
+        or final.get("phase") != "investigation_complete"
+        or final.get("branch_id") != branch_id
+        or final.get("read_session_id") != session["read_session_id"]
+        or final.get("opened_receipt_sha256") != opened_sha
+        or final.get("mcp_call_receipt_sha256")
+        != artifacts["mcp_call_receipt_sha256"]
+        or final.get("mcp_transcript_sha256") != artifacts["mcp_transcript_sha256"]
+        or transcript.get("subject") != plan["subject"]
+        or transcript.get("read_session_id") != session["read_session_id"]
+        or transcript.get("read_session_manifest_sha256") != session["manifest_sha256"]
+        or transcript.get("calls") != branch_result.get("calls")
+        or transcript.get("formal_write_count") != 0
+        or call_receipt.get("subject") != plan["subject"]
+        or call_receipt.get("read_session_id") != session["read_session_id"]
+        or call_receipt.get("transcript_sha256") != artifacts["mcp_transcript_sha256"]
+        or call_receipt.get("phase") != "model_stage_calls"
+        or call_receipt.get("mcp_tool_call_count") != len(branch_result.get("calls", []))
+        or not evidence_refs <= _all_strings(transcript)
+    ):
+        raise NightlySolError("multi_agent_luna_read_evidence_binding_invalid")
+    return {
+        "branch_id": branch_id,
+        "outcome": "report",
+        "package_output_binding": copy.deepcopy(dict(package_binding)),
+        "branch_result": copy.deepcopy(dict(branch_result)),
+        "report": checked_report,
+        "read_session_manifest": session,
+        "opened_session_receipt": opened,
+        "final_session_receipt": final,
+        "mcp_transcript": transcript,
+        "mcp_call_receipt": call_receipt,
+        "execution": execution,
+    }
+
+
+def _luna_diagnostic_handoff(
+    store: AnalysisPackageStore,
+    *,
+    key: bytes,
+    plan: Mapping[str, Any],
+    branch: Mapping[str, Any],
+    package_binding: Mapping[str, Any],
+    branch_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    branch_id = str(branch["branch_id"])
+    checked = _validate_diagnostic_record(branch_result, plan=plan)
+    if (
+        package_binding.get("kind") != "diagnostic_record"
+        or package_binding.get("branch_id") != branch_id
+        or package_binding.get("report_sha256") != checked.get("result_sha256")
+    ):
+        raise NightlySolError("multi_agent_luna_diagnostic_binding_invalid")
+    findings = checked.get("findings")
+    technical = next(
+        (
+            row for row in findings
+            if isinstance(row, Mapping)
+            and row.get("kind") == "technical_diagnostic"
+        ),
+        None,
+    ) if isinstance(findings, list) else None
+    result: dict[str, Any] = {
+        "branch_id": branch_id,
+        "outcome": "diagnostic",
+        "package_output_binding": copy.deepcopy(dict(package_binding)),
+        "branch_result": checked,
+    }
+    if not isinstance(technical, Mapping):
+        return result
+    final_ref = technical.get("failure_session_receipt_ref")
+    final_sha = technical.get("failure_session_receipt_sha256")
+    if final_ref is None and final_sha is None:
+        return result
+    if (
+        not isinstance(final_sha, str)
+        or final_sha != _digest_from_ref(
+            final_ref,
+            ("study-intake-mcp-investigation-session://sha256/",),
+            "multi_agent_failure_session_receipt_invalid",
+        )
+    ):
+        raise NightlySolError("multi_agent_failure_session_receipt_invalid")
+    final = _verify_hmac_receipt(
+        _artifact_from_ref(
+            store,
+            digest=final_sha,
+            ref=str(final_ref),
+            code="multi_agent_failure_session_receipt_invalid",
+        ),
+        key=key,
+        purpose="mcp-investigation-session-receipt-v1",
+        code="multi_agent_failure_session_receipt_invalid",
+    )
+    manifest = _read_session_manifest(
+        store, str(final.get("read_session_manifest_sha256"))
+    )
+    if (
+        final.get("phase")
+        not in {
+            "investigation_failed",
+            "investigation_cancelled",
+            "investigation_timed_out",
+        }
+        or final.get("terminal_status") != checked.get("status")
+        or final.get("branch_id") != branch_id
+        or final.get("subject") != plan.get("subject")
+        or final.get("read_session_id") != checked.get("read_session_id")
+        or manifest.get("read_session_id") != checked.get("read_session_id")
+        or manifest.get("capture_id") != plan.get("capture_id")
+        or manifest.get("artifact_ids") != branch.get("allowed_task_artifact_ids")
+    ):
+        raise NightlySolError("multi_agent_failure_session_binding_invalid")
+    result.update({
+        "read_session_manifest": manifest,
+        "final_session_receipt": final,
+    })
+    opened_sha = final.get("opened_receipt_sha256")
+    if not isinstance(opened_sha, str):
+        raise NightlySolError("multi_agent_failure_opened_session_invalid")
+    opened_ref = "study-intake-mcp-read-session://sha256/" + opened_sha
+    opened = _verify_hmac_receipt(
+        _artifact_from_ref(
+            store,
+            digest=opened_sha,
+            ref=opened_ref,
+            code="multi_agent_failure_opened_session_invalid",
+        ),
+        key=key,
+        purpose="mcp-read-session-receipt-v1",
+        code="multi_agent_failure_opened_session_invalid",
+    )
+    if (
+        opened.get("phase") != "opened"
+        or opened.get("read_session_id") != manifest.get("read_session_id")
+        or opened.get("read_session_manifest_sha256")
+        != manifest.get("manifest_sha256")
+    ):
+        raise NightlySolError("multi_agent_failure_opened_session_invalid")
+    result["opened_session_receipt"] = opened
+    pairs = (
+        (
+            "mcp_transcript_sha256",
+            "mcp_transcript_ref",
+            "mcp_transcript",
+            "multi_agent_failure_transcript_invalid",
+        ),
+        (
+            "mcp_call_receipt_sha256",
+            "mcp_call_receipt_ref",
+            "mcp_call_receipt",
+            "multi_agent_failure_call_receipt_invalid",
+        ),
+        (
+            "raw_output_object_sha256",
+            "raw_output_object_ref",
+            "raw_output",
+            "multi_agent_failure_raw_output_invalid",
+        ),
+        (
+            "stage_execution_receipt_sha256",
+            "stage_execution_receipt_ref",
+            "stage_execution_receipt",
+            "multi_agent_failure_execution_receipt_invalid",
+        ),
+    )
+    for digest_key, ref_key, output_key, code in pairs:
+        digest, ref = final.get(digest_key), final.get(ref_key)
+        if digest is None and ref is None:
+            continue
+        if not isinstance(digest, str) or not isinstance(ref, str):
+            raise NightlySolError(code)
+        artifact = _artifact_from_ref(
+            store, digest=digest, ref=ref, code=code
+        )
+        if output_key == "mcp_call_receipt":
+            purpose = {
+                "mcp_stage_call_receipt_v1": "mcp-read-session-model-calls-v1",
+                "mcp_stage_call_receipt_v2": "mcp-read-session-model-calls-v2",
+            }.get(str(artifact.get("schema_version")))
+            if purpose is None:
+                raise NightlySolError(code)
+            artifact = _verify_hmac_receipt(
+                artifact, key=key, purpose=purpose, code=code
+            )
+        result[output_key] = artifact
+    return result
+
+
+def _deep_reopen_analysis_package_v2(
+    store: AnalysisPackageStore, package_digest: str
+) -> dict[str, Any]:
+    try:
+        package = reopen_analysis_package_v2(store, package_digest)
+        capture = validate_durable_capture(
+            _binding_object(
+                store,
+                package["capture"],
+                capture=True,
+                code="multi_agent_capture_reopen_invalid",
+            )
+        )
+        plan = _binding_object(
+            store,
+            package["plan"],
+            code="multi_agent_plan_reopen_invalid",
+        )
+        validate_dual_report_plan(plan)
+        initial = _validate_terra_initial(
+            _binding_object(
+                store,
+                package["terra_initial"],
+                code="multi_agent_terra_initial_reopen_invalid",
+            ),
+            capture=capture,
+            plan=plan,
+        )
+    except (AnalysisPackageError, ValueError, TypeError, KeyError) as exc:
+        raise NightlySolError("analysis_package_v2_deep_reopen_invalid") from exc
+    if (
+        capture.get("capture_id") != package.get("capture_id")
+        or capture.get("subject") != package.get("subject")
+        or capture.get("study_date") != package.get("study_date")
+        or capture.get("captured_at") != package.get("captured_at")
+        or capture.get("capture_intake_date") != package.get("capture_intake_date")
+        or plan.get("capture_id") != capture.get("capture_id")
+        or plan.get("subject") != capture.get("subject")
+    ):
+        raise NightlySolError("analysis_package_v2_capture_binding_invalid")
+    output_rows = package.get("luna_outputs")
+    branches = plan["branches"]
+    if (
+        not isinstance(output_rows, list)
+        or [row.get("branch_id") for row in output_rows]
+        != [row["branch_id"] for row in branches]
+    ):
+        raise NightlySolError("analysis_package_v2_luna_set_invalid")
+    branch_results: list[dict[str, Any]] = []
+    reopened_outputs: list[dict[str, Any]] = []
+    for row in output_rows:
+        if not isinstance(row, Mapping):
+            raise NightlySolError("analysis_package_v2_luna_set_invalid")
+        result_digest = _sha(
+            row.get("branch_result_sha256"),
+            "multi_agent_branch_result_reopen_invalid",
+        )
+        if row.get("branch_result_ref") != (
+            "study-intake-read-branch-result://sha256/" + result_digest
+        ):
+            raise NightlySolError("multi_agent_branch_result_reopen_invalid")
+        try:
+            branch_result = store.reopen_analysis_object(result_digest)
+            output = store.reopen_analysis_object(
+                _sha(row.get("sha256"), "multi_agent_luna_output_reopen_invalid")
+            )
+        except AnalysisPackageError as exc:
+            raise NightlySolError("multi_agent_luna_output_reopen_invalid") from exc
+        expected_prefix = (
+            "study-intake-luna-investigation-report://sha256/"
+            if row.get("kind") == "investigation_report"
+            else "study-intake-luna-diagnostic-record://sha256/"
+        )
+        if (
+            row.get("ref") != expected_prefix + str(row.get("sha256"))
+            or output.get("branch_id") != row.get("branch_id")
+            or branch_result.get("branch_id") != row.get("branch_id")
+            or output.get("schema_version") != row.get("schema_version")
+            or row.get("report_sha256")
+            != (
+                output.get("report_sha256")
+                or output.get("result_sha256")
+            )
+        ):
+            raise NightlySolError("multi_agent_luna_output_binding_invalid")
+        branch_results.append(branch_result)
+        reopened_outputs.append(output)
+    try:
+        read_bundle = _validate_read_bundle(
+            _binding_object(
+                store,
+                package["read_bundle"],
+                code="multi_agent_read_bundle_reopen_invalid",
+            ),
+            plan=plan,
+            branch_results=branch_results,
+        )
+    except (ValueError, TypeError, KeyError) as exc:
+        raise NightlySolError("multi_agent_read_bundle_reopen_invalid") from exc
+    key = _authority_key(store)
+    luna_handoffs: list[dict[str, Any]] = []
+    reports: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for branch, row, branch_result, output in zip(
+        branches, output_rows, branch_results, reopened_outputs
+    ):
+        try:
+            if row["kind"] == "investigation_report":
+                handoff = _luna_success_handoff(
+                    store,
+                    key=key,
+                    plan=plan,
+                    read_bundle=read_bundle,
+                    branch=branch,
+                    package_binding=row,
+                    branch_result=branch_result,
+                    report=output,
+                )
+                reports.append(output)
+            else:
+                handoff = _luna_diagnostic_handoff(
+                    store,
+                    key=key,
+                    plan=plan,
+                    branch=branch,
+                    package_binding=row,
+                    branch_result=branch_result,
+                )
+                diagnostics.append(output)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise NightlySolError("multi_agent_luna_handoff_invalid") from exc
+        luna_handoffs.append(handoff)
+    terra_input = {
+        "subject": plan["subject"],
+        "capture_id": plan["capture_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "read_bundle_sha256": read_bundle["read_bundle_sha256"],
+        "branch_coverage": [
+            {
+                "branch_id": row["branch_id"],
+                "outcome": (
+                    "report"
+                    if row["kind"] == "investigation_report"
+                    else "diagnostic"
+                ),
+            }
+            for row in output_rows
+        ],
+        "luna_reports": reports,
+        "luna_diagnostics": diagnostics,
+        "formal_write_count": 0,
+    }
+    try:
+        terra_final = validate_terra_final_report_v2(
+            _binding_object(
+                store,
+                package["terra_final"],
+                code="multi_agent_terra_final_reopen_invalid",
+            ),
+            terra_input=terra_input,
+        )
+        sol_handoff = _binding_object(
+            store,
+            package["sol_handoff"],
+            code="multi_agent_sol_handoff_reopen_invalid",
+        )
+        legacy_core = {
+            "schema_version": "sol_handoff_envelope_v1",
+            "subject": sol_handoff["subject"],
+            "capture_id": sol_handoff["capture_id"],
+            "read_bundle_sha256": sol_handoff["read_bundle_sha256"],
+            "candidate_sha256": sol_handoff.get("candidate_sha256"),
+            "review_sha256": sol_handoff.get("review_sha256"),
+            "risk_report_sha256": sol_handoff.get("risk_report_sha256"),
+            "sol_review_ready": sol_handoff.get("sol_review_ready"),
+            "diagnostic_review_ready": sol_handoff.get(
+                "diagnostic_review_ready"
+            ),
+            "quality_clean": sol_handoff.get("quality_clean"),
+            "allowed_sol_actions": [
+                "adopt", "defer", "modify", "reject", "request_reread"
+            ],
+            "formal_apply_authorized": False,
+            "formal_write_count": 0,
+        }
+        validate_sol_handoff_v3(
+            sol_handoff,
+            legacy_handoff={
+                **legacy_core,
+                "handoff_sha256": sha256_value(legacy_core),
+            },
+            terra_input=terra_input,
+            terra_final_report=terra_final,
+        )
+        initial_execution_binding = _validate_terra_execution(
+            package["terra_initial_execution"],
+            subject=str(package["subject"]),
+            phase="initial",
+        )
+        final_execution_binding = _validate_terra_execution(
+            package["terra_final_execution"],
+            subject=str(package["subject"]),
+            phase="final",
+        )
+    except (AnalysisPackageError, ValueError, TypeError, KeyError) as exc:
+        raise NightlySolError("analysis_package_v2_terra_handoff_invalid") from exc
+    initial_execution = _execution_chain(
+        store,
+        binding=initial_execution_binding,
+        provider_stage_name=f"{package['subject']}_analysis",
+        capture_id=str(package["capture_id"]),
+        code="multi_agent_terra_initial_execution_invalid",
+    )
+    final_execution = _execution_chain(
+        store,
+        binding=final_execution_binding,
+        provider_stage_name=f"{package['subject']}_critical_review",
+        capture_id=str(package["capture_id"]),
+        code="multi_agent_terra_final_execution_invalid",
+    )
+    core = {
+        "schema_version": V2_HANDOFF_SCHEMA,
+        "package_schema_version": PACKAGE_V2_SCHEMA,
+        "package_sha256": package_digest,
+        "capture_id": capture["capture_id"],
+        "subject": capture["subject"],
+        "frozen_capture": capture,
+        "terra_initial": initial,
+        "terra_initial_execution": initial_execution,
+        "investigation_plan": plan,
+        "luna_investigations": luna_handoffs,
+        "investigation_summary": read_bundle,
+        "terra_final": terra_final,
+        "terra_final_execution": final_execution,
+        "sol_handoff": sol_handoff,
+        "formal_write_count": 0,
+    }
+    return {**core, "handoff_sha256": sha256_value(core)}
 
 
 def freeze_nightly_batch(
@@ -163,6 +1089,7 @@ def freeze_nightly_batch(
     skill_source_path: Path,
     declared_version: str | None = None,
     authorization: Mapping[str, Any],
+    package_store: AnalysisPackageStore | None = None,
 ) -> dict[str, Any]:
     if subject not in SUBJECT_LABELS.values():
         raise NightlySolError("nightly_subject_invalid")
@@ -173,6 +1100,7 @@ def freeze_nightly_batch(
         capture_intake_date=capture_intake_date,
     )
     rows: list[dict[str, str]] = []
+    package_schemas: set[str] = set()
     for package in packages:
         if (
             package.get("subject") != subject
@@ -181,16 +1109,36 @@ def freeze_nightly_batch(
             or package.get("formal_write_count") != 0
         ):
             raise NightlySolError("analysis_package_batch_binding_invalid")
+        package_schemas.add(str(package.get("schema_version") or ""))
         rows.append(_package_binding(package))
     rows.sort(key=lambda row: row["capture_id"])
     capture_ids = [row["capture_id"] for row in rows]
     if not capture_ids or len(capture_ids) != len(set(capture_ids)):
         raise NightlySolError("nightly_capture_set_invalid")
+    if len(package_schemas) != 1 or not package_schemas <= {
+        PACKAGE_SCHEMA, PACKAGE_V2_SCHEMA
+    }:
+        raise NightlySolError("analysis_package_schema_set_invalid")
     skill_path = Path(skill_source_path)
     if skill_path.is_symlink() or not skill_path.is_file():
         raise NightlySolError("nightly_skill_source_missing")
     skill_sha = hashlib.sha256(skill_path.read_bytes()).hexdigest()
     capture_set_sha = sha256_value(capture_ids)
+    package_schema = next(iter(package_schemas))
+    multi_agent_handoffs: list[dict[str, Any]] = []
+    handoff_set_sha: str | None = None
+    if package_schema == PACKAGE_V2_SCHEMA:
+        if package_store is None:
+            raise NightlySolError("analysis_package_v2_store_required")
+        multi_agent_handoffs = [
+            _deep_reopen_analysis_package_v2(
+                package_store, row["package_sha256"]
+            )
+            for row in rows
+        ]
+        if [row["capture_id"] for row in multi_agent_handoffs] != capture_ids:
+            raise NightlySolError("analysis_package_v2_handoff_set_invalid")
+        handoff_set_sha = sha256_value(multi_agent_handoffs)
     batch_id = "NIGHTLY-" + sha256_value(
         {
             "subject": subject,
@@ -198,9 +1146,17 @@ def freeze_nightly_batch(
             "capture_set_sha256": capture_set_sha,
             "skill_source_sha256": skill_sha,
             "authorization_id": checked_authorization["authorization_id"],
+            **(
+                {
+                    "analysis_package_schema_version": package_schema,
+                    "multi_agent_handoff_set_sha256": handoff_set_sha,
+                }
+                if package_schema == PACKAGE_V2_SCHEMA
+                else {}
+            ),
         }
     )[:28].upper()
-    return {
+    result = {
         "schema_version": BATCH_SCHEMA,
         "batch_id": batch_id,
         "subject": subject,
@@ -217,6 +1173,13 @@ def freeze_nightly_batch(
         "status": "frozen",
         "formal_write_count": 0,
     }
+    if package_schema == PACKAGE_V2_SCHEMA:
+        result.update({
+            "analysis_package_schema_version": package_schema,
+            "multi_agent_handoffs": multi_agent_handoffs,
+            "multi_agent_handoff_set_sha256": handoff_set_sha,
+        })
+    return result
 
 
 def validate_adapter_result(
@@ -345,9 +1308,99 @@ def _stage_handoff(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _subject_tasks_v2(
+    *, batch: Mapping[str, Any], package_store: AnalysisPackageStore
+) -> list[dict[str, Any]]:
+    handoffs = batch.get("multi_agent_handoffs")
+    if (
+        batch.get("analysis_package_schema_version") != PACKAGE_V2_SCHEMA
+        or not isinstance(handoffs, list)
+        or batch.get("multi_agent_handoff_set_sha256")
+        != sha256_value(handoffs)
+        or [row.get("capture_id") for row in handoffs]
+        != list(batch.get("capture_ids") or [])
+    ):
+        raise NightlySolError("analysis_package_v2_batch_handoff_invalid")
+    packages = package_store.packages_for(
+        subject=str(batch["subject"]),
+        capture_intake_date_value=str(batch["capture_intake_date"]),
+    )
+    by_capture = {str(row["capture_id"]): row for row in packages}
+    handoff_by_capture = {str(row["capture_id"]): row for row in handoffs}
+    tasks: list[dict[str, Any]] = []
+    for binding in batch["analysis_packages"]:
+        capture_id = str(binding["capture_id"])
+        package = by_capture.get(capture_id)
+        if (
+            package is None
+            or package.get("schema_version") != PACKAGE_V2_SCHEMA
+            or _package_binding(package) != dict(binding)
+        ):
+            raise NightlySolError("analysis_package_reopen_mismatch")
+        recomputed = _deep_reopen_analysis_package_v2(
+            package_store, str(binding["package_sha256"])
+        )
+        if handoff_by_capture.get(capture_id) != recomputed:
+            raise NightlySolError("analysis_package_v2_batch_handoff_invalid")
+        initial_execution = package["terra_initial_execution"]
+        final_execution = package["terra_final_execution"]
+        terra_final = recomputed["terra_final"]
+        warning_codes = sorted({
+            _warning_code(value)
+            for value in [
+                *list(terra_final.get("warnings") or []),
+                *list(terra_final.get("evidence_gaps") or []),
+            ]
+        })
+        authority_snapshot = sha256_value({
+            "authorization": batch["authorization"],
+            "skill": batch["skill"],
+            "capture_sha256": package["capture"]["sha256"],
+            "package_sha256": binding["package_sha256"],
+            "multi_agent_handoff_sha256": recomputed["handoff_sha256"],
+        })
+        tasks.append({
+            "capture_id": capture_id,
+            "unit_sha256": binding["package_sha256"],
+            "input_fingerprint": package["capture"]["sha256"],
+            "study_date": package["study_date"],
+            "frozen_payload_sha256": package["capture"]["sha256"],
+            "authority_snapshot_sha256": authority_snapshot,
+            "analysis": {
+                "raw_output_sha256": initial_execution["raw_output_sha256"],
+                "execution_receipt_sha256": initial_execution[
+                    "stage_execution_receipt_sha256"
+                ],
+                "normalization_receipt_sha256": initial_execution[
+                    "normalization_receipt_sha256"
+                ],
+                "report_sha256": package["terra_initial"]["sha256"],
+                "warning_codes": [],
+            },
+            "critical_review": {
+                "raw_output_sha256": final_execution["raw_output_sha256"],
+                "execution_receipt_sha256": final_execution[
+                    "stage_execution_receipt_sha256"
+                ],
+                "normalization_receipt_sha256": final_execution[
+                    "normalization_receipt_sha256"
+                ],
+                "report_sha256": package["terra_final"]["sha256"],
+                "warning_codes": warning_codes,
+            },
+            "package_sha256": binding["package_sha256"],
+            "warning_codes": warning_codes,
+        })
+    if [row["capture_id"] for row in tasks] != list(batch["capture_ids"]):
+        raise NightlySolError("analysis_package_batch_binding_invalid")
+    return tasks
+
+
 def _subject_tasks(
     *, batch: Mapping[str, Any], package_store: AnalysisPackageStore
 ) -> list[dict[str, Any]]:
+    if batch.get("analysis_package_schema_version") == PACKAGE_V2_SCHEMA:
+        return _subject_tasks_v2(batch=batch, package_store=package_store)
     packages = package_store.packages_for(
         subject=str(batch["subject"]),
         capture_intake_date_value=str(batch["capture_intake_date"]),
@@ -458,6 +1511,87 @@ def _dispatcher_effect(subject: str) -> dict[str, Any]:
         "drained_subjects": [],
         "other_subjects_unchanged": True,
     }
+
+
+def _adapter_compatible_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the deployed subject adapters' strict V1-compatible input shape."""
+
+    required = {
+        "schema_version", "batch_id", "subject", "capture_intake_date",
+        "capture_ids", "capture_set_sha256", "analysis_packages", "skill",
+        "authorization", "status", "formal_write_count",
+    }
+    if batch.get("analysis_package_schema_version") != PACKAGE_V2_SCHEMA:
+        return copy.deepcopy(dict(batch))
+    if not required <= set(batch):
+        raise NightlySolError("analysis_package_v2_adapter_projection_invalid")
+    return {key: copy.deepcopy(batch[key]) for key in required}
+
+
+def _plain_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_plain_value(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _v2_native_executor(
+    *,
+    batch: Mapping[str, Any],
+    native_executor: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    if batch.get("analysis_package_schema_version") != PACKAGE_V2_SCHEMA:
+        return native_executor
+    adapter_batch = _adapter_compatible_batch(batch)
+    handoffs = copy.deepcopy(list(batch["multi_agent_handoffs"]))
+    by_capture = {str(row["capture_id"]): row for row in handoffs}
+    batch_sha = sha256_value(batch)
+
+    def execute(invocation: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not isinstance(invocation, Mapping):
+            raise NightlySolError("multi_agent_native_invocation_invalid")
+        plain_invocation = _plain_value(invocation)
+        nested_batch = plain_invocation.get("batch")
+        if nested_batch is not None and (
+            not isinstance(nested_batch, Mapping)
+            or dict(nested_batch) != adapter_batch
+        ):
+            raise NightlySolError("multi_agent_native_batch_binding_invalid")
+        if (
+            plain_invocation.get("batch_id") != adapter_batch["batch_id"]
+            or plain_invocation.get("subject") != adapter_batch["subject"]
+        ):
+            raise NightlySolError("multi_agent_native_batch_binding_invalid")
+        selected = plain_invocation.get("capture_ids")
+        if not isinstance(selected, list) or any(
+            not isinstance(item, str) or item not in by_capture
+            for item in selected
+        ) or selected != sorted(set(selected)):
+            raise NightlySolError("multi_agent_native_capture_set_invalid")
+        expected_packages = [
+            row for row in adapter_batch["analysis_packages"]
+            if row["capture_id"] in selected
+        ]
+        invocation_packages = plain_invocation.get("analysis_packages")
+        if (
+            invocation_packages is not None
+            and invocation_packages != expected_packages
+        ):
+            raise NightlySolError("multi_agent_native_capture_set_invalid")
+        selected_handoffs = [copy.deepcopy(by_capture[item]) for item in selected]
+        enriched = plain_invocation
+        enriched.update({
+            "analysis_package_schema_version": PACKAGE_V2_SCHEMA,
+            "verified_multi_agent_handoffs": selected_handoffs,
+            "verified_multi_agent_handoff_set_sha256": sha256_value(
+                selected_handoffs
+            ),
+            "verified_nightly_batch_sha256": batch_sha,
+        })
+        return native_executor(enriched)
+
+    return execute
 
 
 class NightlySolCoordinator:
@@ -891,7 +2025,12 @@ class NightlySolCoordinator:
             str(batch["subject"]), str(batch["batch_id"]), owner_id=owner_id
         )
         try:
-            result = adapter.execute(batch, native_executor=native_executor)
+            result = adapter.execute(
+                _adapter_compatible_batch(batch),
+                native_executor=_v2_native_executor(
+                    batch=batch, native_executor=native_executor
+                ),
+            )
             checked = validate_adapter_result(
                 result,
                 batch=batch,
@@ -943,6 +2082,10 @@ class NightlySolCoordinator:
         resolved_at: str,
         owner_id: str,
     ) -> dict[str, Any]:
+        # Reopen the complete V2 package again before mutating the resume state.
+        # The resumed formal operation must not rely on a handoff verified only
+        # during the earlier partial run.
+        _subject_tasks(batch=batch, package_store=self.package_store)
         adapter_resolution = {
             "conflict_id": conflict_id,
             "batch_id": batch["batch_id"],
@@ -973,8 +2116,10 @@ class NightlySolCoordinator:
         )
         try:
             result = adapter.execute(
-                batch,
-                native_executor=native_executor,
+                _adapter_compatible_batch(batch),
+                native_executor=_v2_native_executor(
+                    batch=batch, native_executor=native_executor
+                ),
                 capture_ids=[conflicted_capture_id],
                 resolution=adapter_resolution,
             )
@@ -1107,6 +2252,7 @@ def freeze_from_store(
         skill_source_path=skill_source_path,
         declared_version=declared_version,
         authorization=authorization,
+        package_store=package_store,
     )
 
 

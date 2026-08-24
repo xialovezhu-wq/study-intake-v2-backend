@@ -116,30 +116,42 @@ class Phase3ModelStageDriverTests(unittest.TestCase):
         self.assertIn("enforce_output_schema=False", source)
         self.assertIn("AnalysisPackageDriver", source)
 
-    def test_live_mode_routes_to_analysis_package_driver(self) -> None:
+    def test_live_mode_routes_only_to_analysis_package_v2_driver(self) -> None:
         self.runner.config.update(
             {
-                "consumer_stage_chain": {"enabled": True},
-                "analysis_package_v1": {"enabled": True},
+                "analysis_package_v2": {"enabled": True},
                 "execution_mode": "live_authorized",
             }
         )
         sentinel = object()
         with mock.patch.object(
-            self.runner, "run_analysis_package_v1", return_value=sentinel
+            self.runner, "run_analysis_package_v2", return_value=sentinel
         ) as routed:
             self.assertIs(self.runner.run(object()), sentinel)
         routed.assert_called_once()
 
-    def test_legacy_live_mode_still_fails_closed_without_new_driver(self) -> None:
-        self.runner.config.update(
-            {
-                "consumer_stage_chain": {"enabled": True},
-                "execution_mode": "live_authorized",
-            }
-        )
+    def test_retired_live_routes_cannot_be_reenabled(self) -> None:
+        for retired_key in ("consumer_stage_chain", "analysis_package_v1"):
+            with self.subTest(retired_key=retired_key):
+                self.runner.config.update(
+                    {
+                        retired_key: {"enabled": True},
+                        "execution_mode": "live_authorized",
+                    }
+                )
+                with mock.patch.object(
+                    self.runner, "run_analysis_package_v1"
+                ) as legacy_driver, self.assertRaisesRegex(
+                    PreprocessorError, "retired_analysis_route_not_available"
+                ):
+                    self.runner.run(object())
+                legacy_driver.assert_not_called()
+                self.runner.config.pop(retired_key)
+
+    def test_live_mode_without_v2_fails_closed(self) -> None:
+        self.runner.config["execution_mode"] = "live_authorized"
         with self.assertRaisesRegex(
-            PreprocessorError, "consumer_stage_chain_live_driver_not_integrated"
+            PreprocessorError, "analysis_package_v2_required"
         ):
             self.runner.run(object())
 

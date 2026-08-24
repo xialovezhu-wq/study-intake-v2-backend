@@ -70,17 +70,16 @@ config or the actual argv, `requested_service_tier=null`,
 Historical offline, priority, and pre-plugin releases remain byte-for-byte
 reopenable for explicit rollback, but cannot pass a new target activation gate.
 
-The Phase 3 successor contract is independently versioned as
-`study-intake-consumer-stage-chain-v1`. It binds durable Capture, Terra Max
-analysis, Luna Max analysis, Terra Max critical review, and a lease-bound Sol
-formal commit. All model stages are read-only with agents and mutation tools
-disabled. The role assets, single successor schema, zero-model executor, and
-hash/receipt validators are source-complete. An enabled production config also
-binds `analysis_package_v1`, so `CodexRunner.run()` enters
-`AnalysisPackageDriver`. The legacy
-`consumer_stage_chain_live_driver_not_integrated` guard remains only for a
-misconfigured live release that omits the required driver profile; it prevents
-fallback to the historical Luna/Luna path.
+The active successor contract is Multi-Agent V2. One durable Capture enters a
+read-only Terra initial pass, three or four independent Luna investigations,
+and a read-only Terra final synthesis. Every Luna report or failure diagnostic
+is persisted independently; the Terra final report and the complete Sol
+handoff remain part of the same Analysis Package V2. The dispatcher publishes
+one task completion and exposes the two Terra stages while retaining the full
+internal investigation topology behind the package binding. Production config
+requires `analysis_package_v2`; the retired fixed single-Luna chain and
+Analysis Package V1 driver cannot be re-enabled through config. Historical V1
+packages and releases remain reopenable for audit and rollback.
 
 Build and verify the default `concurrent_v2` profile without changing the active
 runtime or LaunchAgents. A non-skipped build requires the formal-surface guard:

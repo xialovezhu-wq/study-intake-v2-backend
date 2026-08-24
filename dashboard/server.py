@@ -238,6 +238,12 @@ SAFE_MCP_EVIDENCE_REF = re.compile(
 )
 TASK_DETAIL_SCHEMA_VERSION = "study-intake-dashboard-task-detail-v2"
 LEGACY_TASK_DETAIL_SCHEMA_VERSION = "study-intake-dashboard-task-detail-v1"
+ANALYSIS_PACKAGE_V2_SCHEMA_VERSION = "study-intake-analysis-package-v2"
+ANALYSIS_PACKAGE_V2_DISPATCH_SCHEMA_VERSION = "study-intake-preprocess-package-v4"
+ANALYSIS_PACKAGE_V2_BINDING_SCHEMA_VERSION = (
+    "study-intake-analysis-package-binding-v1"
+)
+TERRA_FINAL_REPORT_SCHEMA_VERSION = "terra_final_report_v2"
 TASK_DETAIL_STAGES = {
     "queued",
     "dispatched",
@@ -4687,6 +4693,143 @@ def _stage_lifecycle(events: Sequence[Mapping[str, Any]]) -> dict[str, dict[str,
     return lifecycle
 
 
+def _analysis_package_v2_projection(
+    package: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return optional, display-only facts from an authoritative v2 package.
+
+    The caller supplies the package reopened by the dispatch completion verifier.
+    Any incomplete or inconsistent successor data is treated as unavailable; it
+    must never influence the task's execution, quality, or terminal state.
+    """
+
+    if not isinstance(package, Mapping):
+        return {}
+    binding = package.get("analysis_package_binding")
+    model_contract = package.get("model_contract")
+    stage_runtime = package.get("stage_runtime")
+    terra_initial = package.get("analysis")
+    terra_final = package.get("critical_review")
+    subject = package.get("subject")
+    if (
+        package.get("schema_version")
+        != ANALYSIS_PACKAGE_V2_DISPATCH_SCHEMA_VERSION
+        or package.get("formal_write_count") != 0
+        or not isinstance(binding, Mapping)
+        or set(binding) != {"schema_version", "id", "sha256", "ref"}
+        or binding.get("schema_version")
+        != ANALYSIS_PACKAGE_V2_BINDING_SCHEMA_VERSION
+        or not isinstance(binding.get("id"), str)
+        or re.fullmatch(r"ANPKG2-[A-F0-9]{24}", binding["id"]) is None
+        or not isinstance(binding.get("sha256"), str)
+        or SHA256.fullmatch(binding["sha256"]) is None
+        or binding.get("ref")
+        != "study-intake-analysis-package://sha256/" + binding["sha256"]
+        or not isinstance(model_contract, Mapping)
+        or model_contract.get("mode") != "multi_agent_v2"
+        or model_contract.get("outer_stage_model") != "gpt-5.6-terra"
+        or model_contract.get("investigation_model") != "gpt-5.6-luna"
+        or model_contract.get("reasoning_effort") != "max"
+        or model_contract.get("dispatcher_visible_stage_count") != 2
+        or subject not in {"math", "cs408", "english"}
+        or not isinstance(stage_runtime, Mapping)
+        or not isinstance(stage_runtime.get("analysis"), Mapping)
+        or not isinstance(stage_runtime.get("critical_review"), Mapping)
+        or not isinstance(terra_initial, Mapping)
+        or terra_initial.get("schema_version") != "terra_initial_analysis_v1"
+        or terra_initial.get("formal_write_count") != 0
+        or not isinstance(terra_final, Mapping)
+        or terra_final.get("schema_version")
+        != TERRA_FINAL_REPORT_SCHEMA_VERSION
+        or not isinstance(terra_final.get("report_sha256"), str)
+        or SHA256.fullmatch(terra_final["report_sha256"]) is None
+        or terra_final.get("formal_write_count") != 0
+    ):
+        return {}
+    analysis_stages = stage_runtime["analysis"].get("analysis_package_stages")
+    final_stages = stage_runtime["critical_review"].get(
+        "analysis_package_stages"
+    )
+    if (
+        not isinstance(analysis_stages, list)
+        or analysis_stages != final_stages
+        or len(analysis_stages) not in {5, 6}
+        or any(not isinstance(row, Mapping) for row in analysis_stages)
+    ):
+        return {}
+    stage_names = [str(row.get("stage") or "") for row in analysis_stages]
+    luna_stages = analysis_stages[1:-1]
+    if (
+        stage_names[0] != "terra_initial"
+        or stage_names[-1] != "terra_final"
+        or len(stage_names) != len(set(stage_names))
+        or len(luna_stages) not in {3, 4}
+        or analysis_stages[0].get("provider_stage_name")
+        != f"{subject}_analysis"
+        or analysis_stages[-1].get("provider_stage_name")
+        != f"{subject}_critical_review"
+        or any(
+            row.get("requested_model") != "gpt-5.6-terra"
+            or row.get("requested_reasoning_effort") != "max"
+            or row.get("status") != "succeeded"
+            or row.get("formal_write_count") != 0
+            for row in (analysis_stages[0], analysis_stages[-1])
+        )
+        or any(
+            re.fullmatch(
+                r"luna_investigation_[A-Za-z0-9][A-Za-z0-9_.-]*",
+                str(row.get("stage") or ""),
+            )
+            is None
+            or row.get("requested_model") != "gpt-5.6-luna"
+            or row.get("provider_stage_name")
+            != f"{subject}_luna_analysis"
+            or row.get("requested_reasoning_effort") != "max"
+            or row.get("formal_write_count") != 0
+            for row in luna_stages
+        )
+    ):
+        return {}
+    report_count = 0
+    diagnostic_count = 0
+    for row in luna_stages:
+        status = row.get("status")
+        report_sha = row.get("report_sha256")
+        report_ref = row.get("report_ref")
+        error_code = row.get("error_code")
+        if status == "succeeded":
+            if (
+                not isinstance(report_sha, str)
+                or SHA256.fullmatch(report_sha) is None
+                or report_ref
+                != "study-intake-luna-investigation-report://sha256/"
+                + report_sha
+                or error_code is not None
+            ):
+                return {}
+            report_count += 1
+        elif status in {"failed", "cancelled", "timed_out"}:
+            if (
+                not isinstance(error_code, str)
+                or SAFE_ID.fullmatch(error_code) is None
+                or report_sha is not None
+                or report_ref is not None
+            ):
+                return {}
+            diagnostic_count += 1
+        else:
+            return {}
+    if report_count < 1 or report_count + diagnostic_count != len(luna_stages):
+        return {}
+    return {
+        "analysis_package_schema_version": ANALYSIS_PACKAGE_V2_SCHEMA_VERSION,
+        "luna_report_count": report_count,
+        "luna_diagnostic_count": diagnostic_count,
+        "terra_final_report_sha256": terra_final["report_sha256"],
+        "terra_final_schema_version": TERRA_FINAL_REPORT_SCHEMA_VERSION,
+    }
+
+
 def _verify_task_detail_authority(
     runtime_root: Path,
     unit_sha256: str,
@@ -5555,6 +5698,7 @@ def _public_dispatch_task_detail(
     detail_authority_verified: bool,
     verified_latest_event: Mapping[str, Any] | None = None,
     output_schema_version: str = LEGACY_TASK_DETAIL_SCHEMA_VERSION,
+    analysis_package_projection_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if detail.get("schema_version") not in {
         "study-intake-dispatch-task-detail-v1",
@@ -5653,6 +5797,10 @@ def _public_dispatch_task_detail(
         and isinstance(authoritative_result.get("package"), Mapping)
         else None
     )
+    if analysis_package_projection_out is not None:
+        analysis_package_projection_out.update(
+            _analysis_package_v2_projection(package)
+        )
     receipt = (
         authoritative_result.get("receipt")
         if isinstance(authoritative_result, Mapping)
@@ -6208,6 +6356,7 @@ def _load_dispatch_task_detail(
     *,
     include_raw: bool,
     output_schema_version: str = LEGACY_TASK_DETAIL_SCHEMA_VERSION,
+    analysis_package_projection_out: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     unit_sha = _detail_sha(raw_item.get("unit_sha256"))
     raw_path = _text(raw_item.get("task_detail_path"), limit=2000)
@@ -6244,6 +6393,7 @@ def _load_dispatch_task_detail(
         detail_authority_verified=verified is not None,
         verified_latest_event=verified_latest_event,
         output_schema_version=output_schema_version,
+        analysis_package_projection_out=analysis_package_projection_out,
     )
 
 
@@ -8216,6 +8366,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
+                    analysis_package_projection: dict[str, Any] = {}
                     detail = _load_dispatch_task_detail(
                         self.dashboard_server.store.path,
                         raw_item,
@@ -8226,6 +8377,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             if result.projection.get("schema_version")
                             in MODERN_SCHEMA_VERSIONS
                             else LEGACY_TASK_DETAIL_SCHEMA_VERSION
+                        ),
+                        analysis_package_projection_out=(
+                            analysis_package_projection
                         ),
                     )
                 except TaskDetailError as exc:
@@ -8248,6 +8402,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 if detail is not None:
                     item["task_detail"] = detail
+                if analysis_package_projection:
+                    item.update(analysis_package_projection)
                 self._send_json(
                     HTTPStatus.OK,
                     {

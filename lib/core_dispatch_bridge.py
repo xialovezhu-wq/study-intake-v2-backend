@@ -24,7 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from concurrent_dispatch import (
     DispatchCancelled,
@@ -72,6 +72,7 @@ from preprocessor_core import (
     math_group_processing_key,
     math_processing_contract,
     parse_time,
+    safe_component,
     sha256_value,
     subject_dispatch_bridge_code_closure_manifest_from_path,
     subject_semantic_code_closure_manifest_from_path,
@@ -2337,7 +2338,415 @@ def _stage_result_from_model(
     )
 
 
+def _analysis_package_v2_stage_results(
+    result: ModelResult,
+    *,
+    task: FrozenTask,
+    candidate: Candidate,
+    runtime_root: Path,
+    lease_fence: int,
+    lease_owner_id: str,
+    expected_release_id: str,
+    lease_store: LeaseStore,
+) -> tuple[StageResult, StageResult]:
+    """Strictly bridge one persisted AnalysisPackageV2 into two Terra stages.
+
+    Luna investigations remain internal execution artifacts of the persisted
+    package.  The concurrent dispatcher continues to receive its established
+    two-stage envelope: Terra initial as ``analysis`` and Terra final as
+    ``critical_review``.
+    """
+
+    from analysis_package_v1 import AnalysisPackageError, AnalysisPackageStore
+    from analysis_package_v2 import reopen_analysis_package_v2
+
+    receipts, package = result.stage_receipts, result.analysis
+    initial, final = result.draft_analysis, result.critical_review
+    if (
+        result.pipeline_status != "multi_agent_analysis_package_ready"
+        or not isinstance(package, Mapping)
+        or not isinstance(initial, Mapping)
+        or not isinstance(final, Mapping)
+        or not isinstance(receipts, Mapping)
+        or set(receipts)
+        != {
+            "terra_initial",
+            "luna_investigations",
+            "terra_final",
+            "analysis_package_stages",
+        }
+    ):
+        raise DispatchError("analysis_package_v2_result_invalid")
+    package_sha256 = package.get("package_sha256")
+    if (
+        not isinstance(package_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or package.get("package_ref")
+        != "study-intake-analysis-package://sha256/" + package_sha256
+    ):
+        raise DispatchError("analysis_package_v2_binding_invalid")
+    try:
+        store = AnalysisPackageStore(runtime_root.resolve())
+        reopened = reopen_analysis_package_v2(store, package_sha256)
+        objects = {
+            name: store.reopen_analysis_object(
+                str(reopened[name]["sha256"])
+            )
+            for name in ("plan", "terra_initial", "terra_final")
+        }
+    except (AnalysisPackageError, KeyError, TypeError, ValueError) as exc:
+        raise DispatchError("analysis_package_v2_reopen_invalid") from exc
+    plan = objects["plan"]
+    if (
+        reopened
+        != {key: value for key, value in package.items()
+            if key not in {"package_sha256", "package_ref"}}
+        or package.get("schema_version") != "study-intake-analysis-package-v2"
+        or not isinstance(package.get("package_id"), str)
+        or not package.get("package_id")
+        or package.get("subject") != candidate.subject
+        or package.get("capture_id") != candidate.capture_id
+        or package.get("study_date") != candidate.study_date
+        or package.get("formal_write_count") != 0
+        or package.get("status") != "ready_for_nightly"
+        or plan.get("subject") != candidate.subject
+        or plan.get("capture_id") != candidate.capture_id
+        or plan.get("release_id") != expected_release_id
+        or plan.get("formal_write_count") != 0
+        or objects["terra_initial"] != initial
+        or objects["terra_final"] != final
+        or initial.get("schema_version") != "terra_initial_analysis_v1"
+        or final.get("schema_version") != "terra_final_report_v2"
+        or initial.get("subject") != candidate.subject
+        or final.get("subject") != candidate.subject
+        or initial.get("capture_id") != candidate.capture_id
+        or final.get("capture_id") != candidate.capture_id
+        or initial.get("formal_write_count") != 0
+        or final.get("formal_write_count") != 0
+    ):
+        raise DispatchError("analysis_package_v2_binding_invalid")
+
+    topology = receipts.get("analysis_package_stages")
+    luna_receipts = receipts.get("luna_investigations")
+    branches, outputs = plan.get("branches"), package.get("luna_outputs")
+    if (
+        not isinstance(topology, list)
+        or not isinstance(luna_receipts, Mapping)
+        or not isinstance(branches, list)
+        or not isinstance(outputs, list)
+        or len(branches) not in {3, 4}
+        or len(topology) != len(branches) + 2
+        or len(outputs) != len(branches)
+    ):
+        raise DispatchError("analysis_package_v2_topology_invalid")
+    branch_ids = [
+        str(row.get("branch_id") or "") if isinstance(row, Mapping) else ""
+        for branch in branches
+        for row in (branch,)
+    ]
+    output_ids = [
+        str(row.get("branch_id") or "") if isinstance(row, Mapping) else ""
+        for row in outputs
+    ]
+    if (
+        any(not branch_id for branch_id in branch_ids)
+        or len(branch_ids) != len(set(branch_ids))
+        or output_ids != branch_ids
+        or list(luna_receipts) != branch_ids
+    ):
+        raise DispatchError("analysis_package_v2_topology_invalid")
+    expected_rows = [
+        ("terra_initial", f"{candidate.subject}_analysis", "gpt-5.6-terra"),
+        *[
+            (
+                "luna_investigation_" + safe_component(branch_id),
+                f"{candidate.subject}_luna_analysis",
+                REQUIRED_MODEL,
+            )
+            for branch_id in branch_ids
+        ],
+        ("terra_final", f"{candidate.subject}_critical_review", "gpt-5.6-terra"),
+    ]
+    for index, row in enumerate(topology):
+        if not isinstance(row, Mapping):
+            raise DispatchError("analysis_package_v2_topology_invalid")
+        output = outputs[index - 1] if 0 < index < len(topology) - 1 else None
+        expected_status = (
+            "succeeded" if output is None
+            else luna_receipts[branch_ids[index - 1]].get("status")
+        )
+        if (
+            (row.get("stage"), row.get("provider_stage_name"),
+             row.get("requested_model")) != expected_rows[index]
+            or row.get("requested_reasoning_effort") != REQUIRED_REASONING_EFFORT
+            or row.get("status") != expected_status
+            or row.get("formal_write_count") != 0
+            or (
+                output is not None
+                and (
+                    output.get("kind") == "investigation_report"
+                )
+                != (expected_status == "succeeded")
+            )
+        ):
+            raise DispatchError("analysis_package_v2_topology_invalid")
+
+    package_stages = tuple(copy.deepcopy(dict(row)) for row in topology)
+
+    def reopen_artifact(
+        provider_stage: str, directory: str, digest: object, code: str
+    ) -> dict[str, Any]:
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise DispatchError(code)
+        path = (
+            runtime_root.resolve() / "dispatch" / directory / candidate.subject
+            / task.unit_sha256 / f"fence-{lease_fence}" / provider_stage
+            / "sha256" / digest[:2] / f"{digest}.json"
+        )
+        try:
+            raw = path.read_bytes()
+            value = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DispatchError(code) from exc
+        if path.is_symlink() or hashlib.sha256(raw).hexdigest() != digest or not isinstance(value, Mapping):
+            raise DispatchError(code)
+        return copy.deepcopy(dict(value))
+
+    def terra_stage(
+        *,
+        receipt_name: str,
+        payload: Mapping[str, Any],
+        provider_stage_name: str,
+        semantic_stage_name: str,
+    ) -> StageResult:
+        receipt = receipts.get(receipt_name)
+        if (
+            not isinstance(receipt, Mapping)
+            or receipt.get("status") != "ready"
+            or receipt.get("provider_stage_name") != provider_stage_name
+            or receipt.get("requested_model") != "gpt-5.6-terra"
+            or receipt.get("requested_reasoning_effort")
+            != REQUIRED_REASONING_EFFORT
+            or tuple(receipt.get(name) for name in (
+                "formal_write_count", "semantic_stage_count",
+                "provider_request_count", "mcp_tool_call_count",
+                "model_call_count",
+            )) != (0, 1, 1, 0, 1)
+        ):
+            raise DispatchError(f"{receipt_name}_stage_receipt_invalid")
+        identity_status = receipt.get("runtime_identity_status")
+        runtime_model = receipt.get("runtime_model")
+        runtime_effort = receipt.get("runtime_reasoning_effort")
+        provenance = receipt.get("runtime_metadata_provenance")
+        if not (
+            identity_status == "confirmed"
+            and runtime_model == "gpt-5.6-terra"
+            and runtime_effort == REQUIRED_REASONING_EFFORT
+            and provenance == "codex_json_attestation_v1"
+            or identity_status == "requested_unverified"
+            and runtime_model is None
+            and runtime_effort is None
+            and provenance == "unavailable"
+        ):
+            raise DispatchError(f"{receipt_name}_runtime_identity_invalid")
+        raw_sha = receipt.get("raw_output_object_sha256")
+        execution_sha = receipt.get("stage_execution_receipt_sha256")
+        normalization_sha = receipt.get("stage_normalization_receipt_sha256")
+        refs = (
+            (raw_sha, "raw_output_object_ref", "study-intake-model-stage-raw-output://sha256/"),
+            (execution_sha, "stage_execution_receipt_ref", "study-intake-model-stage-execution://sha256/"),
+            (normalization_sha, "stage_normalization_receipt_ref", "study-intake-model-stage-normalization://sha256/"),
+        )
+        if (
+            any(not isinstance(digest, str) or receipt.get(field) != prefix + str(digest)
+                for digest, field, prefix in refs)
+            or receipt.get("normalization_status")
+            not in {"normalized", "normalized_with_warnings"}
+            or not isinstance(receipt.get("normalization_warnings"), list)
+            or receipt.get("normalization_warning_count")
+            != len(receipt["normalization_warnings"])
+        ):
+            raise DispatchError(f"{receipt_name}_artifact_binding_invalid")
+        lease = Lease(task.unit_sha256, lease_owner_id, lease_fence)
+        try:
+            identity, identity_sha256, _identity_path = (
+                lease_store._provider_process_identity_locked(
+                    task, lease, provider_stage_name
+                )
+            )
+            closure = lease_store._provider_process_closures_locked(
+                task, lease
+            ).get(provider_stage_name)
+        except (DispatchError, OSError) as exc:
+            raise DispatchError(
+                f"{receipt_name}_provider_identity_invalid"
+            ) from exc
+        if (
+            not isinstance(identity, Mapping)
+            or not isinstance(closure, Mapping)
+            or closure.get("provider_process_identity_sha256")
+            != identity_sha256
+            or closure.get("provider_process_exit_sha256")
+            != receipt.get("provider_process_exit_sha256")
+            or identity.get("stage_name") != provider_stage_name
+        ):
+            raise DispatchError(f"{receipt_name}_provider_identity_invalid")
+        raw, execution, normalization = (
+            reopen_artifact(provider_stage_name, directory, digest, f"{receipt_name}_{kind}_reopen_invalid")
+            for directory, digest, kind in (
+                ("model-stage-raw-outputs", raw_sha, "raw_output"),
+                ("model-stage-execution-receipts", execution_sha, "execution"),
+                ("model-stage-normalization-receipts", normalization_sha, "normalization"),
+            )
+        )
+        binding = raw.get("execution_binding")
+        expected_binding = {
+            "unit_sha256": task.unit_sha256,
+            "owner_id": lease_owner_id,
+            "lease_fence": lease_fence,
+            "attempt": lease_fence,
+            "subject": candidate.subject,
+            "capture_id": candidate.capture_id,
+            "release_id": expected_release_id,
+            "frozen_payload_sha256": task.frozen_payload_sha256,
+            "stage_name": semantic_stage_name,
+            "provider_stage_name": provider_stage_name,
+            "provider_process_identity_sha256": identity_sha256,
+        }
+        package_execution_key = (
+            "terra_initial_execution"
+            if receipt_name == "terra_initial"
+            else "terra_final_execution"
+        )
+        expected_package_execution = {
+            "requested_model": "gpt-5.6-terra",
+            "requested_reasoning_effort": REQUIRED_REASONING_EFFORT,
+            "provider_stage_name": provider_stage_name,
+            "raw_output_sha256": raw_sha,
+            "raw_output_ref": receipt.get("raw_output_object_ref"),
+            "stage_execution_receipt_sha256": execution_sha,
+            "stage_execution_receipt_ref": receipt.get(
+                "stage_execution_receipt_ref"
+            ),
+            "normalization_receipt_sha256": normalization_sha,
+            "normalization_receipt_ref": receipt.get(
+                "stage_normalization_receipt_ref"
+            ),
+            "formal_write_count": 0,
+        }
+        if (
+            not isinstance(binding, Mapping)
+            or dict(binding) != expected_binding
+            or execution.get("execution_binding") != binding
+            or normalization.get("execution_binding") != binding
+            or raw.get("schema_version")
+            != "study-intake-model-stage-raw-output-v2"
+            or execution.get("schema_version")
+            != "study-intake-model-stage-execution-receipt-v3"
+            or normalization.get("schema_version")
+            != "study-intake-model-stage-normalization-receipt-v2"
+            or package.get(package_execution_key)
+            != expected_package_execution
+            or any(
+                artifact.get("stage_name") != semantic_stage_name
+                or artifact.get("provider_stage_name") != provider_stage_name
+                or artifact.get("formal_write_count") != 0
+                for artifact in (raw, execution, normalization)
+            )
+            or execution.get("execution_status") != "completed"
+            or (execution.get("requested_model"), execution.get("requested_reasoning_effort"))
+            != ("gpt-5.6-terra", REQUIRED_REASONING_EFFORT)
+            or execution.get("raw_output_object_sha256") != raw_sha
+            or execution.get("raw_output_object_ref")
+            != receipt.get("raw_output_object_ref")
+            or normalization.get("execution_receipt_sha256") != execution_sha
+            or normalization.get("execution_receipt_ref")
+            != receipt.get("stage_execution_receipt_ref")
+            or normalization.get("raw_output_object_sha256") != raw_sha
+            or normalization.get("raw_output_object_ref")
+            != receipt.get("raw_output_object_ref")
+            or normalization.get("normalization_status")
+            != receipt.get("normalization_status")
+            or normalization.get("warning_count")
+            != receipt.get("normalization_warning_count")
+            or normalization.get("warnings")
+            != receipt.get("normalization_warnings")
+        ):
+            raise DispatchError(f"{receipt_name}_artifact_identity_invalid")
+        try:
+            lease_store._verify_seal(
+                execution, purpose="study-intake-model-stage-execution"
+            )
+            lease_store._verify_seal(
+                normalization,
+                purpose="study-intake-model-stage-normalization",
+            )
+        except DispatchError as exc:
+            raise DispatchError(
+                f"{receipt_name}_artifact_authority_invalid"
+            ) from exc
+        bound_payload = copy.deepcopy(dict(payload))
+        bound_payload["analysis_package_binding"] = {
+            "schema_version": "study-intake-analysis-package-binding-v1",
+            "id": package["package_id"],
+            "sha256": package_sha256,
+            "ref": package["package_ref"],
+        }
+        return StageResult(
+            payload=bound_payload,
+            runtime_model=(str(runtime_model) if isinstance(runtime_model, str) else None),
+            runtime_reasoning_effort=(
+                str(runtime_effort) if isinstance(runtime_effort, str) else None
+            ),
+            runtime_metadata_provenance=str(provenance),
+            runtime_identity_status=str(identity_status),
+            duration_ms=int(receipt.get("duration_ms") or 0),
+            semantic_stage_count=1,
+            provider_request_count=1,
+            mcp_tool_call_count=0,
+            model_call_count=1,
+            raw_output_object_sha256=raw_sha,
+            raw_output_object_ref=str(receipt["raw_output_object_ref"]),
+            stage_execution_receipt_sha256=execution_sha,
+            stage_execution_receipt_ref=str(
+                receipt["stage_execution_receipt_ref"]
+            ),
+            stage_normalization_receipt_sha256=normalization_sha,
+            stage_normalization_receipt_ref=str(
+                receipt["stage_normalization_receipt_ref"]
+            ),
+            normalization_status=str(receipt["normalization_status"]),
+            normalization_warning_count=int(
+                receipt["normalization_warning_count"]
+            ),
+            normalization_warnings=tuple(
+                copy.deepcopy(dict(row))
+                for row in receipt["normalization_warnings"]
+                if isinstance(row, Mapping)
+            ),
+            requested_model="gpt-5.6-terra",
+            requested_reasoning_effort=REQUIRED_REASONING_EFFORT,
+            analysis_package_stages=tuple(copy.deepcopy(package_stages)),
+        )
+
+    return (
+        terra_stage(
+            receipt_name="terra_initial",
+            payload=initial,
+            provider_stage_name=f"{candidate.subject}_analysis",
+            semantic_stage_name="analysis",
+        ),
+        terra_stage(
+            receipt_name="terra_final",
+            payload=final,
+            provider_stage_name=f"{candidate.subject}_critical_review",
+            semantic_stage_name="critical_review",
+        ),
+    )
+
+
 __all__ = [
+    "_analysis_package_v2_stage_results",
     "CoreCandidateSubprocessRunner",
     "CoreCandidateRunner",
     "EligibleFrozenCandidate",
@@ -2697,9 +3106,15 @@ class CoreCandidateSubprocessRunner:
             != "study-intake-production-task-result-v1"
             or value.get("unit_sha256") != task.unit_sha256
             or value.get("lease_fence") != context.lease.fence
+            or value.get("formal_write_count") != 0
         ):
             raise DispatchError("task_process_result_binding_mismatch")
         terminal_outcome = value.get("terminal_outcome")
+        if (
+            terminal_outcome is None
+            and "terminal_review_stage_count" in value
+        ):
+            raise DispatchError("task_process_review_terminal_invalid")
         if terminal_outcome is not None:
             if terminal_outcome not in {"succeeded", "failed"}:
                 raise DispatchError("task_process_terminal_outcome_invalid")
@@ -2768,10 +3183,64 @@ class CoreCandidateSubprocessRunner:
             if raw_critical is not None
             else None
         )
+        if analysis.analysis_package_stages:
+            publications = value.get("member_publications")
+            publication = (
+                publications[0]
+                if isinstance(publications, list) and len(publications) == 1
+                else None
+            )
+            expected_package_binding = (
+                {
+                    "schema_version": (
+                        "study-intake-analysis-package-binding-v1"
+                    ),
+                    "id": publication.get("package_id"),
+                    "sha256": publication.get("package_sha256"),
+                    "ref": publication.get("package_ref"),
+                }
+                if isinstance(publication, Mapping)
+                else None
+            )
+            if (
+                not isinstance(publication, Mapping)
+                or publication.get("schema_version")
+                != "study-intake-analysis-package-v2"
+                or publication.get("subject")
+                != task.frozen_payload.get("subject")
+                or publication.get("capture_id")
+                != task.frozen_payload.get("capture_id")
+                or publication.get("formal_write_count") != 0
+                or not isinstance(publication.get("package_id"), str)
+                or not publication.get("package_id")
+                or not isinstance(publication.get("package_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(publication.get("package_sha256") or ""),
+                )
+                is None
+                or publication.get("package_ref")
+                != "study-intake-analysis-package://sha256/"
+                + str(publication.get("package_sha256"))
+                or self._critical is None
+                or self._critical.requested_model != "gpt-5.6-terra"
+                or analysis.requested_model != "gpt-5.6-terra"
+                or self._critical.analysis_package_stages
+                != analysis.analysis_package_stages
+                or analysis.payload.get("analysis_package_binding")
+                != expected_package_binding
+                or self._critical.payload.get("analysis_package_binding")
+                != expected_package_binding
+            ):
+                raise DispatchError(
+                    "task_process_analysis_package_publication_invalid"
+                )
         if self.terminal_review_stage_count == 2 and self._critical is None:
             raise DispatchError("task_process_review_stage_missing")
         if self.terminal_review_stage_count == 1 and self._critical is not None:
             raise DispatchError("task_process_review_stage_count_invalid")
+        if self.terminal_review_stage_count != 1 and self._critical is None:
+            raise DispatchError("task_process_critical_result_missing")
         return analysis
 
     def run_critical_review(
