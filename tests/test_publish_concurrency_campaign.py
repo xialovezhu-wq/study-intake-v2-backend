@@ -1120,10 +1120,14 @@ class PublishConcurrencyCampaignV2Tests(unittest.TestCase):
             return digest, str(path)
 
         stages = {}
-        for index, role in enumerate(
-            ("analysis", "luna_analysis", "critical_review"), start=1
-        ):
-            stage_name = f"math_{role}"
+        stage_names = (
+            "math_analysis",
+            "math_luna_investigation_identity_luna_analysis",
+            "math_luna_investigation_taxonomy_luna_analysis",
+            "math_luna_investigation_activity_luna_analysis",
+            "math_critical_review",
+        )
+        for index, stage_name in enumerate(stage_names, start=1):
             launched_at = f"2026-08-11T00:00:0{index}Z"
             finished_at = f"2026-08-11T00:00:1{index}Z"
             identity_core = {

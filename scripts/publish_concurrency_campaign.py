@@ -3568,16 +3568,25 @@ def _verify_real_provider_closures_v2(
     process_execution: Mapping[str, Any],
 ) -> dict[str, Any]:
     stages = process_execution.get("provider_stages")
-    expected_stages = {
+    outer_stages = {
         f"{subject}_analysis",
-        f"{subject}_luna_analysis",
         f"{subject}_critical_review",
     }
+    luna_stages = {
+        name
+        for name in stages
+        if isinstance(stages, Mapping)
+        and isinstance(name, str)
+        and name.startswith(f"{subject}_")
+        and name.endswith("_luna_analysis")
+    } if isinstance(stages, Mapping) else set()
+    expected_stages = outer_stages | luna_stages
     if (
         process_execution.get("canonical_task_runner") is not True
         or process_execution.get("provider_process_closure_required") is not True
         or not isinstance(stages, Mapping)
         or set(stages) != expected_stages
+        or len(luna_stages) not in {3, 4}
     ):
         _fail("campaign_real_provider_closure_missing")
     expected_provider = execution_contract.get("provider_executable")
@@ -3693,7 +3702,7 @@ def _verify_real_provider_closures_v2(
         _verify_no_fast_provider_identity_v2(
             identity, expected_executable=expected_provider
         )
-        if stage_name == f"{subject}_luna_analysis":
+        if stage_name in luna_stages:
             # The campaign verifies the internal Luna Provider closure but
             # keeps the existing public two-Terra-stage evidence shape.
             continue

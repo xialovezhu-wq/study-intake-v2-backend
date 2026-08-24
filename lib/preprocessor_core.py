@@ -18834,6 +18834,7 @@ class CodexRunner:
         timeout: int | None,
         cwd: Path,
         stage_name: str,
+        lifecycle_stage_name: str | None = None,
         raw_output_path: Path | None = None,
         provider_schema_sha256: str | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
@@ -18846,6 +18847,7 @@ class CodexRunner:
         """
 
         del timeout
+        provider_lifecycle_stage = lifecycle_stage_name or stage_name
         if self._cancel_requested.is_set():
             raise OSError("runner_cancelled")
         from live_execution_gate import (
@@ -18971,7 +18973,7 @@ class CodexRunner:
         with self._process_lock:
             self._active_processes.add(process)
             self._active_process_started_at[process] = launched_at
-            self._active_process_stage[process] = stage_name
+            self._active_process_stage[process] = provider_lifecycle_stage
         try:
             try:
                 child_pgid = os.getpgid(process.pid)
@@ -18993,7 +18995,7 @@ class CodexRunner:
                     identity_refs = store.publish_provider_process_identity(
                         lifecycle["task"],
                         lifecycle["lease"],
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         provider_pid=process.pid,
                         provider_pgid=child_pgid,
                         process_start_token=process_start_token,
@@ -19022,7 +19024,7 @@ class CodexRunner:
                         lifecycle["task"],
                         lifecycle["lease"],
                         "provider_process_started",
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         artifact_refs={
                             "provider_process_identity_sha256": identity_refs[
                                 "provider_process_identity_sha256"
@@ -19033,7 +19035,7 @@ class CodexRunner:
                         },
                     )
                 self._publish_provider_progress(
-                    stage_name=stage_name,
+                    stage_name=provider_lifecycle_stage,
                     progress_kind="provider_event",
                     process=process,
                     process_start_token=process_start_token,
@@ -19078,7 +19080,7 @@ class CodexRunner:
                                     "model_stage_raw_identity_missing"
                                 )
                             self._publish_model_stage_raw_chunk(
-                                stage_name=stage_name,
+                                stage_name=provider_lifecycle_stage,
                                 stream="stdout" if is_stdout else "stderr",
                                 chunk=chunk,
                                 process=process,
@@ -19093,7 +19095,7 @@ class CodexRunner:
                             )
                         else:
                             self._publish_provider_progress(
-                                stage_name=stage_name,
+                                stage_name=provider_lifecycle_stage,
                                 progress_kind="provider_output",
                                 process=process,
                                 process_start_token=process_start_token,
@@ -19125,7 +19127,7 @@ class CodexRunner:
                                     "model_stage_raw_identity_missing"
                                 )
                             self._publish_model_stage_raw_chunk(
-                                stage_name=stage_name,
+                                stage_name=provider_lifecycle_stage,
                                 stream="output_last_message_checkpoint",
                                 chunk=content,
                                 process=process,
@@ -19245,7 +19247,7 @@ class CodexRunner:
                                 "model_stage_raw_identity_missing"
                             )
                         self._publish_model_stage_raw_chunk(
-                            stage_name=stage_name,
+                            stage_name=provider_lifecycle_stage,
                             stream="output_last_message_checkpoint",
                             chunk=stage_raw_output,
                             process=process,
@@ -19260,7 +19262,7 @@ class CodexRunner:
                         )
                     raw_refs = (
                         self._publish_model_stage_raw(
-                            stage_name=stage_name,
+                            stage_name=provider_lifecycle_stage,
                             raw_output=stage_raw_output,
                             completed=subprocess.CompletedProcess(
                                 list(command),
@@ -19306,7 +19308,7 @@ class CodexRunner:
                     ].publish_provider_process_exit(
                         lifecycle["task"],
                         lifecycle["lease"],
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         provider_process_identity_sha256=identity_refs[
                             "provider_process_identity_sha256"
                         ],
@@ -19324,7 +19326,7 @@ class CodexRunner:
                         lifecycle["task"],
                         lifecycle["lease"],
                         "provider_process_exited",
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         artifact_refs={
                             "provider_process_identity_sha256": identity_refs[
                                 "provider_process_identity_sha256"
@@ -19351,7 +19353,7 @@ class CodexRunner:
                         },
                     )
                     self._publish_provider_progress(
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         progress_kind="provider_exit",
                         process=process,
                         process_start_token=process_start_token,
@@ -19371,7 +19373,7 @@ class CodexRunner:
                 self._active_process_start_token.pop(process, None)
                 self._active_process_identity_refs.pop(process, None)
                 if identity_refs is not None and exit_refs is not None:
-                    self._provider_closure[stage_name] = {
+                    closure = {
                         "provider_process_identity_sha256": identity_refs[
                             "provider_process_identity_sha256"
                         ],
@@ -19380,6 +19382,12 @@ class CodexRunner:
                         ],
                         "returncode": int(process.returncode),
                     }
+                    self._provider_closure[stage_name] = copy.deepcopy(
+                        closure
+                    )
+                    self._provider_closure[
+                        provider_lifecycle_stage
+                    ] = closure
             if raw_publish_error is not None:
                 code = getattr(
                     raw_publish_error,
@@ -21792,6 +21800,7 @@ class CodexRunner:
         output_schema: Path,
         image_paths: Sequence[Path],
         stage_name: str,
+        lifecycle_stage_name: str | None = None,
         max_prompt_bytes: int,
         max_output_bytes: int,
         allowed_evidence_refs: Iterable[str],
@@ -21817,6 +21826,7 @@ class CodexRunner:
             raise PreprocessorError(f"{stage_name}_output_schema_missing")
         if len(prompt.encode("utf-8")) > max_prompt_bytes:
             raise PreprocessorError(f"{stage_name}_prompt_too_large")
+        execution_stage_name = lifecycle_stage_name or stage_name
         with self._process_lock:
             self._mcp_stage_normalization_warnings.pop(stage_name, None)
         model_request_config_args = self._model_request_config_args(model_role)
@@ -21920,7 +21930,7 @@ class CodexRunner:
                 schema_payload, canonical_schema_sha256 = (
                     self._bound_english_source_event_schema_bytes(
                         output_schema,
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         allowed_source_event_ids=source_event_ids,
                     )
                 )
@@ -21928,7 +21938,7 @@ class CodexRunner:
                 canonical_schema_payload, canonical_schema_sha256 = (
                     self._bound_output_schema_bytes(
                         output_schema,
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         allowed_evidence_refs=allowed_evidence_refs,
                         allowed_analysis_refs=allowed_analysis_refs,
                         allowed_correction_paths=allowed_correction_paths,
@@ -22047,6 +22057,7 @@ class CodexRunner:
                     timeout=None,
                     cwd=execution_root,
                     stage_name=stage_name,
+                    lifecycle_stage_name=lifecycle_stage_name,
                     raw_output_path=output_path,
                     provider_schema_sha256=str(provider_schema_sha256),
                 )
@@ -22140,7 +22151,7 @@ class CodexRunner:
                         )
                     )
                 execution_refs = self._publish_model_stage_execution(
-                    stage_name=stage_name,
+                    stage_name=execution_stage_name,
                     execution_status="failed",
                     raw_refs=raw_refs,
                     transport_sha256=transport_sha256,
@@ -22168,7 +22179,7 @@ class CodexRunner:
                 mcp_calls, mcp_transcript_sha256, mcp_transcript_ref = (
                     self._mcp_stage_calls(
                         stdout=completed.stdout,
-                        stage_name=stage_name,
+                        stage_name=provider_lifecycle_stage,
                         subject=str(subject),
                         processing_context=processing_context,
                     )
@@ -22207,7 +22218,7 @@ class CodexRunner:
                         )
                     )
                 execution_refs = self._publish_model_stage_execution(
-                    stage_name=stage_name,
+                    stage_name=execution_stage_name,
                     execution_status="failed",
                     raw_refs=raw_refs,
                     transport_sha256=transport_sha256,
@@ -22257,7 +22268,7 @@ class CodexRunner:
                     grounding_manifest["manifest_sha256"]
                 )
             execution_refs = self._publish_model_stage_execution(
-                stage_name=stage_name,
+                stage_name=execution_stage_name,
                 execution_status="completed",
                 raw_refs=raw_refs,
                 transport_sha256=transport_sha256,
@@ -26197,6 +26208,11 @@ class CodexRunner:
                         output_schema=schema_paths["luna"],
                         image_paths=(),
                         stage_name=stage_name,
+                        lifecycle_stage_name=(
+                            f"{candidate.subject}_"
+                            f"{safe_component('luna_investigation_' + branch_id)}_"
+                            "luna_analysis"
+                        ),
                         max_prompt_bytes=int(profile["max_prompt_bytes"]),
                         max_output_bytes=int(profile["max_output_bytes"]),
                         allowed_evidence_refs=(),

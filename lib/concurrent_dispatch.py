@@ -12669,7 +12669,19 @@ class LeaseStore:
             f"{subject}_luna_analysis",
             f"{subject}_critical_review",
         }
-        if subject not in {"math", "cs408", "english"} or stage_name not in expected:
+        branch_luna = bool(
+            subject in {"math", "cs408", "english"}
+            and isinstance(stage_name, str)
+            and re.fullmatch(
+                rf"{subject}_[A-Za-z0-9_.-]+_luna_analysis",
+                stage_name,
+            )
+        )
+        if (
+            subject not in {"math", "cs408", "english"}
+            or stage_name not in expected
+            and not branch_luna
+        ):
             raise DispatchError("provider_process_stage_invalid")
         return stage_name
 
@@ -12677,7 +12689,9 @@ class LeaseStore:
     def _semantic_stage_name(cls, subject: str, stage_name: str) -> str:
         checked = cls._provider_stage_name(subject, stage_name)
         semantic = checked.removeprefix(f"{subject}_")
-        if semantic == "luna_analysis":
+        if semantic == "luna_analysis" or semantic.endswith(
+            "_luna_analysis"
+        ):
             return "analysis"
         if semantic not in {"analysis", "critical_review"}:
             raise DispatchError("provider_process_stage_invalid")
@@ -15672,8 +15686,12 @@ class LeaseStore:
                     analysis is not None
                     and analysis.analysis_package_stages
                 ):
-                    expected_provider_stages.add(
-                        f"{subject}_luna_analysis"
+                    expected_provider_stages.update(
+                        f"{subject}_{_safe_component(str(row['stage']))}_"
+                        "luna_analysis"
+                        for row in analysis.analysis_package_stages
+                        if isinstance(row, Mapping)
+                        and row.get("requested_model") == "gpt-5.6-luna"
                     )
                 if outcome == "succeeded" and canonical_runner:
                     if set(provider_stages) != expected_provider_stages or any(

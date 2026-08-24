@@ -503,17 +503,24 @@ class ConcurrentDispatchTests(unittest.TestCase):
             }
             provider_rows = {
                 "math_analysis": copy.deepcopy(closure),
-                "math_luna_analysis": {
-                    **copy.deepcopy(closure),
-                    "provider_process_identity_sha256": "7" * 64,
-                    "provider_process_exit_sha256": "8" * 64,
-                },
                 "math_critical_review": {
                     **copy.deepcopy(closure),
                     "provider_process_identity_sha256": "3" * 64,
                     "provider_process_exit_sha256": "4" * 64,
                 },
             }
+            for branch_index, row in enumerate(topology[1:-1], start=1):
+                provider_rows[
+                    f"math_{row['stage']}_luna_analysis"
+                ] = {
+                    **copy.deepcopy(closure),
+                    "provider_process_identity_sha256": (
+                        f"{branch_index + 4:x}" * 64
+                    ),
+                    "provider_process_exit_sha256": (
+                        f"{branch_index + 8:x}" * 64
+                    ),
+                }
             supervisor_closure = {
                 "supervisor_process_identity_sha256": "5" * 64,
                 "supervisor_process_identity_path": "/tmp/supervisor-identity",
@@ -2627,8 +2634,10 @@ json.dump([error.message for error in errors], sys.stdout)
             set(execution["provider_stages"]),
             {
                 "math_analysis",
-                "math_luna_analysis",
                 "math_critical_review",
+                "math_luna_investigation_branch-01_luna_analysis",
+                "math_luna_investigation_branch-02_luna_analysis",
+                "math_luna_investigation_branch-03_luna_analysis",
             },
         )
 
