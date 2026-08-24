@@ -503,6 +503,11 @@ class ConcurrentDispatchTests(unittest.TestCase):
             }
             provider_rows = {
                 "math_analysis": copy.deepcopy(closure),
+                "math_luna_analysis": {
+                    **copy.deepcopy(closure),
+                    "provider_process_identity_sha256": "7" * 64,
+                    "provider_process_exit_sha256": "8" * 64,
+                },
                 "math_critical_review": {
                     **copy.deepcopy(closure),
                     "provider_process_identity_sha256": "3" * 64,
@@ -2532,6 +2537,36 @@ class ConcurrentDispatchTests(unittest.TestCase):
                 completion=completion,
             )
 
+    def test_successor_canary_accepts_all_diagnostics_as_warning_completion(
+        self,
+    ) -> None:
+        store, task, completion = self._publish_canary_dispatch(
+            index=958,
+            successor=True,
+            failures={"branch-01", "branch-02", "branch-03"},
+        )
+        result = store.finish_production_canary_task(
+            task,
+            outcome="succeeded",
+            error_code=None,
+            completion=completion,
+        )
+        self.assertEqual(result["state"], "continuous_concurrent_unlocked")
+        terminal = json.loads(
+            Path(result["terminal_receipt_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(terminal["outcome"], "succeeded")
+        self.assertEqual(terminal["observed_mcp_tool_call_count"], 0)
+        self.assertEqual(len(terminal["mcp_stage_grounding"]), 3)
+        self.assertTrue(
+            all(
+                row["status"] == "failed"
+                and isinstance(row["read_session_id"], str)
+                and row["read_session_id"]
+                for row in terminal["mcp_stage_grounding"].values()
+            )
+        )
+
     def test_legacy_v3_canary_still_requires_outer_stage_mcp(self) -> None:
         store, task, completion = self._publish_canary_dispatch(
             index=957,
@@ -2582,7 +2617,7 @@ json.dump([error.message for error in errors], sys.stdout)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(json.loads(completed.stdout), [])
 
-    def test_successor_dispatch_provider_closure_stays_two_outer_stages(self) -> None:
+    def test_successor_dispatch_provider_closure_includes_luna_stage(self) -> None:
         completion, _package, _report, _analysis, _critical = (
             self._publish_successor_dispatch(index=953, provider_closure=True)
         )
@@ -2590,9 +2625,12 @@ json.dump([error.message for error in errors], sys.stdout)
         self.assertTrue(execution["provider_process_closure_required"])
         self.assertEqual(
             set(execution["provider_stages"]),
-            {"math_analysis", "math_critical_review"},
+            {
+                "math_analysis",
+                "math_luna_analysis",
+                "math_critical_review",
+            },
         )
-        self.assertNotIn("math_luna_analysis", execution["provider_stages"])
 
     def test_successor_dispatch_rejects_binding_and_topology_mismatch(self) -> None:
         cases = (

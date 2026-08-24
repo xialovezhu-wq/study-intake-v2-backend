@@ -1121,7 +1121,7 @@ class PublishConcurrencyCampaignV2Tests(unittest.TestCase):
 
         stages = {}
         for index, role in enumerate(
-            ("analysis", "critical_review"), start=1
+            ("analysis", "luna_analysis", "critical_review"), start=1
         ):
             stage_name = f"math_{role}"
             launched_at = f"2026-08-11T00:00:0{index}Z"

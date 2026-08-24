@@ -1827,7 +1827,16 @@ def _real_executor_factory(
                 },
             )
         if not isinstance(dispatch_result.completion, Mapping):
-            raise TrialError("trial_dispatcher_completion_missing")
+            raise TrialError(
+                "trial_dispatcher_completion_missing",
+                {
+                    "subject": capture.subject,
+                    "capture_id": capture.capture_id,
+                    "dispatch_status": dispatch_result.status,
+                    "dispatch_outcome": dispatch_result.outcome,
+                    "dispatch_error_code": dispatch_result.error_code,
+                },
+            )
         verified_completion = (
             dispatcher.lease_store.verify_authoritative_completion(
                 capture.subject,

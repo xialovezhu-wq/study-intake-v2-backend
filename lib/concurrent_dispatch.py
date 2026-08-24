@@ -8619,6 +8619,7 @@ class LeaseStore:
             observed_mcp_calls = 0
             successful_sessions: list[str] = []
             successful_authority_fingerprints: list[str] = []
+            all_read_session_ids: list[str] = []
             mcp_stage_grounding: dict[str, Any] = {}
             subject = str(package.get("subject") or "")
             for index, (
@@ -8637,6 +8638,9 @@ class LeaseStore:
             ):
                 status = branch_result.get("status")
                 calls = branch_result.get("calls")
+                branch_read_session_id = branch_result.get(
+                    "read_session_id"
+                )
                 if (
                     status not in {
                         "succeeded",
@@ -8645,8 +8649,11 @@ class LeaseStore:
                         "timed_out",
                     }
                     or not isinstance(calls, list)
+                    or not isinstance(branch_read_session_id, str)
+                    or not branch_read_session_id
                 ):
                     raise DispatchError(error_code)
+                all_read_session_ids.append(branch_read_session_id)
                 observed_mcp_calls += len(calls)
                 stage_name = "luna_investigation_" + _safe_component(
                     branch_id
@@ -8787,7 +8794,7 @@ class LeaseStore:
                     "branch_id": branch_id,
                     "branch_result_sha256": branch_result["result_sha256"],
                     "status": status,
-                    "read_session_id": read_session_id,
+                    "read_session_id": branch_read_session_id,
                     "mcp_tool_call_count": len(calls),
                     "report_sha256": (
                         report_sha256
@@ -8797,10 +8804,16 @@ class LeaseStore:
                 }
 
             if (
-                successful_count < 1
-                or observed_mcp_calls < 1
-                or len(set(successful_sessions)) != successful_count
-                or len(set(successful_authority_fingerprints)) != 1
+                len(set(all_read_session_ids)) != len(outputs)
+                or (
+                    successful_count > 0
+                    and (
+                        observed_mcp_calls < 1
+                        or len(set(successful_sessions))
+                        != successful_count
+                        or len(set(successful_authority_fingerprints)) != 1
+                    )
+                )
             ):
                 raise DispatchError(error_code)
             expected_terra_rows = (
@@ -8850,10 +8863,16 @@ class LeaseStore:
             return {
                 "analysis_package_binding": copy.deepcopy(dict(binding)),
                 "observed_mcp_tool_call_count": observed_mcp_calls,
-                "read_session_id": successful_sessions[0],
+                "read_session_id": (
+                    successful_sessions[0]
+                    if successful_sessions
+                    else None
+                ),
                 "evidence_generation": generation,
                 "evidence_authority_fingerprint": (
                     successful_authority_fingerprints[0]
+                    if successful_authority_fingerprints
+                    else None
                 ),
                 "mcp_stage_grounding": mcp_stage_grounding,
             }
@@ -8985,6 +9004,7 @@ class LeaseStore:
             process_execution: dict[str, Any] | None = None
             ordinary_succeeded = False
             successor_succeeded = False
+            successor_diagnostic_only = False
             quality_reviewable = reviewable
             if isinstance(completion, Mapping):
                 if (
@@ -9509,19 +9529,35 @@ class LeaseStore:
                                 "observed_mcp_tool_call_count"
                             ]
                         )
-                        read_session_id = str(
-                            successor_evidence["read_session_id"]
+                        raw_successor_session = successor_evidence[
+                            "read_session_id"
+                        ]
+                        read_session_id = (
+                            str(raw_successor_session)
+                            if isinstance(raw_successor_session, str)
+                            else None
                         )
                         evidence_generation = str(
                             successor_evidence["evidence_generation"]
                         )
-                        evidence_authority_fingerprint = str(
-                            successor_evidence[
-                                "evidence_authority_fingerprint"
-                            ]
+                        raw_successor_authority = successor_evidence[
+                            "evidence_authority_fingerprint"
+                        ]
+                        evidence_authority_fingerprint = (
+                            str(raw_successor_authority)
+                            if isinstance(raw_successor_authority, str)
+                            else None
                         )
                         mcp_stage_grounding = copy.deepcopy(
                             successor_evidence["mcp_stage_grounding"]
+                        )
+                        successor_diagnostic_only = bool(
+                            mcp_stage_grounding
+                            and all(
+                                isinstance(row, Mapping)
+                                and row.get("status") != "succeeded"
+                                for row in mcp_stage_grounding.values()
+                            )
                         )
                         raw_task_refs = task.frozen_payload.get(
                             "allowed_evidence_refs"
@@ -9701,11 +9737,20 @@ class LeaseStore:
                 != "json_markdown_package_verified"
                 or observed_model_calls <= 0
                 or observed_provider_requests <= 0
-                or observed_mcp_calls <= 0
+                or (
+                    observed_mcp_calls <= 0
+                    and not successor_diagnostic_only
+                )
                 or mcp_stage_grounding is None
-                or read_session_id is None
+                or (
+                    read_session_id is None
+                    and not successor_diagnostic_only
+                )
                 or evidence_generation is None
-                or evidence_authority_fingerprint is None
+                or (
+                    evidence_authority_fingerprint is None
+                    and not successor_diagnostic_only
+                )
                 or task_declared_evidence_refs_sha256 is None
                 or selected.get("process_identity_sha256") is None
                 or selected.get("process_identity_path") is None
@@ -15623,6 +15668,13 @@ class LeaseStore:
                     )
                     if stage is not None
                 }
+                if (
+                    analysis is not None
+                    and analysis.analysis_package_stages
+                ):
+                    expected_provider_stages.add(
+                        f"{subject}_luna_analysis"
+                    )
                 if outcome == "succeeded" and canonical_runner:
                     if set(provider_stages) != expected_provider_stages or any(
                         row.get("returncode") != 0
