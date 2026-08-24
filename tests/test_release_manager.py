@@ -6413,6 +6413,56 @@ LIVE_CONFIG = Path(
         )
         self.assertNotEqual(before, after_receipt_mutation)
 
+    def test_dashboard_health_retries_transient_degraded_projection(
+        self,
+    ) -> None:
+        class Response:
+            def __init__(self, status: int, payload: dict[str, object]) -> None:
+                self.status = status
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _maximum: int) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        with (
+            mock.patch.object(
+                release, "_port_8767_owner_pids", return_value=[42]
+            ),
+            mock.patch.object(
+                release.urllib.request,
+                "urlopen",
+                side_effect=[
+                    Response(503, {"status": "degraded"}),
+                    Response(
+                        200,
+                        {
+                            "status": "ok",
+                            "projection_available": True,
+                            "worker_ready": True,
+                            "dispatchers_ready": True,
+                        },
+                    ),
+                ],
+            ) as health_request,
+            mock.patch.object(release.time, "sleep"),
+        ):
+            proof = release._verify_formal_dashboard_health(
+                [
+                    {
+                        "label": "com.xiazhibin.study-intake-dashboard",
+                        "pid": 42,
+                    }
+                ]
+            )
+        self.assertEqual(proof["status"], "verified")
+        self.assertEqual(health_request.call_count, 2)
+
     def test_activate_canary_apply_starts_same_release_and_seals_public_receipt(
         self,
     ) -> None:

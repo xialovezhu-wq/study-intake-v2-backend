@@ -19688,26 +19688,44 @@ def _verify_formal_dashboard_health(
         headers={"Host": "127.0.0.1:8767"},
         method="GET",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=5.0) as response:
-            status = int(response.status)
-            payload = json.loads(response.read(1024 * 1024))
-    except (
-        OSError,
-        urllib.error.URLError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise ReleaseError("dashboard_healthz_unavailable") from exc
-    if (
-        status != 200
-        or not isinstance(payload, Mapping)
-        or payload.get("status") != "ok"
-        or payload.get("projection_available") is not True
-        or payload.get("worker_ready") is not True
-        or payload.get("dispatchers_ready") is not True
-    ):
-        raise ReleaseError("dashboard_healthz_degraded")
+    deadline = time.monotonic() + 30.0
+    last_error = "dashboard_healthz_unavailable"
+    payload: Mapping[str, Any] | None = None
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                status = int(response.status)
+                parsed = json.loads(response.read(1024 * 1024))
+        except urllib.error.HTTPError as exc:
+            last_error = (
+                "dashboard_healthz_degraded"
+                if exc.code == 503
+                else "dashboard_healthz_unavailable"
+            )
+        except (
+            OSError,
+            urllib.error.URLError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            last_error = "dashboard_healthz_unavailable"
+        else:
+            if (
+                status == 200
+                and isinstance(parsed, Mapping)
+                and parsed.get("status") == "ok"
+                and parsed.get("projection_available") is True
+                and parsed.get("worker_ready") is True
+                and parsed.get("dispatchers_ready") is True
+            ):
+                payload = parsed
+                break
+            last_error = "dashboard_healthz_degraded"
+        if time.monotonic() >= deadline:
+            raise ReleaseError(last_error)
+        time.sleep(0.2)
+    if payload is None:
+        raise ReleaseError(last_error)
     proof = {
         "status": "verified",
         "pid": pid,
