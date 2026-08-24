@@ -95,6 +95,14 @@ class _FakeProcessingHost:
         self.branch_id = branch_id
         self.subject = subject
         self.calls: list[dict[str, Any]] = []
+        self.authority_snapshot_freeze_count = 0
+        self.snapshot_value: dict[str, Any] | None = None
+
+    def _freeze_authority_snapshot(self, **_kwargs: Any) -> dict[str, Any]:
+        self.authority_snapshot_freeze_count += 1
+        if self.snapshot_value is None:
+            raise AssertionError("fixture authority snapshot was not prepared")
+        return dict(self.snapshot_value)
 
     def finalize_investigation_read_session(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
@@ -171,6 +179,50 @@ class _FakeBranchRunner:
         if candidate is not self.candidate:
             raise AssertionError("branch received a different Candidate")
         session_id = "SESSION-" + self.branch_id.upper()
+        snapshot_receipt = {
+            "schema_version": "mcp_authority_snapshot_receipt_v2",
+            "subject": candidate.subject,
+            "candidate_release_id": "a" * 64,
+            "mcp_server_release": "fixture-mcp+sha256." + "b" * 64,
+            "generation": "fixture-generation",
+            "authority_fingerprint": _sha("authority:shared"),
+            "authority_snapshot_manifest_sha256": _sha(
+                "authority-snapshot:shared"
+            ),
+            "file_count": 1,
+            "total_bytes": 128,
+            "formal_write_count": 0,
+            "created_at": "2026-08-24T01:00:00+00:00",
+            "hmac_key_id": _sha("fixture-key"),
+            "hmac_sha256": _sha("fixture-hmac"),
+        }
+        snapshot_receipt_sha = _json_sha(snapshot_receipt)
+        snapshot_value = {
+            "authority_snapshot_manifest_path": "/fixture/authority/manifest.json",
+            "authority_snapshot_manifest_sha256": _sha(
+                "authority-snapshot:shared"
+            ),
+            "authority_snapshot_root": "/fixture/authority/root",
+            "generation": "fixture-generation",
+            "authority_fingerprint": _sha("authority:shared"),
+            "file_count": 1,
+            "total_bytes": 128,
+            "formal_write_count": 0,
+            "authority_snapshot_receipt": snapshot_receipt,
+            "authority_snapshot_receipt_sha256": snapshot_receipt_sha,
+            "authority_snapshot_receipt_ref": _ref(
+                "mcp-authority-snapshot", snapshot_receipt_sha
+            ),
+        }
+        self._processing_host.snapshot_value = snapshot_value
+        opened_snapshot = self._processing_host._freeze_authority_snapshot(
+            subject=candidate.subject,
+            generation="fixture-generation",
+            authority_fingerprint=_sha("authority:shared"),
+            mcp_server_release=snapshot_receipt["mcp_server_release"],
+        )
+        if opened_snapshot != snapshot_value:
+            raise AssertionError("branch did not reuse the Capture snapshot")
         session_core = {
             "schema_version": "study-read-mcp-read-session.v4",
             "subject": candidate.subject,
@@ -181,6 +233,9 @@ class _FakeBranchRunner:
             "authority_snapshot_manifest_sha256": _sha(
                 "authority-snapshot:shared"
             ),
+            "authority_snapshot_manifest_path": "/fixture/authority/manifest.json",
+            "authority_snapshot_root": "/fixture/authority/root",
+            "authority_snapshot_receipt_sha256": snapshot_receipt_sha,
             "capture_id": candidate.capture_id,
             "artifact_ids": ["artifact-dialogue"],
             "formal_write_count": 0,
@@ -221,6 +276,11 @@ class _FakeBranchRunner:
                 "authority_snapshot_manifest_sha256": _sha(
                     "authority-snapshot:shared"
                 ),
+                "authority_snapshot_manifest_path": (
+                    "/fixture/authority/manifest.json"
+                ),
+                "authority_snapshot_root": "/fixture/authority/root",
+                "authority_snapshot_receipt_sha256": snapshot_receipt_sha,
                 "artifact_ids": ["artifact-dialogue"],
             },
             "mcp_read_session_receipt": {"formal_write_count": 0},
@@ -232,6 +292,11 @@ class _FakeBranchRunner:
             "capture_freeze_receipt_sha256": _sha("freeze:" + self.branch_id),
             "capture_freeze_receipt_ref": _ref(
                 "capture-freeze-receipt", _sha("freeze:" + self.branch_id)
+            ),
+            "authority_snapshot_receipt": snapshot_receipt,
+            "authority_snapshot_receipt_sha256": snapshot_receipt_sha,
+            "authority_snapshot_receipt_ref": _ref(
+                "mcp-authority-snapshot", snapshot_receipt_sha
             ),
             "processing_skill": {"id": "fixture-skill", "version": "1"},
         }
@@ -564,6 +629,13 @@ class MultiAgentAnalysisPackageLiveTests(unittest.TestCase):
                 self.assertEqual(len(sessions), branch_count)
                 self.assertEqual(len(runner.children), branch_count)
                 self.assertEqual(
+                    sum(
+                        child._processing_host.authority_snapshot_freeze_count
+                        for child in runner.children.values()
+                    ),
+                    1,
+                )
+                self.assertEqual(
                     result.pipeline_status,
                     "multi_agent_analysis_package_ready",
                 )
@@ -623,7 +695,11 @@ class MultiAgentAnalysisPackageLiveTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         result.pipeline_status,
-                        "multi_agent_analysis_package_ready",
+                        (
+                            "completed_with_warnings"
+                            if failures
+                            else "multi_agent_analysis_package_ready"
+                        ),
                     )
                     self.assertEqual(
                         len(result.analysis["luna_outputs"]), branch_count
@@ -693,23 +769,29 @@ class MultiAgentAnalysisPackageLiveTests(unittest.TestCase):
                     0,
                 )
 
-    def test_all_failed_branches_stop_before_terra_final_and_publication(self) -> None:
+    def test_all_failed_branches_reach_terra_final_and_publish_warnings(self) -> None:
         failures = {"branch-01", "branch-02", "branch-03"}
         with tempfile.TemporaryDirectory() as folder:
             runner = _FakeLiveRunner(
                 runtime_root=Path(folder), branch_count=3, failures=failures
             )
-            with self.assertRaisesRegex(
-                PreprocessorError, "multi_agent_all_luna_failed"
-            ):
-                runner.run_analysis_package_v2(_candidate())
+            result = runner.run_analysis_package_v2(_candidate())
             self.assertEqual(
                 [call["stage_name"] for call in runner.parent_execute_calls],
-                ["math_analysis"],
+                ["math_analysis", "math_critical_review"],
             )
-            self.assertEqual(AnalysisPackageStore(Path(folder)).packages_for(
-                subject="math", capture_intake_date_value="2026-08-24"
-            ), [])
+            self.assertEqual(result.pipeline_status, "completed_with_warnings")
+            self.assertEqual(result.semantic_stage_count, 2)
+            self.assertEqual(result.analysis["ordered_luna_reports"], [])
+            self.assertEqual(
+                len(result.analysis["ordered_luna_diagnostics"]), 3
+            )
+            self.assertEqual(
+                len(AnalysisPackageStore(Path(folder)).packages_for(
+                    subject="math", capture_intake_date_value="2026-08-24"
+                )),
+                1,
+            )
 
     def test_first_read_session_failure_preserves_the_original_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -745,7 +827,7 @@ class MultiAgentAnalysisPackageLiveTests(unittest.TestCase):
     def test_result_topology_persistence_reopen_and_process_closure(self) -> None:
         runner, result, runtime_root, temporary = self._run(4, {"branch-04"})
         self.addCleanup(temporary.cleanup)
-        self.assertEqual(result.pipeline_status, "multi_agent_analysis_package_ready")
+        self.assertEqual(result.pipeline_status, "completed_with_warnings")
         self.assertEqual(result.draft_analysis["schema_version"], "terra_initial_analysis_v1")
         self.assertEqual(result.critical_review["schema_version"], "terra_final_report_v2")
         self.assertEqual(result.semantic_stage_count, 5)

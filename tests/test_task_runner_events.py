@@ -659,6 +659,8 @@ class TaskRunnerEventTests(unittest.TestCase):
         self,
     ) -> None:
         source = inspect.getsource(_analysis_package_v2_stage_results)
+        self.assertIn('"completed_with_warnings"', source)
+        self.assertIn('"multi_agent_analysis_package_ready"', source)
         self.assertIn(
             '"study-intake-model-stage-raw-output-v1"', source
         )

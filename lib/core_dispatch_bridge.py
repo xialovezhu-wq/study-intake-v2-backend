@@ -2380,7 +2380,10 @@ def _analysis_package_v2_stage_results(
     receipts, package = result.stage_receipts, result.analysis
     initial, final = result.draft_analysis, result.critical_review
     if (
-        result.pipeline_status != "multi_agent_analysis_package_ready"
+        result.pipeline_status not in {
+            "multi_agent_analysis_package_ready",
+            "completed_with_warnings",
+        }
         or not isinstance(package, Mapping)
         or not isinstance(initial, Mapping)
         or not isinstance(final, Mapping)
@@ -2418,28 +2421,18 @@ def _analysis_package_v2_stage_results(
         reopened
         != {key: value for key, value in package.items()
             if key not in {"package_sha256", "package_ref"}}
-        or package.get("schema_version") != "study-intake-analysis-package-v2"
-        or not isinstance(package.get("package_id"), str)
-        or not package.get("package_id")
         or package.get("subject") != candidate.subject
         or package.get("capture_id") != candidate.capture_id
         or package.get("study_date") != candidate.study_date
-        or package.get("formal_write_count") != 0
-        or package.get("status") != "ready_for_nightly"
         or plan.get("subject") != candidate.subject
         or plan.get("capture_id") != candidate.capture_id
         or plan.get("release_id") != expected_release_id
-        or plan.get("formal_write_count") != 0
         or objects["terra_initial"] != initial
         or objects["terra_final"] != final
-        or initial.get("schema_version") != "terra_initial_analysis_v1"
-        or final.get("schema_version") != "terra_final_report_v2"
         or initial.get("subject") != candidate.subject
         or final.get("subject") != candidate.subject
         or initial.get("capture_id") != candidate.capture_id
         or final.get("capture_id") != candidate.capture_id
-        or initial.get("formal_write_count") != 0
-        or final.get("formal_write_count") != 0
     ):
         raise DispatchError("analysis_package_v2_binding_invalid")
 

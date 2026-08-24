@@ -25842,7 +25842,13 @@ class CodexRunner:
             build_sol_handoff,
             review_candidate,
         )
-        from read_fanout import ReadFanoutScheduler
+        from multi_agent_v2_orchestrator import (
+            MultiAgentV2OrchestratorError,
+            bind_frozen_authority_snapshot,
+            completion_status,
+            frozen_authority_snapshot,
+            run_capture_fanout,
+        )
 
         profile = self.config.get("analysis_package_v2")
         if not isinstance(profile, Mapping) or profile.get("enabled") is not True:
@@ -26018,6 +26024,10 @@ class CodexRunner:
         first_session = first_context.get("mcp_read_session")
         if not isinstance(first_session, Mapping):
             raise PreprocessorError("multi_agent_read_session_missing")
+        try:
+            capture_authority_snapshot = frozen_authority_snapshot(first_context)
+        except MultiAgentV2OrchestratorError as exc:
+            raise PreprocessorError(exc.code) from exc
         artifact_ids = first_session.get("artifact_ids")
         if not isinstance(artifact_ids, list) or not artifact_ids:
             raise PreprocessorError("multi_agent_task_artifacts_missing")
@@ -26123,6 +26133,13 @@ class CodexRunner:
                         )
                         with inner_self.lock:
                             inner_self.children.append(child)
+                        try:
+                            bind_frozen_authority_snapshot(
+                                child._processing_host,
+                                capture_authority_snapshot,
+                            )
+                        except MultiAgentV2OrchestratorError as exc:
+                            raise PreprocessorError(exc.code) from exc
                         context = child._background_context(candidate)
                     else:
                         child, context = pair
@@ -26645,30 +26662,18 @@ class CodexRunner:
                     }
 
         branch_worker = BranchWorker()
-        fanout = ReadFanoutScheduler(
-            physical_slots=min(
-                int(profile["physical_branch_slots"]),
-                len(plan["branches"]),
+        try:
+            fanout = run_capture_fanout(
+                plan=plan,
+                worker=branch_worker,
+                physical_branch_slots=int(profile["physical_branch_slots"]),
             )
-        ).run(plan, branch_worker)
+        except MultiAgentV2OrchestratorError as exc:
+            raise PreprocessorError(exc.code) from exc
         branch_results = [copy.deepcopy(dict(row)) for row in fanout["results"]]
         bundle = build_read_bundle(plan, fanout)
         successful = [row for row in branch_results if row["status"] == "succeeded"]
-        if not successful:
-            # Preserve the complete diagnostic set even though no final package
-            # may claim technical completion.
-            store.publish_analysis_object(
-                terra_initial,
-                ref_prefix="study-intake-terra-initial-analysis",
-            )
-            store.publish_analysis_object(
-                bundle, ref_prefix="study-intake-read-bundle"
-            )
-            for row in branch_results:
-                store.publish_analysis_object(
-                    row, ref_prefix="study-intake-luna-diagnostic-record"
-                )
-            raise PreprocessorError("multi_agent_all_luna_failed")
+        pipeline_status = completion_status(branch_results)
 
         reports: list[dict[str, Any]] = []
         diagnostics: list[dict[str, Any]] = []
@@ -26990,7 +26995,7 @@ class CodexRunner:
             runtime_model=final_result.runtime_model,
             runtime_reasoning_effort=final_result.runtime_reasoning_effort,
             runtime_metadata_provenance=final_result.runtime_metadata_provenance,
-            pipeline_status="multi_agent_analysis_package_ready",
+            pipeline_status=pipeline_status,
             draft_analysis=terra_initial,
             critical_review=terra_final,
             stage_receipts=stage_receipts,

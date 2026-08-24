@@ -283,8 +283,6 @@ def publish_analysis_package_v2(
 
     report_bindings = [row for row in output_bindings if row["kind"] == "investigation_report"]
     diagnostic_bindings = [row for row in output_bindings if row["kind"] == "diagnostic_record"]
-    if not report_bindings:
-        raise AnalysisPackageError("analysis_package_v2_success_missing")
     expected_luna = [
         {
             "branch_id": row["branch_id"],

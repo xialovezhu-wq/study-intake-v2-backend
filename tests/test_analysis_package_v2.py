@@ -277,6 +277,76 @@ class AnalysisPackageV2Tests(unittest.TestCase):
                 "diagnostic_record",
             )
 
+    def test_all_diagnostics_publish_without_becoming_evidence(self) -> None:
+        values = self._inputs(3)
+        read_plan = values["plan"]
+        diagnostics = []
+        for index in range(1, 4):
+            diagnostic = branch_result(read_plan, index)
+            diagnostic["status"] = "failed"
+            diagnostic["findings"] = []
+            diagnostic["evidence"] = []
+            diagnostic["error_code"] = "branch_result_identity_invalid"
+            core = {
+                key: item for key, item in diagnostic.items()
+                if key != "result_sha256"
+            }
+            diagnostic["result_sha256"] = __import__(
+                "multi_agent_report_contract"
+            ).sha256_value(core)
+            diagnostics.append(diagnostic)
+        read_bundle = build_read_bundle(read_plan, {
+            "results": diagnostics, "logical_branch_count": 3,
+            "physical_slot_count": 3, "maximum_active_branch_count": 3,
+            "wave_count": 1, "duration_ms": 1,
+        })
+        terra_input = build_terra_final_input_v2(
+            plan=read_plan, read_bundle=read_bundle,
+            branch_results=diagnostics, luna_reports=[],
+            diagnostic_records=diagnostics,
+        )
+        final = build_terra_final_report_v2(
+            terra_input=terra_input,
+            summary="technical diagnostics only",
+            branch_assessments=[{
+                "branch_id": row["branch_id"], "outcome": "diagnostic",
+                "disposition": "diagnostic_only",
+                "rationale": "foreign identity was excluded from evidence",
+            } for row in terra_input["branch_coverage"]],
+            subject_analysis={"sections": ["no attributable Luna evidence"]},
+            evidence_gaps=["all Luna branches were technically isolated"],
+            warnings=["terra_final_has_diagnostics_only"],
+        )
+        legacy = legacy_handoff(read_plan)
+        legacy["read_bundle_sha256"] = read_bundle["read_bundle_sha256"]
+        legacy["handoff_sha256"] = __import__(
+            "multi_agent_report_contract"
+        ).sha256_value({
+            key: item for key, item in legacy.items()
+            if key != "handoff_sha256"
+        })
+        handoff = build_sol_handoff_v3(
+            legacy_handoff=legacy, terra_input=terra_input,
+            terra_final_report=final,
+        )
+        values.update({
+            "read_bundle": read_bundle,
+            "branch_results": diagnostics,
+            "luna_outputs": diagnostics,
+            "terra_final": final,
+            "sol_handoff": handoff,
+        })
+        with tempfile.TemporaryDirectory() as folder:
+            store = AnalysisPackageStore(Path(folder))
+            package = publish_analysis_package_v2(store, **values)
+            reopened = reopen_analysis_package_v2(
+                store, package["package_sha256"]
+            )
+        self.assertEqual(reopened["ordered_luna_reports"], [])
+        self.assertEqual(len(reopened["ordered_luna_diagnostics"]), 3)
+        self.assertEqual(final["warnings"], ["terra_final_has_diagnostics_only"])
+        self.assertEqual(handoff["ordered_luna_reports"], [])
+
     def test_v1_pointer_reopens_and_v2_cannot_clobber_it(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = AnalysisPackageStore(Path(folder))
@@ -526,7 +596,12 @@ class AnalysisPackageV2Tests(unittest.TestCase):
             )
 
     def test_new_schema_mirrors_and_package_instance(self) -> None:
-        for name in ("terra-initial-analysis-v1.json", "analysis-package-v2.json"):
+        for name in (
+            "terra-initial-analysis-v1.json",
+            "analysis-package-v2.json",
+            "terra-final-report-v2.json",
+            "sol-handoff-envelope-v3.json",
+        ):
             self.assertEqual(
                 (ROOT / "schemas" / name).read_bytes(),
                 (ROOT / "plugin/kaoyan-study-intake/schemas" / name).read_bytes(),
@@ -553,6 +628,21 @@ class AnalysisPackageV2Tests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(json.loads(completed.stdout), [])
+
+    def test_all_diagnostic_schema_limits_match_runtime_contract(self) -> None:
+        for name in (
+            "analysis-package-v2.json",
+            "terra-final-report-v2.json",
+            "sol-handoff-envelope-v3.json",
+        ):
+            with self.subTest(schema=name):
+                schema = json.loads((ROOT / "schemas" / name).read_text())
+                properties = schema["properties"]
+                reports = properties["ordered_luna_reports"]
+                diagnostics = properties["ordered_luna_diagnostics"]
+                self.assertNotIn("minItems", reports)
+                self.assertEqual(reports["maxItems"], 4)
+                self.assertEqual(diagnostics["maxItems"], 4)
 
 
 if __name__ == "__main__":

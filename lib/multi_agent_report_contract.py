@@ -757,8 +757,7 @@ def build_terra_final_input_v2(
     diagnostics = {row.get("branch_id"): row for row in diagnostic_records}
     branch_ids = [row["branch_id"] for row in checked["branches"]]
     if (
-        not reports
-        or len(results) != len(branch_results)
+        len(results) != len(branch_results)
         or len(reports) != len(luna_reports)
         or len(diagnostics) != len(diagnostic_records)
         or set(results) != set(branch_ids)
@@ -826,7 +825,10 @@ def _diagnostic_bindings(
 def _luna_bindings_v2(
     reports: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, str]]:
-    if not 1 <= len(reports) <= 4:
+    # A technically closed investigation may contain only diagnostics.  An
+    # empty report set is therefore valid input for Terra Final; diagnostics
+    # remain separately bound and cannot become evidence by omission.
+    if not 0 <= len(reports) <= 4:
         raise MultiAgentReportContractError("terra_final_v2_reports_invalid")
     bindings: list[dict[str, str]] = []
     seen: set[str] = set()

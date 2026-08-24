@@ -1778,9 +1778,14 @@ class PreprocessorTests(unittest.TestCase):
         def fake_run(command, **kwargs):
             captured_command.extend(command)
             output_path = Path(command[command.index("--output-last-message") + 1])
-            output_path.write_text(
-                json.dumps(analysis(candidate.allowed_evidence_refs[0])),
-                encoding="utf-8",
+            raw_output = json.dumps(
+                analysis(candidate.allowed_evidence_refs[0])
+            ).encode("utf-8")
+            output_path.write_bytes(raw_output)
+            publish_fake_raw_refs(
+                runner,
+                stage_name=kwargs["stage_name"],
+                raw_output=raw_output,
             )
             return SimpleNamespace(
                 returncode=0,
@@ -1792,8 +1797,18 @@ class PreprocessorTests(unittest.TestCase):
             {**self.config["model"], "timeout_seconds": 5}, self.runtime
         )
         with mock.patch.object(runner, "_invoke_subprocess", side_effect=fake_run):
-            result = runner.run(candidate)
-        self.assertEqual(result.analysis["schema_version"], ANALYSIS_SCHEMA)
+            result = runner._execute_prompt(
+                prompt="return the fixture analysis schema object",
+                output_schema=Path(self.config["model"]["output_schema"]),
+                image_paths=candidate.image_paths,
+                stage_name="analysis",
+                max_prompt_bytes=4096,
+                max_output_bytes=4096,
+                allowed_evidence_refs=candidate.allowed_evidence_refs,
+                bind_evidence_schema=False,
+                timeout_seconds=5,
+            )
+        self.assertEqual(result.payload["schema_version"], ANALYSIS_SCHEMA)
         for gate in (
             "project_doc_max_bytes=0",
             "project_doc_fallback_filenames=[]",

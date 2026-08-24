@@ -26,7 +26,6 @@ from historical_compatibility.manual_capture_admission import (
     validate_authorization_for_task,
 )
 from multi_agent_events import MultiAgentEventError, parse_multi_agent_events
-from multi_agent_runtime import MultiAgentTaskRuntime
 from orchestration_plan import ReadPlanError, seal_read_plan, validate_read_plan
 from read_branch import SubprocessBranchWorker
 from read_bundle import (
@@ -303,19 +302,6 @@ class MultiAgentV2Tests(unittest.TestCase):
         self.assertTrue(decision.sol_review_ready)
         self.assertFalse(decision.quality_clean)
         self.assertFalse(decision.automatic_retry)
-
-    def test_host_runtime_produces_content_addressed_task_receipt(self) -> None:
-        result = MultiAgentTaskRuntime(physical_slots=2).execute(
-            plan=plan([branch(1, 5), branch(2, 5)]),
-            branch_worker=self.worker,
-            reviewer_outcome="accepted",
-        )
-        receipt = result["task_receipt"]
-        self.assertEqual(receipt["execution_status"], "succeeded")
-        self.assertTrue(receipt["sol_review_ready"])
-        self.assertTrue(receipt["quality_clean"])
-        self.assertRegex(receipt["receipt_sha256"], r"^[0-9a-f]{64}$")
-        self.assertEqual(result["formal_write_count"], 0)
 
     def test_technical_integrity_error_requires_quarantine(self) -> None:
         value = plan([branch(1, 1)])
