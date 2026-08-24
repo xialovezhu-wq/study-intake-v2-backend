@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -18,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
 import source_real_producer_acceptance as acceptance  # noqa: E402
+import core_dispatch_bridge  # noqa: E402
 
 
 class SourceRealProducerAcceptanceTest(unittest.TestCase):
@@ -49,6 +52,19 @@ class SourceRealProducerAcceptanceTest(unittest.TestCase):
         (path / "lib/preprocessor_core.py").write_text(
             "SOURCE_ACCEPTANCE_TEST_MODULE = True\n", encoding="utf-8"
         )
+        for relative in (
+            "scripts/run_source_real_producer_acceptance.py",
+            "scripts/run_source_subject.py",
+            "bin/preprocess_dispatcher.py",
+            "bin/preprocess_task_runner.py",
+            "lib/analysis_package_v1.py",
+            "lib/concurrent_dispatch.py",
+            "lib/core_dispatch_bridge.py",
+            "tests/test_real_producer_backend_zero_model.py",
+        ):
+            target = path / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"# compact fixture: {relative}\n", encoding="utf-8")
         for subject in acceptance.SUBJECTS:
             subject_root = path / "subjects" / subject
             subject_root.mkdir(parents=True)
@@ -490,6 +506,230 @@ class SourceRealProducerAcceptanceTest(unittest.TestCase):
         )
         self.assertEqual(0, summary["real_model_call_count"])
         self.assertEqual(0, summary["provider_request_count"])
+
+    def test_minimum_source_record_binds_only_direct_backend_refs(self) -> None:
+        config = self._config()
+        config["producer_mode"] = "actual_skill"
+        config["pipeline_mode"] = "minimum"
+        runtime_config = self.source / "runtime-config.json"
+        runtime_config.write_text("{}\n", encoding="utf-8")
+        self._run("git", "add", ".", cwd=self.source)
+        self._run("git", "commit", "-qm", "minimum fixture", cwd=self.source)
+        for subject in acceptance.SUBJECTS:
+            config["subjects"][subject]["executor"] = {
+                "adapter": "backend",
+                "runtime_config_path": str(runtime_config),
+                "real_provider": False,
+            }
+
+        record = acceptance.build_minimum_source_record(
+            source_root=self.source,
+            producer_mode="actual_skill",
+            config=config,
+            expected_source_root=self.source,
+        )
+        acceptance.verify_source_manifest(record)
+
+        self.assertNotIn("tracked_files", record["core"]["backend"])
+        self.assertNotIn("tracked_files", record["core"]["shared_mcp"])
+        harness_paths = {
+            Path(row["path"]).name
+            for row in record["core"]["harness"]["files"]
+        }
+        self.assertNotIn("run_source_subject_provider_acceptance.py", harness_paths)
+        self.assertNotIn("run_candidate_real_producer_acceptance.py", harness_paths)
+        self.assertEqual(record["core"]["manifest_kind"], "minimum_config_and_source")
+        for subject in acceptance.SUBJECTS:
+            files = record["core"]["subjects"][subject]["files"]
+            self.assertEqual(
+                set(files),
+                {
+                    "producer_module_file",
+                    "skill_file",
+                    "writer_file",
+                    "runtime_config",
+                },
+            )
+
+    def test_direct_cs408_config_uses_the_writer_fixture_private_root(self) -> None:
+        fixture_root = self.source / "subjects/cs408"
+        fixture_private_root = self.root / "private-real-shape"
+        fixture_private_root.mkdir()
+        runtime_root = self.root / "runtime"
+        authority_key = self.root / "authority.key"
+        template = {
+            "execution_mode": "live_authorized",
+            "dispatch": {},
+            "worker": {},
+            "dashboard": {},
+            "live_execution_gate": {},
+            "private_evidence": {},
+            "adapters": {
+                subject: {"enabled": False, "repo_root": str(self.source / "subjects" / subject)}
+                for subject in acceptance.SUBJECTS
+            },
+            "processing_plugin": {"enabled": True},
+        }
+
+        class Adapter:
+            config = {
+                "enabled": True,
+                "repo_root": str(fixture_root),
+                "private_current_question_root": str(fixture_private_root),
+            }
+
+        class Worker:
+            adapter = Adapter()
+
+        built = acceptance._backend_runtime_config(
+            template,
+            subject="cs408",
+            runtime_root=runtime_root,
+            fixture_root=fixture_root,
+            subject_roots={
+                subject: self.source / "subjects" / subject
+                for subject in acceptance.SUBJECTS
+            },
+            worker=Worker(),
+            authority_key_path=authority_key,
+        )
+        self.assertEqual(
+            Path(built["private_evidence"]["current_question_root"]).resolve(),
+            Path(
+                built["adapters"]["cs408"]["private_current_question_root"]
+            ).resolve(),
+        )
+
+    def test_minimum_direct_task_failure_preserves_child_stderr(self) -> None:
+        runtime_root = self.root / "direct-runtime"
+        unit_sha256 = "a" * 64
+        context_root = (
+            runtime_root
+            / "dispatch/contexts"
+            / unit_sha256
+            / "fence-1"
+        )
+        context_root.mkdir(parents=True)
+        stderr = (
+            b'{"error_code":"semantic_source_missing",'
+            b'"traceback":"preprocessor_core.py:123:build_math_signal"}'
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS": "minimum",
+                "STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT": str(runtime_root),
+            },
+            clear=False,
+        ):
+            diagnostic_path = (
+                core_dispatch_bridge._persist_source_acceptance_task_diagnostic(
+                    context_root=context_root,
+                    subject="math",
+                    unit_sha256=unit_sha256,
+                    lease_fence=1,
+                    returncode=1,
+                    stderr=stderr,
+                )
+            )
+        self.assertIsNotNone(diagnostic_path)
+        value = json.loads(Path(diagnostic_path).read_text(encoding="utf-8"))
+        self.assertEqual(value["stderr_utf8"], stderr.decode("utf-8"))
+        self.assertEqual(
+            value["stderr_sha256"], hashlib.sha256(stderr).hexdigest()
+        )
+        self.assertEqual(value["formal_write_count"], 0)
+
+    def test_direct_runtime_keeps_the_complete_processing_plugin_config(self) -> None:
+        source = inspect.getsource(acceptance._run_backend_executor)
+        self.assertNotIn(
+            'runtime.config["processing_plugin"] = {',
+            source,
+        )
+        self.assertEqual(len(acceptance.MINIMUM_PIPELINE_AUTHORITY_KEY), 32)
+
+    def test_isolated_mcp_authority_binds_one_existing_release_manifest(self) -> None:
+        runtime_root = self.root / "isolated-runtime"
+        runtime_root.mkdir()
+        release_id = "d" * 64
+        source_manifest = self.root / "release.json"
+        source_manifest.write_bytes(
+            acceptance.canonical_bytes(
+                {
+                    "schema_version": "study-intake-preprocessor-release-v2",
+                    "release_id": release_id,
+                    "component_inventory": {},
+                    "formal_write_count": 0,
+                }
+            )
+        )
+        acceptance._prepare_isolated_preprocessor_authority(
+            runtime_root=runtime_root,
+            release_manifest_path=source_manifest,
+            release_id=release_id,
+        )
+        current = runtime_root / "current"
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(os.readlink(current), f"releases/{release_id}")
+        self.assertEqual(
+            (runtime_root / "releases" / release_id / "release.json").read_bytes(),
+            source_manifest.read_bytes(),
+        )
+        self.assertTrue((runtime_root / "packages/objects").is_dir())
+
+    def test_minimum_task_interval_uses_existing_process_execution_times(self) -> None:
+        unit_sha256 = "e" * 64
+
+        class Result:
+            pass
+
+        result = Result()
+        result.status = "completed"
+        result.outcome = "succeeded"
+        result.error_code = None
+        result.unit_sha256 = unit_sha256
+
+        authority = {
+            "quality_status": "passed",
+            "report_disposition": None,
+            "stages": [
+                {
+                    "stage": stage,
+                    "requested_model": model,
+                    "model_call_count": 1,
+                    "provider_request_count": 2,
+                    "mcp_tool_call_count": 1,
+                    "normalization_warnings": [],
+                }
+                for stage, model in (
+                    ("terra_analysis", "gpt-5.6-terra"),
+                    ("luna_analysis", "gpt-5.6-luna"),
+                    ("terra_final", "gpt-5.6-terra"),
+                )
+            ],
+        }
+        row = acceptance._write_minimum_task_evidence(
+            self.root,
+            task=object(),
+            result=result,
+            completion={
+                "subject": "math",
+                "capture_id": "CAP-INTERVAL",
+                "process_execution": {
+                    "launched_at": "2026-08-24T01:00:00Z",
+                    "finished_at": "2026-08-24T01:05:00Z",
+                },
+            },
+            report={"formal_write_count": 0},
+            authority=authority,
+            expected_stage_order=(
+                "terra_analysis",
+                "luna_analysis",
+                "terra_final",
+            ),
+        )
+        self.assertEqual(row["started_at"], "2026-08-24T01:00:00Z")
+        self.assertEqual(row["finished_at"], "2026-08-24T01:05:00Z")
 
 
 if __name__ == "__main__":

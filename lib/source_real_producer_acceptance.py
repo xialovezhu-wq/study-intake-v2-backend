@@ -12,12 +12,15 @@ copied, or exposed to a model, Provider, or MCP process.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import importlib
 import json
 import os
+import re
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -38,6 +41,7 @@ CHILD_SCHEMA = "study-intake-source-subject-terminal-v1"
 _FORBIDDEN_SOURCE_PARTS = {"current", "releases", "site-packages"}
 _SUSPENDED_BACKEND_NAMES = {"study-intake-v2-backend"}
 _CANDIDATE_8_ID = "c5fa4bad38d1e60c95c857ec20be026dbb87df295ca409ffc16c23811fbced8d"
+MINIMUM_PIPELINE_AUTHORITY_KEY = b"minimum-pipeline-authority-key-0"
 
 
 class SourceAcceptanceError(RuntimeError):
@@ -311,6 +315,7 @@ def _validate_subject_specs(
         if not isinstance(executor, Mapping) or executor.get("adapter") not in {
             "fixture",
             "command",
+            "backend",
         }:
             raise SourceAcceptanceError("subject_executor_invalid")
         row = dict(raw)
@@ -351,11 +356,23 @@ def build_source_manifest(
     if producer_mode not in PRODUCER_MODES:
         raise SourceAcceptanceError("producer_mode_invalid")
     source_root = source_root.expanduser().resolve(strict=True)
+    raw_subjects = config.get("subjects", {})
+    direct_backend = bool(
+        isinstance(raw_subjects, Mapping)
+        and set(raw_subjects) == set(SUBJECTS)
+        and all(
+            isinstance(raw_subjects.get(subject), Mapping)
+            and isinstance(raw_subjects[subject].get("executor"), Mapping)
+            and raw_subjects[subject]["executor"].get("adapter") == "backend"
+            for subject in SUBJECTS
+        )
+    )
     git = git_identity(
         source_root,
         expected_root=expected_source_root,
         expected_branch=expected_branch,
         expected_head=expected_head,
+        require_clean=not direct_backend,
     )
     subjects = _validate_subject_specs(config.get("subjects", {}), source_root)
     shared_raw = config.get("shared_mcp")
@@ -413,7 +430,10 @@ def build_source_manifest(
                 Path(path), allowed_roots=allowed
             )
         executor = spec["executor"]
-        if producer_mode == "actual_skill" and executor.get("adapter") != "command":
+        if producer_mode == "actual_skill" and executor.get("adapter") not in {
+            "command",
+            "backend",
+        }:
             raise SourceAcceptanceError("actual_skill_requires_declared_command")
         if executor.get("adapter") == "command":
             command_source = executor.get("command_source")
@@ -427,6 +447,26 @@ def build_source_manifest(
                 "actual_skill_declared_command"
             ):
                 raise SourceAcceptanceError("actual_skill_command_not_declared")
+        elif executor.get("adapter") == "backend":
+            runtime_config_path = Path(
+                str(executor.get("runtime_config_path") or "")
+            ).expanduser()
+            if (
+                runtime_config_path.is_symlink()
+                or not runtime_config_path.is_file()
+            ):
+                raise SourceAcceptanceError("backend_runtime_config_invalid")
+            resolved_runtime_config = runtime_config_path.resolve(strict=True)
+            files["runtime_config"] = {
+                "path": str(resolved_runtime_config),
+                "sha256": sha256_file(resolved_runtime_config),
+            }
+            writer_harness = (
+                source_root / "tests/test_real_producer_backend_zero_model.py"
+            )
+            files["backend_writer_harness"] = _file_identity(
+                writer_harness, allowed_roots=(source_root,)
+            )
         declared[subject] = {
             "subject_root": str(subject_root),
             "producer_source_root": str(producer_source_root),
@@ -457,10 +497,207 @@ def build_source_manifest(
     return {"core": core, "source_manifest_sha256": sha256_bytes(canonical_bytes(core))}
 
 
+def _minimum_harness_identity(source_root: Path) -> dict[str, Any]:
+    paths = (
+        Path(__file__).resolve(),
+        source_root / "scripts/run_source_real_producer_acceptance.py",
+        source_root / "scripts/run_source_subject.py",
+        source_root / "bin/preprocess_dispatcher.py",
+        source_root / "bin/preprocess_task_runner.py",
+        source_root / "lib/analysis_package_v1.py",
+        source_root / "lib/concurrent_dispatch.py",
+        source_root / "lib/core_dispatch_bridge.py",
+        source_root / "tests/test_real_producer_backend_zero_model.py",
+    )
+    files = [
+        {"path": str(path.resolve(strict=True)), "sha256": sha256_file(path)}
+        for path in paths
+    ]
+    return {"files": files, "sha256": sha256_bytes(canonical_bytes(files))}
+
+
+def build_minimum_source_record(
+    *,
+    source_root: Path,
+    producer_mode: str,
+    config: Mapping[str, Any],
+    expected_source_root: Path | None = None,
+    expected_branch: str | None = None,
+    expected_head: str | None = None,
+) -> dict[str, Any]:
+    source_root = source_root.expanduser().resolve(strict=True)
+    specs = _validate_subject_specs(config.get("subjects", {}), source_root)
+    if producer_mode != "actual_skill" or any(
+        specs[subject]["executor"].get("adapter") != "backend"
+        for subject in SUBJECTS
+    ):
+        raise SourceAcceptanceError("minimum_pipeline_backend_executor_required")
+    backend = git_identity(
+        source_root,
+        expected_root=expected_source_root,
+        expected_branch=expected_branch,
+        expected_head=expected_head,
+        require_clean=False,
+    )
+    shared = config.get("shared_mcp")
+    if not isinstance(shared, Mapping):
+        raise SourceAcceptanceError("shared_mcp_binding_missing")
+    shared_root = Path(str(shared.get("source_root") or "")).resolve(strict=True)
+    shared_git = git_identity(
+        shared_root,
+        expected_root=Path(str(shared.get("expected_source_root") or shared_root)),
+        expected_branch=(
+            str(shared["expected_branch"])
+            if shared.get("expected_branch") is not None
+            else None
+        ),
+        expected_head=(
+            str(shared["expected_head"])
+            if shared.get("expected_head") is not None
+            else None
+        ),
+        reject_suspended_backend=False,
+    )
+    shared_module = _file_identity(
+        Path(str(shared.get("module_file") or "")),
+        allowed_roots=(shared_root,),
+    )
+    subject_rows: dict[str, Any] = {}
+    for subject in SUBJECTS:
+        spec = specs[subject]
+        allowed_roots = (
+            source_root,
+            Path(spec["subject_root"]),
+            Path(spec["producer_source_root"]),
+            *(
+                (Path(spec["skill_root"]),)
+                if spec.get("skill_root") is not None
+                else ()
+            ),
+            *(
+                (Path(spec["contract_root"]),)
+                if spec.get("contract_root") is not None
+                else ()
+            ),
+        )
+        files: dict[str, Any] = {}
+        for key in ("producer_module_file", "skill_file", "writer_file"):
+            files[key] = _file_identity(
+                Path(str(spec.get(key) or "")), allowed_roots=allowed_roots
+            )
+        contracts = spec.get("contract_files", {})
+        if not isinstance(contracts, Mapping):
+            raise SourceAcceptanceError("subject_contract_files_invalid")
+        for name, raw_path in sorted(contracts.items()):
+            files[f"contract_{name}"] = _file_identity(
+                Path(str(raw_path)), allowed_roots=allowed_roots
+            )
+        runtime_config = Path(
+            str(spec["executor"].get("runtime_config_path") or "")
+        ).expanduser()
+        if runtime_config.is_symlink() or not runtime_config.is_file():
+            raise SourceAcceptanceError("backend_runtime_config_invalid")
+        resolved_runtime_config = runtime_config.resolve(strict=True)
+        files["runtime_config"] = {
+            "path": str(resolved_runtime_config),
+            "sha256": sha256_file(resolved_runtime_config),
+        }
+        subject_rows[subject] = {
+            "subject_root": spec["subject_root"],
+            "producer_source_root": spec["producer_source_root"],
+            "git": containing_git_identity(Path(spec["subject_root"])),
+            "files": files,
+        }
+    core = {
+        "schema_version": MANIFEST_SCHEMA,
+        "manifest_kind": "minimum_config_and_source",
+        "producer_mode": producer_mode,
+        "backend": {**backend, "module": str(config.get("backend_module", "preprocessor_core"))},
+        "shared_mcp": {**shared_git, "module_file": shared_module},
+        "subjects": subject_rows,
+        "harness": _minimum_harness_identity(source_root),
+        "config_sha256": sha256_bytes(canonical_bytes(config)),
+        "formal_write_count": 0,
+    }
+    return {
+        "core": core,
+        "source_manifest_sha256": sha256_bytes(canonical_bytes(core)),
+    }
+
+
+def _verify_minimum_source_record(
+    manifest: Mapping[str, Any], *, verify_git: bool
+) -> None:
+    core = manifest.get("core")
+    digest = manifest.get("source_manifest_sha256")
+    if (
+        not isinstance(core, Mapping)
+        or core.get("schema_version") != MANIFEST_SCHEMA
+        or core.get("manifest_kind") != "minimum_config_and_source"
+        or core.get("formal_write_count") != 0
+        or digest != sha256_bytes(canonical_bytes(core))
+    ):
+        raise SourceAcceptanceError("minimum_source_record_invalid")
+    harness = core.get("harness")
+    if not isinstance(harness, Mapping) or not isinstance(harness.get("files"), list):
+        raise SourceAcceptanceError("minimum_source_record_invalid")
+    observed_harness = [
+        {"path": str(Path(row["path"]).resolve()), "sha256": sha256_file(Path(row["path"]))}
+        for row in harness["files"]
+    ]
+    if (
+        observed_harness != harness["files"]
+        or sha256_bytes(canonical_bytes(observed_harness)) != harness.get("sha256")
+    ):
+        raise SourceAcceptanceError("minimum_source_record_harness_drift")
+    for section in ("shared_mcp",):
+        row = core.get(section)
+        if not isinstance(row, Mapping):
+            raise SourceAcceptanceError("minimum_source_record_invalid")
+        module = row.get("module_file")
+        if (
+            not isinstance(module, Mapping)
+            or sha256_file(Path(str(module.get("path")))) != module.get("sha256")
+        ):
+            raise SourceAcceptanceError("minimum_source_record_file_drift")
+    subjects = core.get("subjects")
+    if not isinstance(subjects, Mapping) or set(subjects) != set(SUBJECTS):
+        raise SourceAcceptanceError("minimum_source_record_invalid")
+    for subject in SUBJECTS:
+        files = subjects[subject].get("files")
+        if not isinstance(files, Mapping):
+            raise SourceAcceptanceError("minimum_source_record_invalid")
+        for row in files.values():
+            if (
+                not isinstance(row, Mapping)
+                or sha256_file(Path(str(row.get("path")))) != row.get("sha256")
+            ):
+                raise SourceAcceptanceError("minimum_source_record_file_drift")
+    if verify_git:
+        for row in [core.get("backend"), core.get("shared_mcp"), *[
+            subjects[subject].get("git") for subject in SUBJECTS
+        ]]:
+            if not isinstance(row, Mapping):
+                raise SourceAcceptanceError("minimum_source_record_invalid")
+            observed = git_identity(
+                Path(str(row.get("root"))),
+                expected_root=Path(str(row.get("root"))),
+                expected_branch=str(row.get("branch")),
+                expected_head=str(row.get("head")),
+                reject_suspended_backend=False,
+                require_clean=False,
+            )
+            if observed.get("tree") != row.get("tree"):
+                raise SourceAcceptanceError("minimum_source_record_git_drift")
+
+
 def verify_source_manifest(
     manifest: Mapping[str, Any], *, verify_git: bool = True
 ) -> None:
     core = manifest.get("core")
+    if isinstance(core, Mapping) and core.get("manifest_kind") == "minimum_config_and_source":
+        _verify_minimum_source_record(manifest, verify_git=verify_git)
+        return
     digest = manifest.get("source_manifest_sha256")
     if (
         not isinstance(core, Mapping)
@@ -776,9 +1013,13 @@ def run_acceptance(
 
     _validate_config(config, producer_mode)
     source_root = source_root.expanduser().resolve(strict=True)
+    minimum_pipeline = config.get("pipeline_mode") == "minimum"
     protected_paths = [Path(value) for value in config.get("protected_paths", [])]
     forbidden = [source_root, *protected_paths]
-    manifest = build_source_manifest(
+    manifest_builder = (
+        build_minimum_source_record if minimum_pipeline else build_source_manifest
+    )
+    manifest = manifest_builder(
         source_root=source_root,
         producer_mode=producer_mode,
         config=config,
@@ -789,15 +1030,24 @@ def run_acceptance(
     root = _safe_new_output_root(output_root, forbidden=forbidden)
     started_at = utc_now()
     round_id = f"source-round-{uuid.uuid4().hex}"
-    config_path = root / "sealed-config.json"
+    working_root = root / ".working" if minimum_pipeline else root
+    working_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config_path = working_root / "sealed-config.json"
     atomic_json(config_path, config)
-    manifest_path = root / "source-manifest.json"
+    manifest_path = root / (
+        "config-and-source.json" if minimum_pipeline else "source-manifest.json"
+    )
     atomic_json(manifest_path, manifest)
     verify_source_manifest(manifest)
-    before = protected_snapshot(protected_paths)
-    atomic_json(root / "protected-before.json", before)
+    before = (
+        {"signature_sha256": "minimum_pipeline_not_collected"}
+        if minimum_pipeline
+        else protected_snapshot(protected_paths)
+    )
+    if not minimum_pipeline:
+        atomic_json(root / "protected-before.json", before)
 
-    release_path = root / "barrier-release.json"
+    release_path = working_root / "barrier-release.json"
     child_roots: dict[str, Path] = {}
     processes: dict[str, subprocess.Popen[bytes]] = {}
     handles: list[Any] = []
@@ -883,8 +1133,13 @@ def run_acceptance(
             }
         terminals[subject] = terminal
 
-    after = protected_snapshot(protected_paths)
-    atomic_json(root / "protected-after.json", after)
+    after = (
+        {"signature_sha256": "minimum_pipeline_not_collected"}
+        if minimum_pipeline
+        else protected_snapshot(protected_paths)
+    )
+    if not minimum_pipeline:
+        atomic_json(root / "protected-after.json", after)
     tripwire_pass = before["signature_sha256"] == after["signature_sha256"]
     all_passed = all(
         return_codes[subject] == 0 and terminals[subject].get("status") == "passed"
@@ -978,7 +1233,180 @@ def run_acceptance(
     except SourceAcceptanceError as exc:
         summary["status"] = "failed"
         summary["error_code"] = str(exc)
-    atomic_json(root / "summary.json", summary)
+    if minimum_pipeline:
+        task_rows = [
+            task
+            for subject in SUBJECTS
+            for task in terminals[subject].get("result", {}).get("tasks", [])
+            if isinstance(task, Mapping)
+        ]
+        task_subject_counts = {
+            subject: sum(row.get("subject") == subject for row in task_rows)
+            for subject in SUBJECTS
+        }
+
+        def interval_overlap(rows: Sequence[Mapping[str, Any]]) -> bool:
+            if len(rows) < 2:
+                return False
+            try:
+                starts = [
+                    dt.datetime.fromisoformat(
+                        str(row["started_at"]).replace("Z", "+00:00")
+                    )
+                    for row in rows
+                ]
+                finishes = [
+                    dt.datetime.fromisoformat(
+                        str(row["finished_at"]).replace("Z", "+00:00")
+                    )
+                    for row in rows
+                ]
+            except (KeyError, TypeError, ValueError):
+                return False
+            return max(starts) < min(finishes)
+
+        technical_completed = sum(
+            row.get("technical_status") == "completed" for row in task_rows
+        )
+        intra_overlap = {
+            subject: interval_overlap(
+                [row for row in task_rows if row.get("subject") == subject]
+            )
+            for subject in SUBJECTS
+        }
+        subject_windows = []
+        for subject in SUBJECTS:
+            rows = [row for row in task_rows if row.get("subject") == subject]
+            if rows:
+                subject_windows.append(
+                    {
+                        "started_at": min(str(row["started_at"]) for row in rows),
+                        "finished_at": max(str(row["finished_at"]) for row in rows),
+                    }
+                )
+        cross_subject_overlap = interval_overlap(subject_windows)
+        real_round = any(
+            config["subjects"][subject]["executor"].get("real_provider") is True
+            for subject in SUBJECTS
+        )
+        minimum_pass = bool(
+            summary["status"] == "passed"
+            and len(task_rows) == 6
+            and technical_completed == 6
+            and task_subject_counts == {subject: 2 for subject in SUBJECTS}
+            and len({row.get("unit_sha256") for row in task_rows}) == 6
+            and len({row.get("capture_id") for row in task_rows}) == 6
+            and (
+                not real_round
+                or cross_subject_overlap
+                and all(intra_overlap.values())
+            )
+        )
+        summary.update(
+            {
+                "status": "passed" if minimum_pass else "failed",
+                "task_count": len(task_rows),
+                "task_count_by_subject": task_subject_counts,
+                "technical_completed_tasks": technical_completed,
+                "warning_reports": sum(
+                    row.get("report_review_status") == "warning"
+                    for row in task_rows
+                ),
+                "needs_review_reports": sum(
+                    row.get("report_review_status") == "needs_review"
+                    for row in task_rows
+                ),
+                "cross_subject_overlap": cross_subject_overlap,
+                "intra_subject_overlap": intra_overlap,
+                "subject_failures": {
+                    subject: {
+                        "status": terminals[subject].get("status"),
+                        "error_code": terminals[subject].get("error_code"),
+                        "exception_type": terminals[subject].get(
+                            "exception_type"
+                        ),
+                    }
+                    for subject in SUBJECTS
+                    if terminals[subject].get("status") != "passed"
+                },
+            }
+        )
+        target_task_root = root / "tasks"
+        target_task_root.mkdir(mode=0o700)
+        for subject in SUBJECTS:
+            source_task_root = child_roots[subject] / "tasks"
+            moved = False
+            if source_task_root.is_dir():
+                for task_root in source_task_root.iterdir():
+                    target = target_task_root / task_root.name
+                    if target.exists():
+                        raise SourceAcceptanceError("minimum_task_evidence_conflict")
+                    os.replace(task_root, target)
+                    moved = True
+            if not moved and terminals[subject].get("status") != "passed":
+                failure_root = target_task_root / f"preflight-{subject}"
+                failure_root.mkdir(mode=0o700)
+                atomic_json(
+                    failure_root / "terminal.json",
+                    {
+                        "task_id": f"preflight-{subject}",
+                        "subject": subject,
+                        "technical_status": "technical_failed",
+                        "error_code": terminals[subject].get("error_code"),
+                        "formal_write_count": 0,
+                    },
+                )
+                resolved_config_path = (
+                    child_roots[subject].parent / "scratch/backend-config.json"
+                )
+                atomic_json(
+                    failure_root / "report.json",
+                    {
+                        "final_report_readable": False,
+                        "terminal": terminals[subject],
+                        "resolved_config": (
+                            load_json(resolved_config_path)
+                            if resolved_config_path.is_file()
+                            else None
+                        ),
+                        "formal_write_count": 0,
+                    },
+                )
+                for stream_name in ("stdout", "stderr"):
+                    outer = child_roots[subject] / f"outer.{stream_name}"
+                    (failure_root / f"{stream_name}.log").write_text(
+                        outer.read_text(encoding="utf-8", errors="replace")
+                        if outer.is_file()
+                        else "",
+                        encoding="utf-8",
+                    )
+        timeline = {
+            "round_id": round_id,
+            "barrier_released_at": released_at,
+            "tasks": sorted(
+                (
+                    {
+                        "task_id": row.get("unit_sha256"),
+                        "subject": row.get("subject"),
+                        "capture_id": row.get("capture_id"),
+                        "started_at": row.get("started_at"),
+                        "finished_at": row.get("finished_at"),
+                    }
+                    for row in task_rows
+                ),
+                key=lambda row: str(row.get("started_at")),
+            ),
+            "formal_write_count": 0,
+        }
+        atomic_json(root / "timeline.json", timeline)
+        summary.pop("matrix", None)
+        summary.pop("outer_return_codes", None)
+        summary["source_manifest_path"] = str(manifest_path)
+        shutil.rmtree(root / "subjects")
+        shutil.rmtree(working_root)
+        atomic_json(root / "run-summary.json", summary)
+    else:
+        atomic_json(root / "summary.json", summary)
     return summary
 
 
@@ -1199,6 +1627,757 @@ def _run_command_executor(
     return dict(result), process.pid
 
 
+_BACKEND_TEST_METHODS = {
+    "math": "test_math_actual_quick_intake_to_backend_runner_boundary",
+    "cs408": "test_cs408_actual_managed_and_ordinary_producers_to_backend",
+    "english": "test_english_actual_immutable_closed_and_quick_flush_to_backend",
+}
+
+
+class _BackendFixtureComplete(RuntimeError):
+    """Internal control transfer after a real writer fixture has been consumed."""
+
+
+def _backend_runtime_config(
+    template: Mapping[str, Any],
+    *,
+    subject: str,
+    runtime_root: Path,
+    fixture_root: Path,
+    subject_roots: Mapping[str, Path],
+    mcp_subject_roots: Mapping[str, Path] | None = None,
+    worker: Any,
+    authority_key_path: Path,
+) -> dict[str, Any]:
+    config = copy.deepcopy(dict(template))
+    config["execution_mode"] = "live_authorized"
+    config["runtime_root"] = str(runtime_root)
+    config["timezone"] = "Asia/Shanghai"
+    dispatch_config = config.setdefault("dispatch", {})
+    if isinstance(dispatch_config, dict):
+        dispatch_config.pop("production_canary", None)
+    worker_config = config.setdefault("worker", {})
+    worker_config["lock_path"] = str(runtime_root / "state/worker.lock")
+    worker_config["log_path"] = str(runtime_root / "logs/worker.log")
+    worker_config["model_timeout_seconds"] = max(
+        900, int(worker_config.get("model_timeout_seconds") or 0)
+    )
+    config.setdefault("dashboard", {})["projection_path"] = str(
+        runtime_root / "state/dashboard_projection.json"
+    )
+    config.setdefault("live_execution_gate", {})[
+        "authorization_state_path"
+    ] = str(runtime_root / "dispatch/manual-live-authorization-v1/state.json")
+    config.setdefault("private_evidence", {})[
+        "current_question_root"
+    ] = str(runtime_root / "private/current-question-evidence")
+
+    source_relatives = {
+        "math": {
+            "status_script": "数学一回滚复习系统/scripts/quick_intake.py",
+        },
+        "cs408": {
+            "status_script": "scripts/intake_fact_capture_408.py",
+        },
+        "english": {
+            "status_script": "scripts/english_learning_pipeline.py",
+            "foundation_script": "scripts/select_bbdc_foundation.py",
+            "review_status_script": "scripts/build_review_status_proposals.py",
+            "candidate_schema": "schema/english_pipeline/luna-candidate-v2.schema.json",
+        },
+    }
+    adapters: dict[str, dict[str, Any]] = {}
+    template_adapters = config.get("adapters")
+    if not isinstance(template_adapters, Mapping):
+        raise SourceAcceptanceError("backend_runtime_adapters_missing")
+    for name in SUBJECTS:
+        root = fixture_root if name == subject else subject_roots[name]
+        if name == subject:
+            row = copy.deepcopy(dict(worker.adapter.config))
+            row["enabled"] = True
+            row["repo_root"] = str(root)
+        else:
+            raw = template_adapters.get(name)
+            if not isinstance(raw, Mapping):
+                raise SourceAcceptanceError("backend_runtime_adapter_missing")
+            row = copy.deepcopy(dict(raw))
+            row["enabled"] = False
+            row["repo_root"] = str(root)
+            for key, relative in source_relatives[name].items():
+                row[key] = str(root / relative)
+            if name == "english":
+                row["state_dir"] = str(root / "intake")
+                row["candidate_root"] = str(root / "intake/candidates")
+        adapters[name] = row
+    config["adapters"] = adapters
+    if subject == "cs408":
+        cs408_private_root = adapters["cs408"].get(
+            "private_current_question_root"
+        )
+        if isinstance(cs408_private_root, str) and cs408_private_root.strip():
+            config["private_evidence"]["current_question_root"] = (
+                cs408_private_root
+            )
+    effective_mcp_roots = mcp_subject_roots or {
+        name: fixture_root if name == subject else subject_roots[name]
+        for name in SUBJECTS
+    }
+    config["subject_repo_roots"] = {
+        name: str(effective_mcp_roots[name]) for name in SUBJECTS
+    }
+    processing_plugin = config.get("processing_plugin")
+    if not isinstance(processing_plugin, Mapping):
+        raise SourceAcceptanceError("backend_processing_plugin_missing")
+    config["processing_plugin"] = copy.deepcopy(dict(processing_plugin))
+    config["processing_plugin"]["authority_key_path"] = str(authority_key_path)
+    if subject != "math" and isinstance(config.get("math_deep_v2"), Mapping):
+        config["math_deep_v2"]["enabled"] = False
+    if subject != "cs408" and isinstance(config.get("cs408_deep_v2"), Mapping):
+        config["cs408_deep_v2"]["enabled"] = False
+    return config
+
+
+def _backend_report_review_status(authority: Mapping[str, Any]) -> str:
+    disposition = authority.get("report_disposition")
+    if disposition == "needs_sol_review":
+        return "needs_review"
+    if authority.get("quality_status") == "issues_found":
+        return "warning"
+    return "clean"
+
+
+def _prepare_isolated_preprocessor_authority(
+    *,
+    runtime_root: Path,
+    release_manifest_path: Path,
+    release_id: str,
+) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", release_id):
+        raise SourceAcceptanceError("backend_release_identity_invalid")
+    if release_manifest_path.is_symlink() or not release_manifest_path.is_file():
+        raise SourceAcceptanceError("backend_release_manifest_invalid")
+    raw = release_manifest_path.read_bytes()
+    try:
+        manifest = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SourceAcceptanceError("backend_release_manifest_invalid") from exc
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("release_id") != release_id
+        or not isinstance(manifest.get("component_inventory"), Mapping)
+    ):
+        raise SourceAcceptanceError("backend_release_manifest_invalid")
+    releases_root = runtime_root / "releases"
+    objects_root = runtime_root / "packages/objects"
+    release_root = releases_root / release_id
+    release_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    objects_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target_manifest = release_root / "release.json"
+    if target_manifest.exists():
+        if target_manifest.is_symlink() or target_manifest.read_bytes() != raw:
+            raise SourceAcceptanceError("backend_release_manifest_conflict")
+    else:
+        target_manifest.write_bytes(raw)
+    current = runtime_root / "current"
+    expected_target = Path("releases") / release_id
+    if current.exists() or current.is_symlink():
+        if not current.is_symlink() or Path(os.readlink(current)) != expected_target:
+            raise SourceAcceptanceError("backend_runtime_current_conflict")
+    else:
+        current.symlink_to(expected_target, target_is_directory=True)
+
+
+def _write_minimum_task_evidence(
+    evidence_root: Path,
+    *,
+    task: Any,
+    result: Any,
+    completion: Mapping[str, Any],
+    report: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    expected_stage_order: Sequence[str],
+) -> dict[str, Any]:
+    unit = str(result.unit_sha256)
+    task_root = evidence_root / "tasks" / unit
+    task_root.mkdir(parents=True, mode=0o700)
+    stages = authority.get("stages")
+    if (
+        not isinstance(stages, list)
+        or [row.get("stage") for row in stages] != list(expected_stage_order)
+    ):
+        raise SourceAcceptanceError("backend_stage_order_invalid")
+    process_execution = completion.get("process_execution")
+    process_interval = (
+        process_execution if isinstance(process_execution, Mapping) else {}
+    )
+    terminal = {
+        "task_id": unit,
+        "unit_sha256": unit,
+        "subject": completion.get("subject"),
+        "capture_id": completion.get("capture_id"),
+        "technical_status": "completed",
+        "report_review_status": _backend_report_review_status(authority),
+        "warning_codes": sorted(
+            {
+                str(warning)
+                for stage in stages
+                for warning in stage.get("normalization_warnings", [])
+                if isinstance(warning, str) and warning
+            }
+        ),
+        "started_at": (
+            completion.get("started_at")
+            or process_interval.get("launched_at")
+        ),
+        "finished_at": (
+            completion.get("finished_at")
+            or process_interval.get("finished_at")
+        ),
+        "stage_order": [row["stage"] for row in stages],
+        "requested_models": [row.get("requested_model") for row in stages],
+        "model_call_count": sum(int(row.get("model_call_count") or 0) for row in stages),
+        "provider_request_count": sum(
+            int(row.get("provider_request_count") or 0) for row in stages
+        ),
+        "mcp_tool_call_count": sum(
+            int(row.get("mcp_tool_call_count") or 0) for row in stages
+        ),
+        "formal_write_count": 0,
+    }
+    atomic_json(task_root / "terminal.json", terminal)
+    atomic_json(task_root / "report.json", report)
+    (task_root / "stdout.log").write_text(
+        json.dumps(
+            {
+                "status": result.status,
+                "outcome": result.outcome,
+                "capture_id": completion.get("capture_id"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (task_root / "stderr.log").write_text(
+        (str(result.error_code) + "\n") if result.error_code else "",
+        encoding="utf-8",
+    )
+    return terminal
+
+
+def _write_minimum_task_failure(
+    evidence_root: Path,
+    *,
+    runtime_root: Path,
+    config_path: Path,
+    task: Any,
+    result: Any,
+) -> dict[str, Any]:
+    unit = str(result.unit_sha256)
+    task_root = evidence_root / "tasks" / unit
+    task_root.mkdir(parents=True, mode=0o700)
+    diagnostics: list[dict[str, Any]] = []
+    context_parent = runtime_root / "dispatch/contexts" / unit
+    if context_parent.is_dir():
+        for path in sorted(
+            context_parent.glob("fence-*/source-acceptance-diagnostics/*.json")
+        ):
+            try:
+                value = load_json(path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, Mapping):
+                diagnostics.append(copy.deepcopy(dict(value)))
+    completion = (
+        copy.deepcopy(dict(result.completion))
+        if isinstance(result.completion, Mapping)
+        else None
+    )
+    process_execution = (
+        completion.get("process_execution")
+        if isinstance(completion, Mapping)
+        else None
+    )
+    process_interval = (
+        process_execution if isinstance(process_execution, Mapping) else {}
+    )
+    terminal = {
+        "task_id": unit,
+        "unit_sha256": unit,
+        "subject": task.frozen_payload.get("subject"),
+        "capture_id": task.frozen_payload.get("capture_id"),
+        "technical_status": "technical_failed",
+        "report_review_status": "partial",
+        "warning_codes": [],
+        "started_at": (
+            completion.get("started_at")
+            if completion and completion.get("started_at")
+            else process_interval.get("launched_at")
+        ),
+        "finished_at": (
+            completion.get("finished_at")
+            if completion and completion.get("finished_at")
+            else process_interval.get("finished_at") or utc_now()
+        ),
+        "stage_order": [],
+        "model_call_count": 0,
+        "provider_request_count": 0,
+        "mcp_tool_call_count": 0,
+        "error_code": result.error_code,
+        "formal_write_count": 0,
+    }
+    atomic_json(task_root / "terminal.json", terminal)
+    atomic_json(
+        task_root / "report.json",
+        {
+            "final_report_readable": False,
+            "task": task.as_dict(),
+            "completion": completion,
+            "resolved_config_path": str(config_path),
+            "resolved_config_sha256": sha256_file(config_path),
+            "resolved_config": load_json(config_path),
+            "diagnostics": diagnostics,
+            "formal_write_count": 0,
+        },
+    )
+    (task_root / "stdout.log").write_text(
+        json.dumps(
+            {
+                "status": result.status,
+                "outcome": result.outcome,
+                "error_code": result.error_code,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (task_root / "stderr.log").write_text(
+        "\n".join(
+            str(row.get("traceback") or row.get("stderr_utf8") or "")
+            for row in diagnostics
+        )
+        or str(result.error_code or "unknown_task_failure")
+        + "\n",
+        encoding="utf-8",
+    )
+    return terminal
+
+
+def _run_backend_executor(
+    executor: Mapping[str, Any],
+    *,
+    source_root: Path,
+    subject: str,
+    spec: Mapping[str, Any],
+    subject_specs: Mapping[str, Mapping[str, Any]],
+    runtime_root: Path,
+    producer_root: Path,
+    scratch_root: Path,
+    evidence_root: Path,
+    release_file: Path,
+    barrier_ready: Any,
+    enable_real_provider: bool,
+) -> dict[str, Any]:
+    real_provider = executor.get("real_provider") is True
+    if real_provider and not enable_real_provider:
+        raise SourceAcceptanceError("real_provider_not_explicitly_enabled")
+    runtime_config_path = Path(
+        str(executor.get("runtime_config_path") or "")
+    ).expanduser()
+    if runtime_config_path.is_symlink() or not runtime_config_path.is_file():
+        raise SourceAcceptanceError("backend_runtime_config_invalid")
+    template = load_json(runtime_config_path)
+    if not isinstance(template, Mapping):
+        raise SourceAcceptanceError("backend_runtime_config_invalid")
+
+    for value in (source_root, source_root / "lib", source_root / "bin"):
+        if str(value) not in sys.path:
+            sys.path.insert(0, str(value))
+    producer_tests = importlib.import_module(
+        "tests.test_real_producer_backend_zero_model"
+    )
+    module_path = Path(str(producer_tests.__file__)).resolve(strict=True)
+    if not is_within(module_path, source_root):
+        raise SourceAcceptanceError("backend_writer_harness_source_invalid")
+    dispatcher_module = importlib.import_module("preprocess_dispatcher")
+    core_module = importlib.import_module("preprocessor_core")
+
+    subject_roots = {
+        name: Path(str(row["subject_root"])).resolve(strict=True)
+        for name, row in subject_specs.items()
+    }
+    producer_tests.MATH_ROOT = subject_roots["math"]
+    producer_tests.CS408_ROOT = subject_roots["cs408"]
+    producer_tests.ENGLISH_ROOT = subject_roots["english"]
+    producer_tests.ACTUAL_ROOTS = {
+        name: Path(
+            str(subject_specs[name].get("actual_writer_root") or subject_roots[name])
+        ).resolve(strict=True)
+        for name in SUBJECTS
+    }
+    producer_tests.SUBJECT_REPOS_AVAILABLE = True
+    producer_tests.ACTUAL_PRODUCERS_AVAILABLE = True
+    runtime_subject_roots = dict(subject_roots)
+    if subject != "english":
+        runtime_subject_roots["english"] = producer_tests.ACTUAL_ROOTS[
+            "english"
+        ]
+
+    method_name = _BACKEND_TEST_METHODS[subject]
+    testcase = producer_tests.RealProducerBackendZeroModelTests(
+        methodName=method_name
+    )
+    testcase.assert_canonical_main_sources = lambda *_args, **_kwargs: None
+    captured_summary: dict[str, Any] | None = None
+    prior_tempdir = tempfile.tempdir
+    prior_capture_mode = os.environ.get("STUDY_MINIMUM_PIPELINE_TWO_CAPTURES")
+    prior_diagnostic_mode = os.environ.get(
+        "STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS"
+    )
+    prior_diagnostic_root = os.environ.get(
+        "STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT"
+    )
+    tempfile.tempdir = str(producer_root)
+    os.environ["STUDY_MINIMUM_PIPELINE_TWO_CAPTURES"] = "1"
+    os.environ["STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS"] = "minimum"
+    os.environ["STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT"] = str(runtime_root)
+
+    def consume_fixture(**kwargs: Any) -> dict[str, Any]:
+        nonlocal captured_summary
+        fixture_root = Path(kwargs["fixture_root"]).resolve(strict=True)
+        worker = kwargs["worker"]
+        overlay = kwargs["overlay"]
+        raw_ids = kwargs.get("target_capture_ids")
+        target_ids = (
+            [str(value) for value in raw_ids]
+            if isinstance(raw_ids, (list, tuple))
+            else [str(kwargs["target_capture_id"])]
+        )
+        if len(target_ids) != 2 or len(set(target_ids)) != 2:
+            raise SourceAcceptanceError("backend_writer_capture_count_invalid")
+
+        authority_key_path = scratch_root / "authority.key"
+        authority_key_path.write_bytes(MINIMUM_PIPELINE_AUTHORITY_KEY)
+        authority_key_path.chmod(0o600)
+        config = _backend_runtime_config(
+            template,
+            subject=subject,
+            runtime_root=runtime_root,
+            fixture_root=fixture_root,
+            subject_roots=runtime_subject_roots,
+            mcp_subject_roots=producer_tests.ACTUAL_ROOTS,
+            worker=worker,
+            authority_key_path=authority_key_path,
+        )
+        config_path = scratch_root / "backend-config.json"
+        atomic_json(config_path, config)
+        loaded_config = (
+            core_module.load_config(config_path) if real_provider else config
+        )
+        release_id, _ = dispatcher_module.release_identity(loaded_config)
+        worker.release_id = release_id
+        if real_provider:
+            _prepare_isolated_preprocessor_authority(
+                runtime_root=runtime_root,
+                release_manifest_path=Path(
+                    str(loaded_config["release"]["manifest_path"])
+                ),
+                release_id=release_id,
+            )
+        runtime = dispatcher_module.ProductionDispatchRuntime(
+            loaded_config,
+            subject,
+            config_path,
+            scan_worker_factory=lambda _config: worker,
+            ordinary_local_capture=False,
+        )
+        if real_provider:
+            original_runner_factory = runtime.dispatcher.runner_factory
+
+            def diagnostic_runner_factory(task: Any, context: Any) -> Any:
+                runner = original_runner_factory(task, context)
+
+                def wrap(method: Any, stage_name: str) -> Any:
+                    def guarded(*args: Any, **method_kwargs: Any) -> Any:
+                        try:
+                            return method(*args, **method_kwargs)
+                        except BaseException as exc:
+                            chain: list[dict[str, Any]] = []
+                            current: BaseException | None = exc
+                            while current is not None:
+                                diagnostic = getattr(current, "diagnostic", None)
+                                chain.append(
+                                    {
+                                        "type": type(current).__name__,
+                                        "code": getattr(current, "code", None),
+                                        "message": str(current),
+                                        "diagnostic": (
+                                            copy.deepcopy(dict(diagnostic))
+                                            if isinstance(diagnostic, Mapping)
+                                            else None
+                                        ),
+                                    }
+                                )
+                                current = current.__cause__
+                            atomic_json(
+                                context.root
+                                / "source-acceptance-diagnostics"
+                                / f"direct-{stage_name}.json",
+                                {
+                                    "subject": subject,
+                                    "unit_sha256": task.unit_sha256,
+                                    "stage": stage_name,
+                                    "traceback": traceback.format_exc(),
+                                    "error_chain": chain,
+                                    "formal_write_count": 0,
+                                },
+                            )
+                            raise
+
+                    return guarded
+
+                runner.run_analysis = wrap(runner.run_analysis, "analysis")
+                runner.run_critical_review = wrap(
+                    runner.run_critical_review, "critical_review"
+                )
+                return runner
+
+            runtime.dispatcher.runner_factory = diagnostic_runner_factory
+        else:
+            runtime.processing_host = None
+            runtime.dispatcher.runner_factory = (
+                lambda _task, _context: producer_tests.ImmediateZeroModelRunner()
+            )
+
+        available = worker.eligible_candidates(
+            subject,
+            "2026-08-22",
+            capture_allowlist=None,
+            controlled_replay=False,
+        )
+        by_id = {row.capture_id: row for row, _reason in available}
+        if not set(target_ids).issubset(by_id):
+            raise SourceAcceptanceError("backend_writer_capture_missing")
+        targets = [by_id[capture_id] for capture_id in target_ids]
+        processing_contracts = {
+            candidate.input_binding.get("processing_contract_sha256")
+            for candidate in targets
+        }
+        if len(processing_contracts) != 1:
+            raise SourceAcceptanceError("backend_processing_contract_mismatch")
+        processing_contract_sha256 = next(iter(processing_contracts))
+        if not isinstance(processing_contract_sha256, str):
+            raise SourceAcceptanceError("backend_processing_contract_missing")
+        recorded_ats = [
+            dt.datetime.fromisoformat(
+                str(candidate.recorded_at).replace("Z", "+00:00")
+            )
+            for candidate in targets
+        ]
+        cutoff_at = (min(recorded_ats) - dt.timedelta(seconds=1)).isoformat()
+        exact_values: set[str] = set()
+        for candidate in targets:
+            event_ids = candidate.input_binding.get("capture_event_ids")
+            if subject == "english" and isinstance(event_ids, list):
+                exact_values.update(str(value) for value in event_ids)
+            else:
+                exact_values.add(candidate.capture_id)
+        exact_allowlist = frozenset(exact_values)
+
+        barrier_ready(
+            {
+                "capture_ids": target_ids,
+                "writer_fixture_root": str(fixture_root),
+                "runtime_config_sha256": sha256_file(runtime_config_path),
+            }
+        )
+
+        scan_config = copy.deepcopy(dict(loaded_config))
+        scan_config["processing_plugin"] = {
+            "component_lock_path": str(overlay["component_lock_path"])
+        }
+        frozen, decisions = producer_tests.scan_eligible_candidates(
+            scan_config,
+            subject,
+            worker_factory=lambda _config: worker,
+            capture_allowlist=exact_allowlist,
+            producer_recorded_after=cutoff_at,
+            publish_evidence_readiness=False,
+        )
+        handles = [runtime.dispatcher.submit(row.task) for row in frozen]
+        if len(handles) != 2:
+            raise SourceAcceptanceError(
+                "backend_task_count_invalid:" + repr(decisions)
+            )
+        timeout = float(executor.get("timeout_seconds", 2700))
+        if not runtime.dispatcher.drain(timeout=timeout):
+            raise SourceAcceptanceError("backend_dispatch_drain_timeout")
+        results = [handle.wait(1) for handle in handles]
+        task_rows: list[dict[str, Any]] = []
+        technical_failures: list[str] = []
+        for result in results:
+            task = next(
+                handle.task for handle in handles
+                if handle.task.unit_sha256 == result.unit_sha256
+            )
+            completion = result.completion
+            if (
+                result.status != "completed"
+                or result.outcome != "succeeded"
+                or not isinstance(completion, Mapping)
+            ):
+                technical_failures.append(
+                    str(result.error_code or result.outcome or "unknown")
+                )
+                task_rows.append(
+                    _write_minimum_task_failure(
+                        evidence_root,
+                        runtime_root=runtime_root,
+                        config_path=config_path,
+                        task=task,
+                        result=result,
+                    )
+                )
+                continue
+            report_sha256 = str(completion.get("report_json_sha256") or "")
+            report_path = (
+                Path(str(completion["report_json_path"]))
+                if completion.get("report_json_path")
+                else runtime_root
+                / "dispatch/reports/json/sha256"
+                / report_sha256[:2]
+                / f"{report_sha256}.json"
+            )
+            package_path = Path(str(completion.get("package_path") or ""))
+            if not report_path.is_file() or not package_path.is_file():
+                raise SourceAcceptanceError("backend_final_report_missing")
+            report = load_json(report_path)
+            package = load_json(package_path)
+            authority = package.get("analysis", {}).get(
+                "analysis_package_authority"
+            )
+            expected_stage_order: tuple[str, ...]
+            if not isinstance(authority, Mapping) and not real_provider:
+                authority = {
+                    "stages": [
+                        {
+                            "stage": stage,
+                            "requested_model": None,
+                            "model_call_count": 0,
+                            "provider_request_count": 0,
+                            "mcp_tool_call_count": 0,
+                            "normalization_warnings": [],
+                        }
+                        for stage in ("analysis", "critical_review")
+                    ],
+                    "quality_status": "passed",
+                    "report_disposition": None,
+                }
+                expected_stage_order = ("analysis", "critical_review")
+            else:
+                expected_stage_order = (
+                    "terra_analysis",
+                    "luna_analysis",
+                    "terra_final",
+                )
+            if not isinstance(report, Mapping) or not isinstance(authority, Mapping):
+                raise SourceAcceptanceError("backend_final_report_invalid")
+            task_rows.append(
+                _write_minimum_task_evidence(
+                    evidence_root,
+                    task=task,
+                    result=result,
+                    completion=completion,
+                    report=report,
+                    authority=authority,
+                    expected_stage_order=expected_stage_order,
+                )
+            )
+        if {row["capture_id"] for row in task_rows} != set(target_ids):
+            raise SourceAcceptanceError("backend_task_identity_mismatch")
+        if technical_failures:
+            captured_summary = {
+                "status": "failed",
+                "subject": subject,
+                "capture_ids": target_ids,
+                "unit_sha256s": [row["unit_sha256"] for row in task_rows],
+                "tasks": task_rows,
+                "task_count": len(task_rows),
+                "technical_completed_tasks": sum(
+                    row["technical_status"] == "completed"
+                    for row in task_rows
+                ),
+                "technical_failure_codes": technical_failures,
+                "real_model_call_count": sum(
+                    int(row["model_call_count"]) for row in task_rows
+                ),
+                "provider_request_count": sum(
+                    int(row["provider_request_count"]) for row in task_rows
+                ),
+                "mcp_tool_call_count": sum(
+                    int(row["mcp_tool_call_count"]) for row in task_rows
+                ),
+                "formal_write_count": 0,
+            }
+            raise SourceCommandFailure(
+                "backend_task_technical_failed:"
+                + technical_failures[0],
+                result=captured_summary,
+                pid=os.getpid(),
+            )
+        captured_summary = {
+            "status": "passed",
+            "subject": subject,
+            "capture_ids": target_ids,
+            "unit_sha256s": [row["unit_sha256"] for row in task_rows],
+            "tasks": task_rows,
+            "task_count": 2,
+            "technical_completed_tasks": 2,
+            "real_model_call_count": sum(
+                int(row["model_call_count"]) for row in task_rows
+            ),
+            "provider_request_count": sum(
+                int(row["provider_request_count"]) for row in task_rows
+            ),
+            "mcp_tool_call_count": sum(
+                int(row["mcp_tool_call_count"]) for row in task_rows
+            ),
+            "formal_write_count": 0,
+        }
+        raise _BackendFixtureComplete()
+
+    testcase.assert_actual_production_runtime_once = consume_fixture
+    try:
+        getattr(testcase, method_name)()
+    except _BackendFixtureComplete:
+        pass
+    finally:
+        tempfile.tempdir = prior_tempdir
+        if prior_capture_mode is None:
+            os.environ.pop("STUDY_MINIMUM_PIPELINE_TWO_CAPTURES", None)
+        else:
+            os.environ["STUDY_MINIMUM_PIPELINE_TWO_CAPTURES"] = prior_capture_mode
+        if prior_diagnostic_mode is None:
+            os.environ.pop("STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS", None)
+        else:
+            os.environ["STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS"] = (
+                prior_diagnostic_mode
+            )
+        if prior_diagnostic_root is None:
+            os.environ.pop("STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT", None)
+        else:
+            os.environ["STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT"] = (
+                prior_diagnostic_root
+            )
+    if captured_summary is None:
+        raise SourceAcceptanceError("backend_writer_fixture_not_reached")
+    assert_recursive_formal_write_zero(captured_summary)
+    return captured_summary
+
+
 def run_subject(
     *,
     source_root: Path,
@@ -1299,46 +2478,65 @@ def run_subject(
             "harness_sha256": manifest["core"]["harness"]["sha256"],
             "outer_pid": os.getpid(),
         }
-        terminal.update(
-            {
-                "status": "barrier_ready",
-                "barrier_ready_at": utc_now(),
-                "source_manifest_sha256": manifest["source_manifest_sha256"],
-                "config_sha256": manifest["core"]["config_sha256"],
-                "harness_sha256": manifest["core"]["harness"]["sha256"],
-                "source_identity": provenance,
-                "source_identity_pass": True,
-            }
-        )
-        atomic_json(evidence_root / "lifecycle.json", terminal)
-        atomic_json(
-            evidence_root / "barrier-ready.json",
-            {
+        def barrier_gate(extra: Mapping[str, Any] | None = None) -> None:
+            terminal.update(
+                {
+                    "status": "barrier_ready",
+                    "barrier_ready_at": utc_now(),
+                    "source_manifest_sha256": manifest["source_manifest_sha256"],
+                    "config_sha256": manifest["core"]["config_sha256"],
+                    "harness_sha256": manifest["core"]["harness"]["sha256"],
+                    "source_identity": provenance,
+                    "source_identity_pass": True,
+                }
+            )
+            ready = {
                 "subject": subject,
                 "round_id": round_id,
                 "ready_at": terminal["barrier_ready_at"],
                 "outer_pid": os.getpid(),
                 "source_manifest_sha256": manifest["source_manifest_sha256"],
                 "formal_write_count": 0,
-            },
-        )
-        while not release_file.is_file():
-            time.sleep(0.01)
-        release = load_json(release_file)
-        terminal.update(
-            {
-                "status": "running",
-                "barrier_released_at": release.get("released_at"),
-                "run_started_at": utc_now(),
-                "model_run_started": True,
             }
-        )
-        atomic_json(evidence_root / "lifecycle.json", terminal)
+            if extra is not None:
+                ready["prepared"] = copy.deepcopy(dict(extra))
+            atomic_json(evidence_root / "lifecycle.json", terminal)
+            atomic_json(evidence_root / "barrier-ready.json", ready)
+            while not release_file.is_file():
+                time.sleep(0.01)
+            release = load_json(release_file)
+            terminal.update(
+                {
+                    "status": "running",
+                    "barrier_released_at": release.get("released_at"),
+                    "run_started_at": utc_now(),
+                    "model_run_started": True,
+                }
+            )
+            atomic_json(evidence_root / "lifecycle.json", terminal)
+
         executor = spec["executor"]
         executor_pid: int | None = None
-        if executor.get("adapter") == "fixture":
+        if executor.get("adapter") == "backend":
+            result = _run_backend_executor(
+                executor,
+                source_root=source_root,
+                subject=subject,
+                spec=spec,
+                subject_specs=specs,
+                runtime_root=writable[0],
+                producer_root=writable[1],
+                scratch_root=writable[2],
+                evidence_root=writable[3],
+                release_file=release_file,
+                barrier_ready=barrier_gate,
+                enable_real_provider=enable_real_provider,
+            )
+        elif executor.get("adapter") == "fixture":
+            barrier_gate()
             result = _run_fixture_executor(executor, subject)
         else:
+            barrier_gate()
             result, executor_pid = _run_command_executor(
                 executor,
                 source_root=source_root,

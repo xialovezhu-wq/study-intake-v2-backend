@@ -408,6 +408,119 @@ class ConcurrentDispatchTests(unittest.TestCase):
     def test_twenty_same_subject_tasks_have_no_subject_cap(self) -> None:
         self._assert_unbounded_batch(20, "cs408")
 
+    def test_zero_model_three_subject_two_tasks_share_subject_dispatchers(
+        self,
+    ) -> None:
+        subjects = ("math", "cs408", "english")
+        tasks_by_subject = {
+            subject: [
+                frozen_task(40_000 + subject_index * 2 + task_index, subject=subject)
+                for task_index in range(2)
+            ]
+            for subject_index, subject in enumerate(subjects)
+        }
+        all_tasks = [
+            task
+            for subject in subjects
+            for task in tasks_by_subject[subject]
+        ]
+        self.assertEqual(
+            len({str(task.frozen_payload["capture_id"]) for task in all_tasks}),
+            6,
+        )
+        self.assertEqual(len({task.unit_sha256 for task in all_tasks}), 6)
+
+        coordinator = BlockingCoordinator(6)
+        runtimes = {subject: self.runtime / subject for subject in subjects}
+        dispatchers = {
+            subject: ConcurrentDispatcher(
+                runtimes[subject],
+                lambda _task, _context: BlockingFakeRunner(coordinator),
+                stage_timeout_seconds=5,
+            )
+            for subject in subjects
+        }
+        handles_by_subject: dict[str, list[Any]] = {}
+        try:
+            handles_by_subject = {
+                subject: dispatchers[subject].dispatch(
+                    tasks_by_subject[subject], wait=False
+                )
+                for subject in subjects
+            }
+            self.assertTrue(coordinator.wait_all_entered(timeout=5))
+            self.assertEqual(len(set(coordinator.analysis_entered)), 6)
+            self.assertEqual(coordinator.critical_entered, [])
+            for subject in subjects:
+                self.assertGreaterEqual(dispatchers[subject].active_count, 2)
+                self.assertGreaterEqual(
+                    dispatchers[subject]
+                    .lease_store.subject_status_read_only(subject)["active_count"],
+                    2,
+                )
+        finally:
+            coordinator.release.set()
+
+        results = [
+            handle.wait(10)
+            for subject in subjects
+            for handle in handles_by_subject[subject]
+        ]
+        self.assertEqual(
+            [(result.status, result.outcome) for result in results],
+            [("completed", "succeeded")] * 6,
+        )
+        self.assertEqual(
+            coordinator.calls,
+            {
+                task.unit_sha256: {"analysis": 1, "critical_review": 1}
+                for task in all_tasks
+            },
+        )
+
+        completion_paths: set[Path] = set()
+        report_sha256s: set[str] = set()
+        for subject in subjects:
+            store = LeaseStore(runtimes[subject])
+            for task in tasks_by_subject[subject]:
+                history = store.verify_task_event_history(
+                    task.unit_sha256,
+                    expected_release_id="a" * 64,
+                )
+                self.assertEqual(
+                    [
+                        row["event"]["event"]
+                        for row in history["events"]
+                    ].count("claim"),
+                    1,
+                )
+                verified = store.verify_authoritative_completion(
+                    subject,
+                    str(task.frozen_payload["capture_id"]),
+                    expected_release_id="a" * 64,
+                    expected_unit_sha256=task.unit_sha256,
+                )
+                completion = verified["completion"]
+                self.assertEqual(completion["outcome"], "succeeded")
+                completion_paths.add(store._completion_path(task.unit_sha256))
+                report_sha256 = str(completion["report_json_sha256"])
+                report_path = (
+                    runtimes[subject]
+                    / "dispatch/reports/json/sha256"
+                    / report_sha256[:2]
+                    / f"{report_sha256}.json"
+                )
+                self.assertTrue(report_path.is_file())
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                self.assertEqual(report["unit_sha256"], task.unit_sha256)
+                self.assertEqual(
+                    report["capture_id"], task.frozen_payload["capture_id"]
+                )
+                report_sha256s.add(report_sha256)
+
+        self.assertEqual(len(completion_paths), 6)
+        self.assertEqual(len(report_sha256s), 6)
+
     def _scan_distinct_tasks(
         self,
         *,

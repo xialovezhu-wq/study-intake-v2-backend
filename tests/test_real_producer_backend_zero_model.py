@@ -816,25 +816,51 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
         case = source_tests.QuickIntakeTests(methodName="runTest")
         case.setUp()
         try:
-            payload = case.payload(
-                attempt_id="warmup:WQ-real-shape:QI-real-shape",
-                study_date="2026-08-22",
+            capture_count = (
+                2
+                if os.environ.get("STUDY_MINIMUM_PIPELINE_TWO_CAPTURES") == "1"
+                else 1
             )
-            payload["episode_evidence"]["teaching_turns"] = [
-                {
-                    "speaker": "user",
-                    "kind": "reasoning",
-                    "text": "我先检查两个平面的法向量。",
-                    "origin": "user_observed",
-                },
-                {
-                    "speaker": "assistant",
-                    "kind": "hint",
-                    "text": "再核对交线方向与两个法向量的关系。",
-                    "origin": "source_verified",
-                },
-            ]
-            receipt = case.invoke_record(payload)
+            payloads: list[dict[str, Any]] = []
+            receipts: list[dict[str, Any]] = []
+            for index in range(capture_count):
+                payload = case.payload(
+                    attempt_id=(
+                        "warmup:WQ-real-shape:QI-real-shape"
+                        if capture_count == 1
+                        else f"warmup:WQ-real-shape:QI-real-shape-{index + 1:02d}"
+                    ),
+                    study_date="2026-08-22",
+                )
+                payload["episode_evidence"]["teaching_turns"] = [
+                    {
+                        "speaker": "user",
+                        "kind": "reasoning",
+                        "text": "我先检查两个平面的法向量。",
+                        "origin": "user_observed",
+                    },
+                    {
+                        "speaker": "assistant",
+                        "kind": "hint",
+                        "text": "再核对交线方向与两个法向量的关系。",
+                        "origin": "source_verified",
+                    },
+                ]
+                payloads.append(payload)
+                receipts.append(
+                    case.invoke_record(
+                        payload,
+                        name=(
+                            "capture.json"
+                            if capture_count == 1
+                            else f"capture-{index + 1:02d}.json"
+                        ),
+                    )
+                )
+            payload = payloads[0]
+            receipt = receipts[0]
+            target_capture_ids = [row["event_id"] for row in receipts]
+            self.assertEqual(len(set(target_capture_ids)), capture_count)
             overlay = install_actual_descriptor_overlay("math", case.base)
             copied_script = (
                 case.base
@@ -862,12 +888,17 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 adapter.status,
                 transform=adapter.deep_candidate,
             )
+            target_kwargs = (
+                {"target_capture_ids": target_capture_ids}
+                if capture_count == 2
+                else {"target_capture_id": receipt["event_id"]}
+            )
             h4 = self.assert_actual_production_runtime_once(
                 subject="math",
                 fixture_root=case.base,
                 worker=worker,
-                target_capture_id=receipt["event_id"],
                 overlay=overlay,
+                **target_kwargs,
             )
             self.assertEqual(h4["provider_request_count"], 0)
             runtime = case.base / "isolated-backend-runtime"
@@ -955,67 +986,98 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
         managed.setUp()
         try:
             private_root = Path(managed.tmp.name) / "private-real-shape"
-            shown = managed_tests.prepared_pack.show_item(
-                managed.repo,
-                managed_tests.SESSION_ID,
-                managed_tests.ITEM_ID,
+            two_captures = (
+                os.environ.get("STUDY_MINIMUM_PIPELINE_TWO_CAPTURES") == "1"
             )
-            prepared = managed_tests.prepared_pack.prepare_current_turn(
-                managed.repo,
-                session_id=managed_tests.SESSION_ID,
-                item_id=managed_tests.ITEM_ID,
-                choice="C",
-                confidence="high",
-                prompt_level="L3",
-                request_id="real-shape-managed-408",
-                event_time="2026-08-22T10:30:00+08:00",
-                display_surface_sha256=shown["surface_sha256"],
-                private_root=private_root,
-            )
-            capsule = managed_tests.current_evidence.read_evaluation_capsule(
-                prepared["grader_capsule_locator"],
-                expected_sha256=prepared["grader_capsule_sha256"],
-                private_root=private_root,
-            )
-            receipt = managed_tests.current_turn.run_current_question_turn(
-                managed.repo,
-                prepared["context"],
-                feedback_text="提示后完成的隔离 real-shape 回归反馈。",
-                private_evaluation=capsule["evaluation_evidence"],
-                private_root=private_root,
-            )
-            _handoff_binding, handoff = (
-                managed_tests.current_evidence.read_background_handoff_for_capture(
-                    receipt["capture_id"], private_root=private_root
-                )
-            )
-            resolution = json.loads(
-                (
-                    private_root
-                    / "turns"
-                    / f"{handoff['resolution_receipt_sha256']}.json"
-                ).read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                set(resolution),
+            turns = [
                 {
-                    "schema",
-                    "status",
-                    "attestation_schema",
-                    "context_id",
-                    "session_id",
-                    "item_id",
-                    "capture_id",
-                    "capture_receipt_sha256",
-                    "evidence_manifest_sha256",
-                    "buffer_freeze_receipt_sha256",
-                    "interaction_trace_sha256",
-                    "event_time",
-                    "advance_allowed",
-                    "formal_write_count",
-                },
-                resolution,
-            )
+                    "item_id": managed_tests.ITEM_ID,
+                    "choice": "C",
+                    "prompt_level": "L3",
+                    "request_id": "real-shape-managed-408",
+                    "event_time": "2026-08-22T10:30:00+08:00",
+                    "feedback_text": "提示后完成的隔离 real-shape 回归反馈。",
+                }
+            ]
+            if two_captures:
+                turns.append(
+                    {
+                        "item_id": "MQ-02",
+                        "choice": "B",
+                        "prompt_level": "none",
+                        "request_id": "real-shape-managed-408-02",
+                        "event_time": "2026-08-22T10:31:00+08:00",
+                        "feedback_text": "独立完成后继边界的隔离 real-shape 回归反馈。",
+                    }
+                )
+            receipts: list[dict[str, Any]] = []
+            for turn in turns:
+                shown = managed_tests.prepared_pack.show_item(
+                    managed.repo,
+                    managed_tests.SESSION_ID,
+                    turn["item_id"],
+                )
+                prepared = managed_tests.prepared_pack.prepare_current_turn(
+                    managed.repo,
+                    session_id=managed_tests.SESSION_ID,
+                    item_id=turn["item_id"],
+                    choice=turn["choice"],
+                    confidence="high",
+                    prompt_level=turn["prompt_level"],
+                    request_id=turn["request_id"],
+                    event_time=turn["event_time"],
+                    display_surface_sha256=shown["surface_sha256"],
+                    private_root=private_root,
+                )
+                capsule = managed_tests.current_evidence.read_evaluation_capsule(
+                    prepared["grader_capsule_locator"],
+                    expected_sha256=prepared["grader_capsule_sha256"],
+                    private_root=private_root,
+                )
+                captured = managed_tests.current_turn.run_current_question_turn(
+                    managed.repo,
+                    prepared["context"],
+                    feedback_text=turn["feedback_text"],
+                    private_evaluation=capsule["evaluation_evidence"],
+                    private_root=private_root,
+                )
+                receipts.append(captured)
+                _handoff_binding, handoff = (
+                    managed_tests.current_evidence.read_background_handoff_for_capture(
+                        captured["capture_id"], private_root=private_root
+                    )
+                )
+                resolution = json.loads(
+                    (
+                        private_root
+                        / "turns"
+                        / f"{handoff['resolution_receipt_sha256']}.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(resolution["item_id"], turn["item_id"])
+                self.assertEqual(
+                    set(resolution),
+                    {
+                        "schema",
+                        "status",
+                        "attestation_schema",
+                        "context_id",
+                        "session_id",
+                        "item_id",
+                        "capture_id",
+                        "capture_receipt_sha256",
+                        "evidence_manifest_sha256",
+                        "buffer_freeze_receipt_sha256",
+                        "interaction_trace_sha256",
+                        "event_time",
+                        "advance_allowed",
+                        "formal_write_count",
+                    },
+                    resolution,
+                )
+            receipt = receipts[0]
+            target_capture_ids = [row["capture_id"] for row in receipts]
+            self.assertEqual(len(set(target_capture_ids)), len(receipts))
             overlay = install_actual_descriptor_overlay(
                 "cs408", managed.repo
             )
@@ -1060,12 +1122,17 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 {"status_timeout_seconds": 10},
             )
             worker = ActualAdapterWorker("cs408", adapter, adapter.status)
+            target_kwargs = (
+                {"target_capture_ids": target_capture_ids}
+                if two_captures
+                else {"target_capture_id": receipt["capture_id"]}
+            )
             h4 = self.assert_actual_production_runtime_once(
                 subject="cs408",
                 fixture_root=managed.repo,
                 worker=worker,
-                target_capture_id=receipt["capture_id"],
                 overlay=overlay,
+                **target_kwargs,
             )
             self.assertEqual(h4["mcp_tool_call_count"], 0)
             runtime = Path(managed.tmp.name) / "isolated-backend-runtime"
@@ -1362,6 +1429,17 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 target = adapter_case.repo / "english_pipeline" / source.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
+            for relative in (
+                "scripts/build_old_word_memory_curve_index.py",
+                "scripts/build_review_status_proposals.py",
+                "scripts/select_bbdc_foundation.py",
+            ):
+                source = ACTUAL_ROOTS["english"] / relative
+                target = adapter_case.repo / relative
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    self.assertEqual(sha256_file(target), sha256_file(source))
             english_config = copy.deepcopy(
                 adapter_case.config["adapters"]["english"]
             )
@@ -1411,12 +1489,32 @@ class RealProducerBackendZeroModelTests(unittest.TestCase):
                 )
                 == "explicit_quick_intake"
             )
+            two_captures = (
+                os.environ.get("STUDY_MINIMUM_PIPELINE_TWO_CAPTURES") == "1"
+            )
+            target_capture_ids = [quick_flush_candidate.capture_id]
+            if two_captures:
+                completed_candidate = next(
+                    row.candidate
+                    for row in frozen
+                    if row.task.frozen_payload["input_binding"].get(
+                        "batch_trigger"
+                    )
+                    == "article_completed"
+                )
+                target_capture_ids.append(completed_candidate.capture_id)
+                self.assertEqual(len(set(target_capture_ids)), 2)
+            target_kwargs = (
+                {"target_capture_ids": target_capture_ids}
+                if two_captures
+                else {"target_capture_id": quick_flush_candidate.capture_id}
+            )
             h4 = self.assert_actual_production_runtime_once(
                 subject="english",
                 fixture_root=adapter_case.repo,
                 worker=worker,
-                target_capture_id=quick_flush_candidate.capture_id,
                 overlay=overlay,
+                **target_kwargs,
             )
             self.assertEqual(h4["formal_write_count"], 0)
             self.assertEqual(

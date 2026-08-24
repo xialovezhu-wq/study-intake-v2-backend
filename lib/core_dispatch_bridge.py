@@ -3097,6 +3097,110 @@ __all__ = [
 ]
 
 
+def _persist_minimum_source_task_diagnostic(
+    *,
+    context_root: Path,
+    subject: str,
+    unit_sha256: str,
+    lease_fence: int,
+    returncode: int,
+    stderr: bytes,
+) -> Path | None:
+    runtime_raw = os.environ.get("STUDY_SOURCE_ACCEPTANCE_RUNTIME_ROOT")
+    if (
+        subject not in {"math", "cs408", "english"}
+        or re.fullmatch(r"[0-9a-f]{64}", unit_sha256) is None
+        or isinstance(lease_fence, bool)
+        or not isinstance(lease_fence, int)
+        or lease_fence < 1
+        or isinstance(returncode, bool)
+        or not isinstance(returncode, int)
+        or returncode == 0
+        or not isinstance(stderr, bytes)
+        or len(stderr) > 1024 * 1024
+        or not isinstance(runtime_raw, str)
+        or not runtime_raw
+    ):
+        return None
+    try:
+        runtime_path = Path(runtime_raw)
+        if runtime_path.is_symlink() or not runtime_path.is_dir():
+            return None
+        runtime_root = runtime_path.resolve(strict=True)
+        root = context_root.resolve(strict=True)
+        expected = (
+            runtime_root
+            / "dispatch/contexts"
+            / unit_sha256
+            / f"fence-{lease_fence}"
+        )
+        if root != expected or root in {Path("/"), Path.home().resolve()}:
+            return None
+        relative = root.relative_to(runtime_root)
+        current = runtime_root
+        for part in relative.parts:
+            current = current / part
+            node = current.lstat()
+            if stat.S_ISLNK(node.st_mode) or not stat.S_ISDIR(node.st_mode):
+                return None
+        diagnostic_root = root / "source-acceptance-diagnostics"
+        diagnostic_root.mkdir(mode=0o700, exist_ok=True)
+        if (
+            diagnostic_root.is_symlink()
+            or not diagnostic_root.is_dir()
+            or diagnostic_root.resolve(strict=True).parent != root
+        ):
+            return None
+        payload = {
+            "schema_version": "study-intake-source-task-diagnostic-v1",
+            "subject": subject,
+            "unit_sha256": unit_sha256,
+            "lease_fence": lease_fence,
+            "returncode": returncode,
+            "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            "stderr_size": len(stderr),
+            "stderr_utf8": stderr.decode("utf-8", errors="replace"),
+            "synthetic_source_acceptance": True,
+            "diagnostic_content_class": "minimum_direct_task_child_stderr",
+            "formal_write_count": 0,
+        }
+        path = diagnostic_root / (
+            f"{subject}-{unit_sha256}-fence-{lease_fence}.json"
+        )
+        raw = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if path.exists():
+            return path if not path.is_symlink() and path.read_bytes() == raw else None
+        temporary = diagnostic_root / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return path
+    except Exception:
+        return None
+
+
 def _persist_source_acceptance_task_diagnostic(
     *,
     context_root: Path,
@@ -3108,7 +3212,17 @@ def _persist_source_acceptance_task_diagnostic(
 ) -> Path | None:
     """Persist synthetic child stderr only for the isolated source harness."""
 
-    if os.environ.get("STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS") != "1":
+    diagnostic_mode = os.environ.get("STUDY_SOURCE_ACCEPTANCE_TASK_DIAGNOSTICS")
+    if diagnostic_mode == "minimum":
+        return _persist_minimum_source_task_diagnostic(
+            context_root=context_root,
+            subject=subject,
+            unit_sha256=unit_sha256,
+            lease_fence=lease_fence,
+            returncode=returncode,
+            stderr=stderr,
+        )
+    if diagnostic_mode != "1":
         return None
     try:
         producer_raw = os.environ.get(

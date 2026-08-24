@@ -184,6 +184,96 @@ class AnalysisPackageV1Tests(unittest.TestCase):
                 package["warnings"],
             )
 
+    def test_model_report_identity_and_advisory_defects_are_repaired_and_reopenable(self) -> None:
+        calls: list[str] = []
+
+        def misleading(stage: str, model: str, stage_input: dict) -> dict:
+            calls.append(stage)
+            result = executor(stage, model, stage_input)
+            result["report"] = {
+                "schema_version": "model-self-reported-schema",
+                "stage": "model_self_reported_stage",
+                "subject": "english",
+                "capture_id": "MODEL-SELF-REPORTED-CAPTURE",
+                "summary": f"durable raw output for {stage}",
+                "proposals": "not-a-list",
+                "warnings": ["model_quality_warning"],
+                "evidence_refs": [],
+                "unexpected_advisory": {"nightly_hint": stage},
+            }
+            return result
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = AnalysisPackageStore(Path(folder))
+            package = AnalysisPackageDriver(store, misleading).run(
+                build_durable_capture(
+                    capture_id="CAP-408-BINDING-REPAIR-001",
+                    subject="cs408",
+                    study_date="2026-08-21",
+                    captured_at="2026-08-21T10:00:00+08:00",
+                    payload={"synthetic": True},
+                    source_kind="synthetic",
+                )
+            )
+
+            expected_stages = [
+                "terra_analysis",
+                "luna_analysis",
+                "terra_final",
+            ]
+            self.assertEqual(calls, expected_stages)
+            self.assertEqual(package["stage_order"], expected_stages)
+            self.assertEqual(len(package["stages"]), 3)
+            self.assertEqual(package["status"], "ready_for_nightly")
+            self.assertIn(
+                "analysis_normalization_binding_repaired",
+                package["warnings"],
+            )
+            self.assertIn(
+                "analysis_normalization_unknown_fields_dropped",
+                package["warnings"],
+            )
+
+            reopened = store.packages_for(
+                subject="cs408", capture_intake_date_value="2026-08-21"
+            )
+            self.assertEqual(len(reopened), 1)
+            self.assertEqual(reopened[0]["status"], "ready_for_nightly")
+            self.assertEqual(reopened[0]["capture_id"], "CAP-408-BINDING-REPAIR-001")
+            for expected_stage, stage_row in zip(
+                expected_stages, reopened[0]["stages"], strict=True
+            ):
+                report_sha = stage_row["report_sha256"]
+                report = json.loads(
+                    (
+                        store.report_root
+                        / report_sha[:2]
+                        / f"{report_sha}.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(report["stage"], expected_stage)
+                self.assertEqual(report["subject"], "cs408")
+                self.assertEqual(
+                    report["capture_id"], "CAP-408-BINDING-REPAIR-001"
+                )
+                self.assertEqual(report["normalization_status"], "incomplete")
+                self.assertIn(
+                    "analysis_normalization_binding_repaired", report["warnings"]
+                )
+                self.assertIn(
+                    "analysis_normalization_unknown_fields_dropped",
+                    report["warnings"],
+                )
+                self.assertTrue(stage_row["raw_output_ref"])
+                self.assertTrue(stage_row["execution_receipt_ref"])
+                self.assertTrue(
+                    {
+                        reopened[0]["capture_ref"],
+                        stage_row["execution_receipt_ref"],
+                        stage_row["raw_output_ref"],
+                    }.issubset(report["evidence_refs"])
+                )
+
     def test_missing_raw_output_binding_is_retryable_technical_failure(self) -> None:
         def missing_raw(stage: str, model: str, stage_input: dict) -> dict:
             result = executor(stage, model, stage_input)
@@ -224,6 +314,7 @@ class AnalysisPackageV1Tests(unittest.TestCase):
             return result
 
         with tempfile.TemporaryDirectory() as folder:
+            store = AnalysisPackageStore(Path(folder))
             capture = build_durable_capture(
                 capture_id="CAP-2",
                 subject="math",
@@ -235,7 +326,13 @@ class AnalysisPackageV1Tests(unittest.TestCase):
             with self.assertRaisesRegex(
                 AnalysisPackageError, "analysis_runtime_identity_invalid"
             ):
-                AnalysisPackageDriver(AnalysisPackageStore(Path(folder)), drifted).run(capture)
+                AnalysisPackageDriver(store, drifted).run(capture)
+            self.assertEqual(
+                store.packages_for(
+                    subject="math", capture_intake_date_value="2026-08-21"
+                ),
+                [],
+            )
 
     def test_same_content_is_idempotent_but_changed_pointer_cannot_clobber(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

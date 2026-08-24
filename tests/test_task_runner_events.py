@@ -232,7 +232,9 @@ class TaskRunnerEventTests(unittest.TestCase):
             def _assert_current_candidate_generation(
                 inner_self, _candidate
             ) -> None:
-                return None
+                raise AssertionError(
+                    "frozen task must not run a post-model generation rescan"
+                )
 
             def process_claimed_candidate(
                 inner_self, *_args, **_kwargs

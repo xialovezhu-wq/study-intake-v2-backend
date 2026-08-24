@@ -19395,7 +19395,7 @@ class CodexRunner:
         ) or (
             server_code == "OUTPUT_LIMIT" and tool in library_tools
         ) or (
-            server_code == "NOT_FOUND" and tool == "get_records"
+            server_code == "NOT_FOUND" and tool != "get_task_context"
         )
         if server_code in MCP_NON_EVIDENCE_ERROR_CODES and allowed_for_tool:
             return True
@@ -19937,7 +19937,55 @@ class CodexRunner:
         ] = {}
         english_review_duplicate_calls: list[dict[str, Any]] = []
         english_review_duplicate_projection_sha256: str | None = None
+        review_policy_code: str | None = None
+        result_projection_sha256s: dict[tuple[str, str], str] = {}
         successful_call_order = 0
+
+        def result_projection_sha256(
+            raw_result: Any, envelope: Mapping[str, Any]
+        ) -> str:
+            structured = self._mcp_structured_result_projection_sha256(
+                raw_result
+            )
+            if structured is not None:
+                return structured
+            projection = copy.deepcopy(dict(envelope))
+            projection.pop("captured_at", None)
+            return sha256_value(projection)
+
+        def record_review_policy_call(
+            *,
+            code: str,
+            server: Any,
+            tool: Any,
+            arguments: Mapping[str, Any],
+            envelope: Mapping[str, Any],
+            raw_result: Any,
+            include_call: bool = True,
+        ) -> None:
+            nonlocal english_review_duplicate_projection_sha256
+            nonlocal review_policy_code
+            if review_policy_code is not None:
+                raise PreprocessorError(code)
+            projection_sha256 = result_projection_sha256(
+                raw_result, envelope
+            )
+            if include_call:
+                english_review_duplicate_calls.append(
+                    {
+                        "sequence": 0,
+                        "_transport_order": successful_call_order,
+                        "server": str(server),
+                        "tool": str(tool),
+                        "arguments": copy.deepcopy(dict(arguments)),
+                        "arguments_sha256": sha256_value(arguments),
+                        "result": copy.deepcopy(dict(envelope)),
+                        "result_sha256": sha256_value(envelope),
+                    }
+                )
+            english_review_duplicate_projection_sha256 = projection_sha256
+            review_policy_code = code
+
         for raw in stdout.splitlines():
             try:
                 event = json.loads(raw)
@@ -20191,9 +20239,16 @@ class CodexRunner:
                     or math_search_attempt.get("page_size")
                     != math_search_page_size
                 ):
-                    raise PreprocessorError(
-                        f"{stage_name}_mcp_cursor_without_first_page"
+                    record_review_policy_call(
+                        code=f"{stage_name}_mcp_cursor_without_first_page",
+                        server=server,
+                        tool=tool,
+                        arguments=arguments,
+                        envelope=envelope,
+                        raw_result=raw_result,
+                        include_call=False,
                     )
+                    continue
 
             target_argument_hashes = (
                 math_search_attempt["argument_hashes"]
@@ -20221,6 +20276,12 @@ class CodexRunner:
                 read_identity in argument_hashes
                 or read_identity in target_argument_hashes
             ):
+                if result_projection_sha256s.get(read_identity) != (
+                    result_projection_sha256(raw_result, envelope)
+                ):
+                    raise PreprocessorError(
+                        f"{stage_name}_mcp_duplicate_read"
+                    )
                 if (
                     subject == "math"
                     and tool == "get_records"
@@ -20285,9 +20346,23 @@ class CodexRunner:
                         english_review_duplicate_projection_sha256 = (
                             duplicate_projection_sha256
                         )
+                        review_policy_code = (
+                            f"{stage_name}_mcp_duplicate_read"
+                        )
                         continue
-                raise PreprocessorError(f"{stage_name}_mcp_duplicate_read")
+                record_review_policy_call(
+                    code=f"{stage_name}_mcp_duplicate_read",
+                    server=server,
+                    tool=tool,
+                    arguments=arguments,
+                    envelope=envelope,
+                    raw_result=raw_result,
+                )
+                continue
             target_argument_hashes.add(read_identity)
+            result_projection_sha256s[read_identity] = (
+                result_projection_sha256(raw_result, envelope)
+            )
             if subject == "math" and tool == "get_records":
                 result_projection = copy.deepcopy(dict(envelope))
                 result_projection.pop("captured_at", None)
@@ -20324,7 +20399,15 @@ class CodexRunner:
                     logical_identity in logical_first_page_hashes
                     or logical_identity in target_logical_first_page_hashes
                 ):
-                    raise PreprocessorError(f"{stage_name}_mcp_duplicate_read")
+                    record_review_policy_call(
+                        code=f"{stage_name}_mcp_duplicate_read",
+                        server=server,
+                        tool=tool,
+                        arguments=arguments,
+                        envelope=envelope,
+                        raw_result=raw_result,
+                    )
+                    continue
                 target_logical_first_page_hashes.add(logical_identity)
             query_arguments = {
                 key: copy.deepcopy(value)
@@ -20337,9 +20420,16 @@ class CodexRunner:
             coverage = target_query_coverage.get(query_sha256)
             if coverage is None:
                 if cursor is not None:
-                    raise PreprocessorError(
-                        f"{stage_name}_mcp_cursor_without_first_page"
+                    record_review_policy_call(
+                        code=f"{stage_name}_mcp_cursor_without_first_page",
+                        server=server,
+                        tool=tool,
+                        arguments=arguments,
+                        envelope=envelope,
+                        raw_result=raw_result,
+                        include_call=False,
                     )
+                    continue
                 coverage = {
                     "query_sha256": query_sha256,
                     "query": query_arguments,
@@ -20704,8 +20794,11 @@ class CodexRunner:
             or read_artifact_ids != set(expected_artifact_ids)
             or library_call_count < 1
         ):
-            raise PreprocessorError(f"{stage_name}_mcp_required_reads_incomplete")
-        if english_review_duplicate_calls:
+            raise PreprocessorError(
+                review_policy_code
+                or f"{stage_name}_mcp_required_reads_incomplete"
+            )
+        if review_policy_code is not None:
             review_calls = [copy.deepcopy(dict(call)) for call in calls]
             review_calls.extend(
                 copy.deepcopy(dict(call))
@@ -20721,12 +20814,15 @@ class CodexRunner:
                     subject=subject,
                     processing_context=processing_context,
                     calls=review_calls,
-                    duplicate_argument_count=1,
+                    duplicate_argument_count=len(
+                        english_review_duplicate_calls
+                    ),
                 )
             )
             assert english_review_duplicate_projection_sha256 is not None
+            assert review_policy_code is not None
             raise _McpReviewPolicyViolation(
-                f"{stage_name}_mcp_duplicate_read",
+                review_policy_code,
                 calls=review_calls,
                 transcript_sha256=transcript_sha256,
                 transcript_ref=transcript_ref,
@@ -22401,47 +22497,6 @@ class CodexRunner:
                         normalization.get("normalization_warnings")
                         or (warning,)
                     ),
-                )
-                diagnostic: dict[str, Any] = {}
-                diagnostic.update(raw_refs)
-                diagnostic.update(execution_refs)
-                diagnostic.update(
-                    {
-                        "model_stage_output_sha256": output_object_sha256,
-                        "model_stage_output_ref": output_object_ref,
-                        "mcp_transcript_sha256": str(
-                            mcp_transcript_sha256 or ""
-                        ),
-                        "mcp_transcript_ref": str(
-                            mcp_transcript_ref or ""
-                        ),
-                        "post_stage_validation_failed": True,
-                        "post_stage_policy_validation_failed": True,
-                    }
-                )
-                try:
-                    review_stage = self._review_candidate_stage_snapshot(
-                        result=stage_result,
-                        stage_name=stage_name,
-                        disposition="needs_sol_review",
-                        error_code=review_policy_violation.code,
-                    )
-                except PreprocessorError as proof_exc:
-                    if (
-                        proof_exc.code
-                        != "review_candidate_execution_proof_incomplete"
-                    ):
-                        raise
-                else:
-                    diagnostic.update(
-                        {
-                            "report_disposition": "needs_sol_review",
-                            "review_candidate_stage": review_stage,
-                        }
-                    )
-                raise PreprocessorError(
-                    review_policy_violation.code,
-                    diagnostic=diagnostic,
                 )
             return stage_result
         finally:

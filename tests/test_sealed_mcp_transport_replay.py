@@ -320,6 +320,11 @@ class SealedMcpTransportReplayTests(unittest.TestCase):
                 },
             ),
             (
+                "NOT_FOUND",
+                "read_task_artifact",
+                {"artifact_id": "missing-artifact"},
+            ),
+            (
                 "OUTPUT_LIMIT",
                 "search_records",
                 {"query": "broad-query", "page_size": 48},

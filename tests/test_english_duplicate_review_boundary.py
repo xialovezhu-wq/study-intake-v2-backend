@@ -305,7 +305,7 @@ class EnglishDuplicateReviewBoundaryTests(unittest.TestCase):
             ) as sign_failure,
         ):
             try:
-                runner._execute_prompt(
+                result = runner._execute_prompt(
                     prompt="bounded English review fixture",
                     output_schema=schema,
                     image_paths=(),
@@ -319,7 +319,7 @@ class EnglishDuplicateReviewBoundaryTests(unittest.TestCase):
                 )
             except core.PreprocessorError as exc:
                 return exc, execution_statuses, sign_failure
-        self.fail("actual duplicate shape must not be automatically adoptable")
+        return result, execution_statuses, sign_failure
 
     def test_actual_40_call_shape_is_reviewable_and_preserves_later_reads(self) -> None:
         stdout, session, raw_output = _immutable_fixture()
@@ -339,19 +339,17 @@ class EnglishDuplicateReviewBoundaryTests(unittest.TestCase):
         self.assertEqual(transcript["calls"][-1]["sequence"], 40)
         self.assertEqual(transcript["calls"][-1]["tool"], "search_records")
 
-    def test_actual_valid_raw_preserves_technical_error_without_mcp_failure(self) -> None:
+    def test_actual_valid_raw_becomes_completed_needs_review_stage(self) -> None:
         _stdout, _session, raw_output = _immutable_fixture()
-        error, statuses, sign_failure = self._execute_actual_shape(raw_output)
-        self.assertEqual(error.code, "english_analysis_mcp_duplicate_read")
+        result, statuses, sign_failure = self._execute_actual_shape(raw_output)
+        self.assertIsInstance(result, core.StructuredStageResult)
         self.assertEqual(statuses, ["completed"])
         sign_failure.assert_not_called()
-        self.assertNotIn("mcp_failure_receipt_sha256", error.diagnostic)
-        self.assertTrue(error.diagnostic["post_stage_validation_failed"])
-        self.assertNotIn("report_disposition", error.diagnostic)
-        self.assertNotIn("review_candidate_stage", error.diagnostic)
-        self.assertRegex(
-            error.diagnostic["mcp_transcript_sha256"],
-            r"^[0-9a-f]{64}$",
+        self.assertEqual(result.normalization_status, "normalized_with_warnings")
+        self.assertEqual(result.normalization_warning_count, 1)
+        self.assertEqual(
+            result.normalization_warnings[0]["code"],
+            "english_analysis_mcp_duplicate_read",
         )
 
     def test_actual_transcript_with_invalid_raw_remains_execution_failure(self) -> None:

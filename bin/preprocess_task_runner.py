@@ -722,7 +722,6 @@ def run_request(
         result = reuse_runner.run(candidate)
         if not isinstance(result, ModelResult):
             raise DispatchError("analysis_package_result_invalid")
-        worker._assert_current_candidate_generation(candidate)
         bridge = CoreCandidateRunner(
             config,
             candidate,
