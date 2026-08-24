@@ -13947,20 +13947,39 @@ class LeaseStore:
     ) -> dict[str, Any]:
         subject = str(task.frozen_payload.get("subject") or "")
         closures: dict[str, Any] = {}
-        for stage_name in (
-            f"{subject}_analysis",
-            f"{subject}_luna_analysis",
-            f"{subject}_critical_review",
-        ):
-            identity_index_path = (
-                self.provider_process_identity_latest_root
-                / task.unit_sha256
-                / f"fence-{lease.fence}"
-                / f"{_safe_component(stage_name)}.json"
-            )
+        identity_index_root = (
+            self.provider_process_identity_latest_root
+            / task.unit_sha256
+            / f"fence-{lease.fence}"
+        )
+        identity_index_paths = (
+            sorted(identity_index_root.glob("*.json"))
+            if identity_index_root.is_dir()
+            else []
+        )
+        stage_indexes: list[tuple[str, Path]] = []
+        for identity_index_path in identity_index_paths:
+            if identity_index_path.is_symlink():
+                raise DispatchError("provider_process_identity_index_invalid")
             identity_index = self._read_object(identity_index_path)
-            if identity_index is None:
-                continue
+            stage_name = (
+                str(identity_index.get("stage_name") or "")
+                if isinstance(identity_index, Mapping)
+                else ""
+            )
+            checked_stage = self._provider_stage_name(subject, stage_name)
+            if (
+                not isinstance(identity_index, Mapping)
+                or identity_index_path.name
+                != f"{_safe_component(checked_stage)}.json"
+                or any(row[0] == checked_stage for row in stage_indexes)
+            ):
+                raise DispatchError("provider_process_identity_index_invalid")
+            stage_indexes.append((checked_stage, identity_index_path))
+
+        for stage_name, identity_index_path in stage_indexes:
+            identity_index = self._read_object(identity_index_path)
+            assert isinstance(identity_index, Mapping)
             identity_sha256 = str(
                 identity_index.get("provider_process_identity_sha256") or ""
             )
@@ -15694,7 +15713,20 @@ class LeaseStore:
                         and row.get("requested_model") == "gpt-5.6-luna"
                     )
                 if outcome == "succeeded" and canonical_runner:
-                    if set(provider_stages) != expected_provider_stages or any(
+                    if set(provider_stages) != expected_provider_stages:
+                        expected_fingerprint = _sha256_bytes(
+                            _canonical_bytes(sorted(expected_provider_stages))
+                        )[:12]
+                        observed_fingerprint = _sha256_bytes(
+                            _canonical_bytes(sorted(provider_stages))
+                        )[:12]
+                        raise DispatchError(
+                            "successful_provider_process_stage_set_mismatch:"
+                            f"e{len(expected_provider_stages)}-"
+                            f"{expected_fingerprint}:"
+                            f"o{len(provider_stages)}-{observed_fingerprint}"
+                        )
+                    if any(
                         row.get("returncode") != 0
                         or row.get("termination_reason") != "completed"
                         or row.get("reaped") is not True

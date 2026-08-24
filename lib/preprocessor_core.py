@@ -21930,7 +21930,7 @@ class CodexRunner:
                 schema_payload, canonical_schema_sha256 = (
                     self._bound_english_source_event_schema_bytes(
                         output_schema,
-                        stage_name=provider_lifecycle_stage,
+                        stage_name=stage_name,
                         allowed_source_event_ids=source_event_ids,
                     )
                 )
@@ -21938,7 +21938,7 @@ class CodexRunner:
                 canonical_schema_payload, canonical_schema_sha256 = (
                     self._bound_output_schema_bytes(
                         output_schema,
-                        stage_name=provider_lifecycle_stage,
+                        stage_name=stage_name,
                         allowed_evidence_refs=allowed_evidence_refs,
                         allowed_analysis_refs=allowed_analysis_refs,
                         allowed_correction_paths=allowed_correction_paths,
@@ -22179,7 +22179,7 @@ class CodexRunner:
                 mcp_calls, mcp_transcript_sha256, mcp_transcript_ref = (
                     self._mcp_stage_calls(
                         stdout=completed.stdout,
-                        stage_name=provider_lifecycle_stage,
+                        stage_name=stage_name,
                         subject=str(subject),
                         processing_context=processing_context,
                     )

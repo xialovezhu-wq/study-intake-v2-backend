@@ -3114,7 +3114,17 @@ class CoreCandidateSubprocessRunner:
                 failure = json.loads(stderr.decode("utf-8"))
                 code = str(failure.get("error_code") or "task_process_failed")
             except (UnicodeError, json.JSONDecodeError, AttributeError):
-                code = f"task_process_exit_{process.returncode}"
+                traceback_text = stderr.decode("utf-8", errors="replace")
+                stable_error = re.search(
+                    r"(?:PreprocessorError|DispatchError): "
+                    r"([A-Za-z0-9_.:-]{1,180})\s*$",
+                    traceback_text,
+                )
+                code = (
+                    stable_error.group(1)
+                    if stable_error is not None
+                    else f"task_process_exit_{process.returncode}"
+                )
             raise DispatchError(code)
         if len(stdout) > 64 * 1024 * 1024:
             raise DispatchError("task_process_output_too_large")
