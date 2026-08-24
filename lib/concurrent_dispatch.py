@@ -172,6 +172,10 @@ PRODUCTION_CANARY_TERMINAL_INDEX_SCHEMA = (
 )
 TASK_PROCESS_IDENTITY_SCHEMA = "study-intake-task-process-identity-v1"
 TASK_PROCESS_EXIT_SCHEMA = "study-intake-task-process-exit-v1"
+TASK_EXECUTION_PROOF_SCHEMA = "study-intake-task-execution-proof-v1"
+TASK_EXECUTION_PROOF_REFERENCE_SCHEMA = (
+    "study-intake-task-execution-proof-reference-v1"
+)
 PROVIDER_PROCESS_IDENTITY_SCHEMA = (
     "study-intake-provider-process-identity-v1"
 )
@@ -1498,6 +1502,9 @@ class LeaseStore:
         )
         self.task_process_identity_root = (
             self.runtime_root / "dispatch" / "process-identities"
+        )
+        self.task_execution_proof_root = (
+            self.runtime_root / "dispatch" / "task-execution-proofs"
         )
         self.task_process_identity_latest_root = (
             self.state_root / "process-identity-latest"
@@ -2875,6 +2882,328 @@ class LeaseStore:
             if isinstance(exc, DispatchError) and exc.code == "production_canary_state_invalid":
                 raise
             raise DispatchError("production_canary_state_invalid") from exc
+
+    def publish_task_execution_proof(
+        self, task: FrozenTask, lease: Lease
+    ) -> dict[str, Any]:
+        """Seal one current-lease proof for the complete V2 TLT only.
+
+        The proof does not grant standing subject authority.  Every launch
+        reopens the HMAC queue and activation gate and rechecks the exact lease
+        fence, so a terminal queue entry or superseding lease makes the proof
+        unusable without rewriting any historical artifact.
+        """
+
+        subject = task.frozen_payload.get("subject")
+        capture_id = task.frozen_payload.get("capture_id")
+        if (
+            subject not in {"math", "cs408", "english"}
+            or not isinstance(capture_id, str)
+            or not capture_id
+        ):
+            raise DispatchError("task_execution_proof_task_invalid")
+        with _ExclusiveFileLock(self.lock_path):
+            state = self._read_canary_state_locked(str(subject))
+            assert state is not None
+            selected = (state.get("active_selections") or {}).get(
+                task.unit_sha256
+            )
+            if not isinstance(selected, Mapping):
+                raise DispatchError("task_execution_proof_not_active")
+            lease_value = self._read_object(self._lease_path(task.unit_sha256))
+            if (
+                not self._matches(lease_value, lease, status="claimed")
+                or selected.get("lease_owner_id") != lease.owner_id
+                or selected.get("lease_fence") != lease.fence
+                or self._completion_path(task.unit_sha256).exists()
+            ):
+                raise DispatchError("stale_lease_fence")
+            contract = self._producer_contract_from_task(task)
+            source_events = contract.get("source_events")
+            if not isinstance(source_events, list) or len(source_events) != 1:
+                raise DispatchError("task_execution_proof_capture_set_invalid")
+            capture_content_sha256 = _validate_unit_sha256(
+                str(source_events[0].get("source_sha256") or "")
+            )
+            producer_contract_sha256 = _validate_unit_sha256(
+                str(contract.get("producer_input_contract_sha256") or "")
+            )
+            queue_path = self._production_canary_queue_path(
+                str(subject), producer_contract_sha256
+            )
+            queue = self._read_object(queue_path)
+            if queue is None:
+                raise DispatchError("task_execution_proof_queue_missing")
+            self._verify_seal(
+                queue, purpose="dispatch-production-canary-queue"
+            )
+            proof_core = {
+                "schema_version": TASK_EXECUTION_PROOF_SCHEMA,
+                "subject": subject,
+                "capture_id": capture_id,
+                "capture_content_sha256": capture_content_sha256,
+                "unit_sha256": task.unit_sha256,
+                "frozen_payload_sha256": task.frozen_payload_sha256,
+                "release_id": state["release_id"],
+                "activation_id": state["activation_id"],
+                "producer_input_contract_sha256": (
+                    producer_contract_sha256
+                ),
+                "queue_entry_sha256": _sha256_bytes(
+                    queue_path.read_bytes()
+                ),
+                "queue_entry_authority_sha256": _sha256_bytes(
+                    _canonical_bytes(queue["authority"])
+                ),
+                "canary_gate_sha256": selected["canary_gate_sha256"],
+                "canary_gate_authority_sha256": selected[
+                    "canary_gate_authority_sha256"
+                ],
+                "activation_receipt_sha256": state[
+                    "activation_receipt_sha256"
+                ],
+                "activation_gate_authority_sha256": state[
+                    "activation_gate_authority_sha256"
+                ],
+                "task_process_identity_sha256": selected[
+                    "process_identity_sha256"
+                ],
+                "lease_owner_id": lease.owner_id,
+                "lease_fence": lease.fence,
+                "authorized_pipeline": "analysis_package_v2",
+                "authorized_stage_roles": [
+                    "terra_initial",
+                    "luna_investigation",
+                    "terra_final",
+                ],
+                "terminal_reuse_forbidden": True,
+                "formal_write_allowed": False,
+                "formal_write_count": 0,
+            }
+            if not isinstance(
+                proof_core["task_process_identity_sha256"], str
+            ):
+                raise DispatchError(
+                    "task_execution_proof_process_identity_missing"
+                )
+            proof = self._seal(
+                proof_core, purpose="dispatch-task-execution-proof"
+            )
+            proof_sha256, proof_path = _publish_content_addressed(
+                self.task_execution_proof_root
+                / _safe_component(str(subject))
+                / task.unit_sha256
+                / f"fence-{lease.fence}",
+                proof,
+            )
+            task_identity = {
+                "subject": subject,
+                "capture_id": capture_id,
+                "capture_content_sha256": capture_content_sha256,
+                "release_id": state["release_id"],
+                "activation_id": state["activation_id"],
+                "unit_sha256": task.unit_sha256,
+                "frozen_payload_sha256": task.frozen_payload_sha256,
+                "lease_owner_id": lease.owner_id,
+                "lease_fence": lease.fence,
+            }
+            reference = {
+                "schema_version": TASK_EXECUTION_PROOF_REFERENCE_SCHEMA,
+                "task_execution_proof_sha256": proof_sha256,
+                "task_execution_proof_path": str(proof_path),
+                "task_identity": task_identity,
+                "formal_write_count": 0,
+            }
+            self.verify_task_execution_proof_reference(
+                reference,
+                task_identity=task_identity,
+                _lock_held=True,
+            )
+            return reference
+
+    def verify_task_execution_proof_reference(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        task_identity: Mapping[str, Any],
+        _lock_held: bool = False,
+    ) -> dict[str, Any]:
+        """Reopen and revalidate one task proof against current state."""
+
+        def verify_locked() -> dict[str, Any]:
+            if (
+                set(reference)
+                != {
+                    "schema_version",
+                    "task_execution_proof_sha256",
+                    "task_execution_proof_path",
+                    "task_identity",
+                    "formal_write_count",
+                }
+                or reference.get("schema_version")
+                != TASK_EXECUTION_PROOF_REFERENCE_SCHEMA
+                or reference.get("formal_write_count") != 0
+                or reference.get("task_identity") != task_identity
+            ):
+                raise DispatchError("task_execution_proof_reference_invalid")
+            proof_sha256 = _validate_unit_sha256(
+                str(reference.get("task_execution_proof_sha256") or "")
+            )
+            proof = self._read_verified_content_addressed_locked(
+                reference.get("task_execution_proof_path"),
+                proof_sha256,
+                root=self.task_execution_proof_root,
+                purpose="dispatch-task-execution-proof",
+                error_code="task_execution_proof_reference_invalid",
+            )
+            required = {
+                "schema_version",
+                "subject",
+                "capture_id",
+                "capture_content_sha256",
+                "unit_sha256",
+                "frozen_payload_sha256",
+                "release_id",
+                "activation_id",
+                "producer_input_contract_sha256",
+                "queue_entry_sha256",
+                "queue_entry_authority_sha256",
+                "canary_gate_sha256",
+                "canary_gate_authority_sha256",
+                "activation_receipt_sha256",
+                "activation_gate_authority_sha256",
+                "task_process_identity_sha256",
+                "lease_owner_id",
+                "lease_fence",
+                "authorized_pipeline",
+                "authorized_stage_roles",
+                "terminal_reuse_forbidden",
+                "formal_write_allowed",
+                "formal_write_count",
+                "authority",
+            }
+            hash_fields = {
+                "capture_content_sha256",
+                "unit_sha256",
+                "frozen_payload_sha256",
+                "release_id",
+                "activation_id",
+                "producer_input_contract_sha256",
+                "queue_entry_sha256",
+                "queue_entry_authority_sha256",
+                "canary_gate_sha256",
+                "canary_gate_authority_sha256",
+                "activation_receipt_sha256",
+                "activation_gate_authority_sha256",
+                "task_process_identity_sha256",
+            }
+            if (
+                set(proof) != required
+                or proof.get("schema_version") != TASK_EXECUTION_PROOF_SCHEMA
+                or any(
+                    _validate_unit_sha256(str(proof.get(key) or "")) is None
+                    for key in hash_fields
+                )
+                or proof.get("authorized_pipeline") != "analysis_package_v2"
+                or proof.get("authorized_stage_roles")
+                != ["terra_initial", "luna_investigation", "terra_final"]
+                or proof.get("terminal_reuse_forbidden") is not True
+                or proof.get("formal_write_allowed") is not False
+                or proof.get("formal_write_count") != 0
+                or isinstance(proof.get("lease_fence"), bool)
+                or not isinstance(proof.get("lease_fence"), int)
+                or int(proof["lease_fence"]) < 1
+            ):
+                raise DispatchError("task_execution_proof_invalid")
+            identity_keys = {
+                "subject",
+                "capture_id",
+                "capture_content_sha256",
+                "release_id",
+                "activation_id",
+                "unit_sha256",
+                "frozen_payload_sha256",
+                "lease_owner_id",
+                "lease_fence",
+            }
+            if set(task_identity) != identity_keys or any(
+                task_identity.get(key) != proof.get(key)
+                for key in identity_keys
+            ):
+                raise DispatchError("task_execution_proof_identity_mismatch")
+            subject = str(proof["subject"])
+            state = self._read_canary_state_locked(subject)
+            assert state is not None
+            selected = (state.get("active_selections") or {}).get(
+                proof["unit_sha256"]
+            )
+            if not isinstance(selected, Mapping):
+                raise DispatchError("task_execution_proof_not_active")
+            contract_sha256 = str(
+                proof["producer_input_contract_sha256"]
+            )
+            queue_path = self._production_canary_queue_path(
+                subject, contract_sha256
+            )
+            queue = self._read_object(queue_path)
+            if queue is None:
+                raise DispatchError("task_execution_proof_queue_missing")
+            self._verify_seal(
+                queue, purpose="dispatch-production-canary-queue"
+            )
+            task = self._task_from_canary_queue_entry_locked(queue)
+            contract = self._producer_contract_from_task(task)
+            source_events = contract.get("source_events")
+            lease = Lease(
+                str(proof["unit_sha256"]),
+                str(proof["lease_owner_id"]),
+                int(proof["lease_fence"]),
+            )
+            lease_value = self._read_object(self._lease_path(lease.unit_sha256))
+            if (
+                queue.get("queue_status") != "claimed"
+                or queue.get("unit_sha256") != task.unit_sha256
+                or task.unit_sha256 != proof.get("unit_sha256")
+                or task.frozen_payload_sha256
+                != proof.get("frozen_payload_sha256")
+                or task.frozen_payload.get("capture_id")
+                != proof.get("capture_id")
+                or contract.get("producer_input_contract_sha256")
+                != contract_sha256
+                or not isinstance(source_events, list)
+                or len(source_events) != 1
+                or source_events[0].get("source_sha256")
+                != proof.get("capture_content_sha256")
+                or queue.get("release_id") != proof.get("release_id")
+                or queue.get("activation_id") != proof.get("activation_id")
+                or queue.get("lease_owner_id") != lease.owner_id
+                or queue.get("lease_fence") != lease.fence
+                or selected.get("lease_owner_id") != lease.owner_id
+                or selected.get("lease_fence") != lease.fence
+                or selected.get("process_identity_sha256")
+                != proof.get("task_process_identity_sha256")
+                or selected.get("canary_gate_sha256")
+                != proof.get("canary_gate_sha256")
+                or selected.get("canary_gate_authority_sha256")
+                != proof.get("canary_gate_authority_sha256")
+                or _sha256_bytes(queue_path.read_bytes())
+                != proof.get("queue_entry_sha256")
+                or _sha256_bytes(_canonical_bytes(queue["authority"]))
+                != proof.get("queue_entry_authority_sha256")
+                or state.get("activation_receipt_sha256")
+                != proof.get("activation_receipt_sha256")
+                or state.get("activation_gate_authority_sha256")
+                != proof.get("activation_gate_authority_sha256")
+                or not self._matches(lease_value, lease, status="claimed")
+                or self._completion_path(lease.unit_sha256).exists()
+            ):
+                raise DispatchError("task_execution_proof_stale")
+            return copy.deepcopy(proof)
+
+        if _lock_held:
+            return verify_locked()
+        with _ExistingSharedFileLock(self.lock_path):
+            return verify_locked()
 
     def _write_canary_state_locked(
         self, state: Mapping[str, Any], *, updated_at: str | None = None
@@ -20501,6 +20830,25 @@ def verify_analysis_checkpoint(
     )
 
 
+def validate_task_execution_proof_for_launch(
+    config: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    *,
+    task_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Live-gate adapter for one current task proof reference."""
+
+    runtime_root = config.get("runtime_root")
+    if (
+        not isinstance(runtime_root, str)
+        or not Path(runtime_root).is_absolute()
+    ):
+        raise DispatchError("task_execution_proof_runtime_root_invalid")
+    return LeaseStore(Path(runtime_root)).verify_task_execution_proof_reference(
+        reference, task_identity=task_identity
+    )
+
+
 __all__ = [
     "CallableRunnerAdapter",
     "ConcurrentDispatcher",
@@ -20527,4 +20875,5 @@ __all__ = [
     "verify_content_member_registration",
     "verify_analysis_checkpoint",
     "verify_evidence_readiness",
+    "validate_task_execution_proof_for_launch",
 ]

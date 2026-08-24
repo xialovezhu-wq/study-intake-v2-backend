@@ -1,4 +1,8 @@
-"""Exact one-shot manual live authorization and automatic relock state."""
+"""Read-only test compatibility for retired manual Capture admission.
+
+Production live execution no longer imports this module. It remains only to
+verify immutable pre-task-proof fixtures and their terminal relock records.
+"""
 
 from __future__ import annotations
 

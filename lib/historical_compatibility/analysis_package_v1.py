@@ -2,6 +2,10 @@
 
 The V1 model driver is retired. This module can only reopen and validate
 already-persisted V1 packages and their durable captures.
+
+This module lives below ``historical_compatibility`` so ordinary Dispatcher,
+task-runner and processing Skill imports cannot accidentally recover an
+execution route while retaining deterministic ledger verification.
 """
 
 from __future__ import annotations

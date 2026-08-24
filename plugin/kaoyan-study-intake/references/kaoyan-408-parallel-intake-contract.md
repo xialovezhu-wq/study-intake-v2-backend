@@ -4,7 +4,7 @@ This is the single source of truth for Codex subagent selection in formal 408
 maintenance. Subagents are used for independent quality checks, not as a speed
 claim. The deterministic postcommit process DAG is separate.
 
-Read `../../_shared/native-luna-parallel-contract.md`. Every role in this contract is
+Read `native-luna-parallel-contract.md`. Every role in this contract is
 a native `explorer` leaf pinned to `gpt-5.6-luna`, reasoning effort `max`, and
 service tier `fast`, with `fork_turns="none"`. Reject results whose execution
 metadata does not confirm all three fields. These roles never invoke or substitute

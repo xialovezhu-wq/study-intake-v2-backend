@@ -19,7 +19,9 @@ from analysis_package_store import (  # noqa: E402
     build_durable_capture,
     canonical_bytes,
 )
-from analysis_package_v1 import reopen_analysis_package_v1  # noqa: E402
+from historical_compatibility.analysis_package_v1 import (  # noqa: E402
+    reopen_analysis_package_v1,
+)
 from analysis_package_v2 import (  # noqa: E402
     build_terra_initial_analysis,
     publish_analysis_package_v2,

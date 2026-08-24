@@ -464,6 +464,7 @@ class TaskRunnerEventTests(unittest.TestCase):
             "STUDY_PREPROCESS_LEASE_FENCE": str(self.lease.fence),
             "STUDY_PREPROCESS_LEASE_OWNER_ID": self.lease.owner_id,
             "STUDY_PREPROCESS_CONTEXT_ROOT": str(self.context_root),
+            "STUDY_INTAKE_FIXTURE_EXECUTION": "1",
         }
         with (
             mock.patch("preprocess_task_runner.load_config", return_value=config),
@@ -597,6 +598,7 @@ class TaskRunnerEventTests(unittest.TestCase):
             "STUDY_PREPROCESS_LEASE_FENCE": str(self.lease.fence),
             "STUDY_PREPROCESS_LEASE_OWNER_ID": self.lease.owner_id,
             "STUDY_PREPROCESS_CONTEXT_ROOT": str(self.context_root),
+            "STUDY_INTAKE_FIXTURE_EXECUTION": "1",
         }
         for execution_mode in ("live_authorized", "hosted_synthetic"):
             with self.subTest(execution_mode=execution_mode):

@@ -569,6 +569,8 @@ class ConcurrentDispatchTests(unittest.TestCase):
         successor: bool,
         failures: set[str] = frozenset(),
         topology_mutation=None,
+        return_task_proof: bool = False,
+        task_proof_callback=None,
     ):
         candidate = core_candidate(index, subject="cs408")
 
@@ -659,6 +661,21 @@ class ConcurrentDispatchTests(unittest.TestCase):
                 executable_path=Path(sys.executable),
                 start_new_session=True,
             )
+            task_proof = None
+            if successor:
+                task_proof = store.publish_task_execution_proof(task, lease)
+                verified_task_proof = (
+                    store.verify_task_execution_proof_reference(
+                        task_proof,
+                        task_identity=task_proof["task_identity"],
+                    )
+                )
+                self.assertEqual(
+                    verified_task_proof["authorized_pipeline"],
+                    "analysis_package_v2",
+                )
+                if task_proof_callback is not None:
+                    task_proof_callback(store, task, task_proof)
             stdout, stderr = child.communicate(timeout=3)
         finally:
             if child.poll() is None:
@@ -751,7 +768,154 @@ class ConcurrentDispatchTests(unittest.TestCase):
             finished_at=finished_at,
         )
         store.record_task_event(task, lease, "published")
+        if return_task_proof:
+            self.assertIsNotNone(task_proof)
+            return store, task, completion, task_proof
         return store, task, completion
+
+    def test_task_execution_proof_expires_at_outer_terminal(self) -> None:
+        store, task, _completion, proof = self._publish_canary_dispatch(
+            index=958,
+            successor=True,
+            return_task_proof=True,
+        )
+        with self.assertRaisesRegex(
+            DispatchError,
+            "task_execution_proof_(?:not_active|stale)",
+        ):
+            store.verify_task_execution_proof_reference(
+                proof, task_identity=proof["task_identity"]
+            )
+
+    def test_task_execution_proof_rejects_forged_bindings_and_queue(
+        self,
+    ) -> None:
+        def assert_closed(store, task, proof):
+            for key, value in (
+                ("capture_content_sha256", "1" * 64),
+                ("release_id", "2" * 64),
+                ("activation_id", "3" * 64),
+                ("lease_fence", 99),
+            ):
+                forged = copy.deepcopy(proof)
+                forged["task_identity"][key] = value
+                with self.assertRaisesRegex(
+                    DispatchError,
+                    "task_execution_proof_identity_mismatch",
+                ):
+                    store.verify_task_execution_proof_reference(
+                        forged, task_identity=forged["task_identity"]
+                    )
+
+            contract = task.frozen_payload["dispatch_contract"][
+                "producer_input_contract"
+            ]
+            queue_path = store._production_canary_queue_path(
+                "cs408", contract["producer_input_contract_sha256"]
+            )
+            original = queue_path.read_bytes()
+            forged_queue = json.loads(original)
+            forged_queue["authority"]["hmac_sha256"] = "0" * 64
+            queue_path.write_text(
+                json.dumps(forged_queue, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                with self.assertRaises(DispatchError):
+                    store.verify_task_execution_proof_reference(
+                        proof, task_identity=proof["task_identity"]
+                    )
+            finally:
+                queue_path.write_bytes(original)
+
+        self._publish_canary_dispatch(
+            index=959,
+            successor=True,
+            task_proof_callback=assert_closed,
+        )
+
+    def test_same_subject_claim_does_not_invalidate_peer_task_proof(
+        self,
+    ) -> None:
+        store, first_task, completion = self._publish_canary_dispatch(
+            index=965,
+            successor=True,
+        )
+        store.finish_production_canary_task(
+            first_task,
+            outcome="succeeded",
+            error_code=None,
+            completion=completion,
+        )
+        tasks = self._scan_distinct_tasks(
+            subject="cs408",
+            count=2,
+            shared_semantic_input=False,
+        )
+        for task in tasks:
+            store.materialize_production_canary_task(task)
+
+        processes = []
+
+        def claim_and_prove(task, ordinal):
+            claimed = store.claim(
+                task.unit_sha256,
+                f"dispatcher-{os.getpid()}-{ordinal:032x}",
+                subject="cs408",
+                task=task,
+                production_canary=True,
+            )
+            self.assertIsNotNone(claimed.lease)
+            lease = claimed.lease
+            assert lease is not None
+            context_root = (
+                self.runtime
+                / "dispatch/contexts"
+                / task.unit_sha256
+                / f"fence-{lease.fence}"
+            )
+            context_root.mkdir(parents=True, exist_ok=True)
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            registration = register_process(child, require_private_group=True)
+            processes.append((child, registration))
+            store.publish_task_process_identity(
+                task,
+                lease,
+                child_pid=registration.pid,
+                child_pgid=registration.pgid,
+                process_start_token=kernel_process_start_token(
+                    registration.pid
+                ),
+                launch_nonce=(str(ordinal) * 32)[:32],
+                launched_at=(
+                    dt.datetime.now(dt.timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                ),
+                argv=[sys.executable, "-c", "import time; time.sleep(10)"],
+                executable_path=Path(sys.executable),
+                start_new_session=True,
+            )
+            return store.publish_task_execution_proof(task, lease)
+
+        try:
+            first_proof = claim_and_prove(tasks[0], 1)
+            claim_and_prove(tasks[1], 2)
+            reopened = store.verify_task_execution_proof_reference(
+                first_proof,
+                task_identity=first_proof["task_identity"],
+            )
+            self.assertEqual(reopened["unit_sha256"], tasks[0].unit_sha256)
+        finally:
+            for child, registration in processes:
+                if child.poll() is None:
+                    stop_process(registration)
 
     def test_ten_unique_tasks_all_enter_before_release(self) -> None:
         self._assert_unbounded_batch(10, "mixed")

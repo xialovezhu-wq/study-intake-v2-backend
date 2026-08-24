@@ -2791,6 +2791,7 @@ class CoreCandidateSubprocessRunner:
         command: list[str] | None = None,
         expected_batch_authority: Mapping[str, Any] | None = None,
         lease_store: LeaseStore | None = None,
+        production_canary: bool = False,
     ) -> None:
         self.config_path = config_path.resolve()
         self.reason = reason
@@ -2807,6 +2808,7 @@ class CoreCandidateSubprocessRunner:
             else None
         )
         self.lease_store = lease_store
+        self.production_canary = bool(production_canary)
         self._lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._process_start_token: str | None = None
@@ -3005,6 +3007,12 @@ class CoreCandidateSubprocessRunner:
                         "supervisor_launch_nonce": launch_nonce,
                     }
                 )
+                if self.production_canary:
+                    request["task_execution_proof"] = (
+                        self.lease_store.publish_task_execution_proof(
+                            task, context.lease
+                        )
+                    )
             if context.cancel_event.is_set():
                 raise DispatchError("dispatch_cancelled")
             stdout, stderr = process.communicate(

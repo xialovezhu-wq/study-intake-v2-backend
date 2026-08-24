@@ -39,7 +39,7 @@ from tests.portable_plugin_fixture import (  # noqa: E402
 
 JSONSCHEMA_PYTHON = Path("/opt/miniconda3/envs/dl/bin/python")
 SUCCESSOR_PLUGIN_VERSION = (
-    "0.6.0+codex.20260818-prelive-finalization"
+    "0.6.0+codex.20260824140221"
 )
 SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
     {
@@ -55,6 +55,7 @@ SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
         "dispatch-report-v3.json",
         "dispatch-task-detail-v2.json",
         "dispatch-task-event-v2.json",
+        "task-execution-proof-v1.json",
         "english-quick-flush-intent-v1.json",
         "english-preserved-review-repair-receipt-v1.json",
         "english-preserved-review-repair-rollback-receipt-v1.json",
@@ -99,7 +100,6 @@ SUCCESSOR_ROOT_SCHEMA_NAMES = frozenset(
         "user-sol-authorization-receipt-v2.json",
         "dashboard-multi-agent-v1.json",
         "live-execution-gate-state-v1.json",
-        "manual-live-authorization-v1.json",
         "multi-agent-event-chain-receipt-v1.json",
         "multi-agent-model-contract-v1.json",
         "multi-agent-stage-execution-receipt-v1.json",

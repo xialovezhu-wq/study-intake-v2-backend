@@ -38,7 +38,7 @@ No pending events means stop cleanly. Do not expand into historical maintenance.
 
 ## Native Luna read-only preparation
 
-Read `../_shared/native-luna-parallel-contract.md`. This section governs native Codex children only and must never invoke, poll, configure, or inspect the separate preprocessing consumer described below.
+Read `../../references/native-luna-parallel-contract.md`. This section governs native Codex children only and must never invoke, poll, configure, or inspect the separate preprocessing consumer described below.
 
 After the authoritative target set and exact freeze are complete, Sol may split two or more grouped formal targets into disjoint frozen evidence groups and assign one `explorer` Luna Max Fast leaf per group. Each child may check only immutable fact preservation, source/hash completeness, schema consistency, and explicit missing evidence; it returns a read-only proposal with target IDs, frozen hashes, findings, conflicts, and `write_attempted=false`. It may not decide identity, allocate a formal ID, judge relationships, edit Wiki or cards, invoke repository scripts, or touch ledgers and receipts.
 

@@ -108,6 +108,72 @@ class OfflineExecutionGateV1Tests(unittest.TestCase):
             runtime.scan_and_submit()
         self.assertEqual(scan.exception.code, "offline_producer_scan_forbidden")
 
+    def test_live_launch_requires_current_task_execution_proof(self) -> None:
+        config = {
+            "execution_mode": "live_authorized",
+            "runtime_root": "/private/tmp/study-intake-proof-test",
+        }
+        with self.assertRaises(LiveExecutionDenied) as missing:
+            assert_external_launch_allowed(
+                config,
+                purpose="provider_model_request",
+                command=["/Applications/ChatGPT.app/Contents/Resources/codex"],
+            )
+        self.assertEqual(
+            missing.exception.code, "task_execution_proof_missing"
+        )
+
+        identity = {
+            "subject": "math",
+            "capture_id": "CAP-1",
+            "capture_content_sha256": "1" * 64,
+            "release_id": "2" * 64,
+            "activation_id": "3" * 64,
+            "unit_sha256": "4" * 64,
+            "frozen_payload_sha256": "5" * 64,
+            "lease_owner_id": "dispatcher-test",
+            "lease_fence": 1,
+        }
+        reference = {
+            "schema_version": (
+                "study-intake-task-execution-proof-reference-v1"
+            ),
+            "task_execution_proof_sha256": "6" * 64,
+            "task_execution_proof_path": "/private/tmp/proof.json",
+            "task_identity": identity,
+            "formal_write_count": 0,
+        }
+        with mock.patch(
+            "concurrent_dispatch.validate_task_execution_proof_for_launch",
+            return_value={
+                **identity,
+                "authorized_pipeline": "analysis_package_v2",
+            },
+        ) as verifier:
+            decision = assert_external_launch_allowed(
+                config,
+                purpose="provider_model_request",
+                command=["/Applications/ChatGPT.app/Contents/Resources/codex"],
+                task_identity=identity,
+                authorization=reference,
+            )
+        self.assertTrue(decision["allowed"])
+        self.assertEqual(decision["reason"], "task_execution_proof_valid")
+        verifier.assert_called_once()
+
+        with self.assertRaises(LiveExecutionDenied) as writer:
+            assert_external_launch_allowed(
+                config,
+                purpose="formal_writer",
+                command=["/forbidden/writer"],
+                task_identity=identity,
+                authorization=reference,
+            )
+        self.assertEqual(
+            writer.exception.code,
+            "task_execution_proof_purpose_forbidden",
+        )
+
     def test_codex_runner_offline_tripwire_precedes_popen(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runner = CodexRunner(

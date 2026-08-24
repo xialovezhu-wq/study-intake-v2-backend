@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/study-intake/task-execution-proof-v1.json",
+  "title": "study-intake-task-execution-proof-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "subject",
+    "capture_id",
+    "capture_content_sha256",
+    "unit_sha256",
+    "frozen_payload_sha256",
+    "release_id",
+    "activation_id",
+    "producer_input_contract_sha256",
+    "queue_entry_sha256",
+    "queue_entry_authority_sha256",
+    "canary_gate_sha256",
+    "canary_gate_authority_sha256",
+    "activation_receipt_sha256",
+    "activation_gate_authority_sha256",
+    "task_process_identity_sha256",
+    "lease_owner_id",
+    "lease_fence",
+    "authorized_pipeline",
+    "authorized_stage_roles",
+    "terminal_reuse_forbidden",
+    "formal_write_allowed",
+    "formal_write_count",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {"const": "study-intake-task-execution-proof-v1"},
+    "subject": {"enum": ["math", "cs408", "english"]},
+    "capture_id": {"type": "string", "minLength": 1},
+    "capture_content_sha256": {"$ref": "#/$defs/sha256"},
+    "unit_sha256": {"$ref": "#/$defs/sha256"},
+    "frozen_payload_sha256": {"$ref": "#/$defs/sha256"},
+    "release_id": {"$ref": "#/$defs/sha256"},
+    "activation_id": {"$ref": "#/$defs/sha256"},
+    "producer_input_contract_sha256": {"$ref": "#/$defs/sha256"},
+    "queue_entry_sha256": {"$ref": "#/$defs/sha256"},
+    "queue_entry_authority_sha256": {"$ref": "#/$defs/sha256"},
+    "canary_gate_sha256": {"$ref": "#/$defs/sha256"},
+    "canary_gate_authority_sha256": {"$ref": "#/$defs/sha256"},
+    "activation_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "activation_gate_authority_sha256": {"$ref": "#/$defs/sha256"},
+    "task_process_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "lease_owner_id": {"type": "string", "minLength": 1},
+    "lease_fence": {"type": "integer", "minimum": 1},
+    "authorized_pipeline": {"const": "analysis_package_v2"},
+    "authorized_stage_roles": {
+      "const": ["terra_initial", "luna_investigation", "terra_final"]
+    },
+    "terminal_reuse_forbidden": {"const": true},
+    "formal_write_allowed": {"const": false},
+    "formal_write_count": {"const": 0},
+    "authority": {"$ref": "#/$defs/authority"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "algorithm",
+        "key_id",
+        "purpose",
+        "hmac_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "study-intake-dispatch-authority-v1"},
+        "algorithm": {"const": "HMAC-SHA256"},
+        "key_id": {"$ref": "#/$defs/sha256"},
+        "purpose": {"const": "dispatch-task-execution-proof"},
+        "hmac_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

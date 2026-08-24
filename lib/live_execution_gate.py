@@ -1,9 +1,10 @@
 """Fail-closed execution gate for Study Intake external processes.
 
-The gate is intentionally independent from Dispatcher state.  A process may
-be started only when both the static execution mode and an exact task-scoped
-authorization permit it.  Tests use explicit fixture roots; missing mode is
-accepted only for legacy in-process unit tests that do not opt into this gate.
+Live launches require the current task's Dispatcher-issued execution proof.
+That proof is revalidated against the active release, HMAC canary queue and
+current lease fence before every child launch.  Tests use explicit fixture
+roots; missing mode is accepted only for legacy in-process unit tests that do
+not opt into this gate.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ LIVE_PURPOSES = EXTERNAL_PURPOSES - {
     "fake_agent_worker",
     "fake_mcp_launcher",
 }
+TASK_PROOF_PURPOSES = LIVE_PURPOSES - {"formal_writer"}
 FAKE_PURPOSES = EXTERNAL_PURPOSES - LIVE_PURPOSES
 MODEL_IDS = frozenset({"gpt-5.6-terra", "gpt-5.6-luna"})
 
@@ -245,12 +247,39 @@ def assert_external_launch_allowed(
 
     if purpose not in LIVE_PURPOSES:
         raise LiveExecutionDenied("live_mode_fake_launch_forbidden", evidence=evidence)
-    if not isinstance(task_identity, Mapping) or not isinstance(authorization, Mapping):
-        raise LiveExecutionDenied("manual_live_authorization_missing", evidence=evidence)
-    from manual_capture_admission import validate_authorization_for_task
+    if purpose not in TASK_PROOF_PURPOSES:
+        raise LiveExecutionDenied(
+            "task_execution_proof_purpose_forbidden", evidence=evidence
+        )
+    if not isinstance(task_identity, Mapping) or not isinstance(
+        authorization, Mapping
+    ):
+        raise LiveExecutionDenied(
+            "task_execution_proof_missing", evidence=evidence
+        )
+    from concurrent_dispatch import (
+        DispatchError,
+        validate_task_execution_proof_for_launch,
+    )
 
-    validate_authorization_for_task(authorization, task_identity=task_identity)
-    return {**evidence, "allowed": True, "reason": "manual_live_authorization_valid"}
+    try:
+        proof = validate_task_execution_proof_for_launch(
+            config, authorization, task_identity=task_identity
+        )
+    except DispatchError as exc:
+        raise LiveExecutionDenied(exc.code, evidence=evidence) from exc
+    return {
+        **evidence,
+        "allowed": True,
+        "reason": "task_execution_proof_valid",
+        "task_execution_proof_sha256": authorization.get(
+            "task_execution_proof_sha256"
+        ),
+        "release_id": proof.get("release_id"),
+        "activation_id": proof.get("activation_id"),
+        "unit_sha256": proof.get("unit_sha256"),
+        "lease_fence": proof.get("lease_fence"),
+    }
 
 
 def zero_real_call_evidence() -> dict[str, Any]:
@@ -274,5 +303,6 @@ def explicit_offline_config() -> dict[str, Any]:
             "enabled": True,
             "default_locked": True,
             "authorization_required": True,
+            "authorization_kind": "task_execution_proof_v1",
         },
     }

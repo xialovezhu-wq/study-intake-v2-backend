@@ -212,12 +212,15 @@ def _validate_offline_runtime(
         raise SolMCPPreflightError("cwd_or_env_error", "central runtime unavailable") from exc
     if resolved.name != central_release_id or config.get("execution_mode") != "offline":
         raise SolMCPPreflightError("read_policy_violation", "central runtime is not offline")
-    authorization = config.get("live_execution_gate", {}).get(
-        "authorization_state_path"
+    live_gate = config.get("live_execution_gate")
+    authorization_kind = (
+        live_gate.get("authorization_kind")
+        if isinstance(live_gate, Mapping)
+        else None
     )
-    if isinstance(authorization, str) and Path(authorization).exists():
+    if authorization_kind not in {None, "task_execution_proof_v1"}:
         raise SolMCPPreflightError(
-            "read_policy_violation", "manual authorization is present"
+            "read_policy_violation", "unsupported execution authority"
         )
     projection_path = Path(
         str(config.get("dashboard", {}).get("projection_path") or "")

@@ -7,8 +7,8 @@ description: "408 日终错题编纂：用户明确指定日期并要求集中�
 Turn one explicit study date's authorized fact captures into high-quality formal nodes
 or redos without making the learner wait or letting a stronger model rewrite immutable facts.
 ## Entry gate
-Read `../_shared/kaoyan-408/runtime-contract.md` and
-`../kaoyan-408-wrong-intake/references/fact-capture-schema.md`. Do not load the
+Read `../../references/kaoyan-408-runtime-contract.md` and
+`../../references/kaoyan-408-fact-capture-schema.md`. Do not load the
 personalization harness, historical preferences, cross-question recommendations,
 or variant catalogs for this workflow.
 Require an explicit `YYYY-MM-DD` or an unambiguous local calendar date. “今天” may be resolved using the current Asia/Shanghai date. Broad “提高质量/回流/同步状态” with
@@ -51,8 +51,8 @@ identity, new/redo, user fact, unique main knowledge, or answer-safety evidence 
 cannot be resolved from primary evidence becomes `needs_user`.
 Independent read-only semantic preparation may run in parallel on frozen,
 answer-safe, role-specific views when it improves quality. Follow
-`../_shared/native-luna-parallel-contract.md` and
-`../kaoyan-408-wrong-intake/references/parallel-intake-contract.md`. These are native
+`../../references/native-luna-parallel-contract.md` and
+`../../references/kaoyan-408-parallel-intake-contract.md`. These are native
 Codex Luna Max Fast leaf reviews and are separate from the optional one-shot
 background report consumer below. Do not send
 complete stems, answers, options, screenshots, handwriting, or protected paths.

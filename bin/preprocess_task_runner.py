@@ -657,6 +657,40 @@ def run_request(
             expected_path=supervisor_path,
             expected_launch_nonce=supervisor_launch_nonce,
         )
+    raw_execution_proof = request.get("task_execution_proof")
+    execution_proof_required = bool(
+        config.get("execution_mode") == "live_authorized"
+        and os.environ.get("STUDY_INTAKE_FIXTURE_EXECUTION") != "1"
+    )
+    validated_execution_proof: Mapping[str, Any] | None = None
+    if execution_proof_required:
+        task_identity = (
+            raw_execution_proof.get("task_identity")
+            if isinstance(raw_execution_proof, Mapping)
+            else None
+        )
+        if not isinstance(raw_execution_proof, Mapping) or not isinstance(
+            task_identity, Mapping
+        ):
+            raise DispatchError("task_execution_proof_missing")
+        validated_execution_proof = (
+            lease_store.verify_task_execution_proof_reference(
+                raw_execution_proof, task_identity=task_identity
+            )
+        )
+        if (
+            validated_execution_proof.get("unit_sha256")
+            != task.unit_sha256
+            or validated_execution_proof.get("frozen_payload_sha256")
+            != task.frozen_payload_sha256
+            or validated_execution_proof.get("lease_owner_id") != owner_id
+            or validated_execution_proof.get("lease_fence") != fence
+            or validated_execution_proof.get("release_id")
+            != contract.get("release_id")
+        ):
+            raise DispatchError("task_execution_proof_binding_mismatch")
+    elif raw_execution_proof is not None:
+        raise DispatchError("task_execution_proof_unexpected")
     lifecycle_binder = getattr(
         worker.runner, "bind_dispatch_process_lifecycle", None
     )
@@ -668,6 +702,8 @@ def run_request(
             task=task,
             lease=lease,
             lease_store=lease_store,
+            task_execution_proof_reference=raw_execution_proof,
+            task_execution_proof=validated_execution_proof,
         )
     if cancellation is not None:
         cancellation.bind(worker.runner)

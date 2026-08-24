@@ -3361,6 +3361,8 @@ def _validate_target_release_config(
                 or live_gate.get("enabled") is not True
                 or live_gate.get("default_locked") is not True
                 or live_gate.get("authorization_required") is not True
+                or live_gate.get("authorization_kind")
+                != "task_execution_proof_v1"
                 or not isinstance(scheduler, Mapping)
                 or scheduler.get("logical_branch_limit") is not None
                 or scheduler.get("physical_concurrency_mode") != "dynamic"

@@ -3660,10 +3660,7 @@ output_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
                     "enabled": True,
                     "default_locked": True,
                     "authorization_required": True,
-                    "authorization_state_path": str(
-                        self.runtime
-                        / "dispatch/manual-live-authorization-v1/state.json"
-                    ),
+                    "authorization_kind": "task_execution_proof_v1",
                 },
                 "fixture_execution": {
                     "allowed_executable_roots": [

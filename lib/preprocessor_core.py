@@ -1492,10 +1492,7 @@ def _materialize_legacy_fixture_v2_config(
                 "enabled": True,
                 "default_locked": True,
                 "authorization_required": True,
-                "authorization_state_path": str(
-                    runtime_root
-                    / "dispatch/manual-live-authorization-v1/state.json"
-                ),
+                "authorization_kind": "task_execution_proof_v1",
             },
             "fixture_execution": {
                 "allowed_executable_roots": sorted(
@@ -1661,13 +1658,13 @@ def load_config(path: Path) -> dict[str, Any]:
             "enabled",
             "default_locked",
             "authorization_required",
-            "authorization_state_path",
+            "authorization_kind",
         }
         or live_gate.get("enabled") is not True
         or live_gate.get("default_locked") is not True
         or live_gate.get("authorization_required") is not True
-        or not isinstance(live_gate.get("authorization_state_path"), str)
-        or not Path(str(live_gate["authorization_state_path"])).is_absolute()
+        or live_gate.get("authorization_kind")
+        != "task_execution_proof_v1"
     ):
         raise PreprocessorError("config_live_execution_gate_invalid")
     fixture_execution = config.get("fixture_execution")
@@ -16558,6 +16555,8 @@ class CodexRunner:
         task: Any,
         lease: Any,
         lease_store: Any,
+        task_execution_proof_reference: Mapping[str, Any] | None = None,
+        task_execution_proof: Mapping[str, Any] | None = None,
     ) -> None:
         """Bind task-scoped HMAC process callbacks without importing dispatcher types."""
 
@@ -16567,6 +16566,16 @@ class CodexRunner:
             "task": task,
             "lease": lease,
             "lease_store": lease_store,
+            "task_execution_proof_reference": (
+                copy.deepcopy(dict(task_execution_proof_reference))
+                if isinstance(task_execution_proof_reference, Mapping)
+                else None
+            ),
+            "task_execution_proof": (
+                copy.deepcopy(dict(task_execution_proof))
+                if isinstance(task_execution_proof, Mapping)
+                else None
+            ),
         }
 
     def liveness_snapshot(self, *, stage_name: str) -> dict[str, Any]:
@@ -18877,10 +18886,27 @@ class CodexRunner:
             fixture["allowed_executable_roots"] = sorted(set(roots))
             gate_purpose = "fake_agent_worker"
         try:
+            task_identity = None
+            authorization = None
+            lifecycle = self._dispatch_process_lifecycle
+            if lifecycle is not None:
+                proof = lifecycle.get("task_execution_proof")
+                reference = lifecycle.get(
+                    "task_execution_proof_reference"
+                )
+                if isinstance(proof, Mapping) and isinstance(
+                    reference, Mapping
+                ):
+                    task_identity = copy.deepcopy(
+                        dict(reference.get("task_identity") or {})
+                    )
+                    authorization = reference
             assert_external_launch_allowed(
                 gate_config,
                 purpose=gate_purpose,
                 command=command,
+                task_identity=task_identity,
+                authorization=authorization,
             )
         except LiveExecutionDenied as exc:
             raise PreprocessorError(exc.code) from exc
@@ -21758,104 +21784,6 @@ class CodexRunner:
             stage_name="cs408_critical_review_provider",
         )
         return json_file_bytes(provider_schema)
-
-    def _run_v1(self, candidate: Candidate) -> ModelResult:
-        codex_path = Path(str(self.config["codex_path"]))
-        if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
-            raise PreprocessorError("codex_not_executable")
-        output_schema = Path(str(self.config["output_schema"]))
-        if not output_schema.is_file():
-            raise PreprocessorError("model_output_schema_missing")
-        prompt = prompt_for(candidate, str(self.config["prompt_version"]))
-        if len(prompt.encode("utf-8")) > int(self.config["max_prompt_bytes"]):
-            raise PreprocessorError("model_prompt_too_large")
-        image_paths = list(self._candidate_image_paths(candidate))
-        model_request_config_args = self._model_request_config_args()
-        temp_dir = self._model_temp_dir()
-        execution_root = self._model_execution_root()
-        fd, output_name = tempfile.mkstemp(prefix="luna-", suffix=".json", dir=temp_dir)
-        os.close(fd)
-        output_path = Path(output_name)
-        try:
-            command = [
-                str(codex_path),
-                "exec",
-                "--strict-config",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--cd",
-                str(execution_root),
-                *model_request_config_args,
-                "--config",
-                'approval_policy="never"',
-                "--config",
-                "project_doc_max_bytes=0",
-                "--config",
-                "project_doc_fallback_filenames=[]",
-                "--config",
-                "features.shell_tool=false",
-                "--config",
-                "features.plugins=false",
-                "--config",
-                "agents.enabled=false",
-                "--config",
-                'web_search="disabled"',
-                "--output-schema",
-                str(output_schema),
-                "--output-last-message",
-                str(output_path),
-                "--json",
-                "-",
-            ]
-            image_args = [
-                value
-                for image_path in image_paths
-                for value in ("--image", str(image_path))
-            ]
-            command[2:2] = image_args
-            started = time.monotonic()
-            try:
-                completed = self._invoke_subprocess(
-                    command,
-                    input=prompt.encode("utf-8"),
-                    timeout=None,
-                    cwd=execution_root,
-                    stage_name=f"{candidate.subject}_analysis",
-                )
-            except OSError as exc:
-                raise PreprocessorError(
-                    process_resource_error_code(exc) or "model_exec_failed"
-                ) from exc
-            duration_ms = max(0, int((time.monotonic() - started) * 1000))
-            if completed.returncode != 0:
-                raise PreprocessorError("model_nonzero_exit")
-            try:
-                analysis = json.loads(output_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise PreprocessorError("model_output_invalid_json") from exc
-            analysis = validate_analysis(analysis, candidate.allowed_evidence_refs)
-            runtime_model, runtime_effort, provenance = self._runtime_metadata(
-                completed.stderr, completed.stdout
-            )
-            return ModelResult(
-                analysis=analysis,
-                duration_ms=duration_ms,
-                runtime_model=runtime_model,
-                runtime_reasoning_effort=runtime_effort,
-                runtime_metadata_provenance=provenance,
-                semantic_stage_count=1,
-                provider_request_count=1,
-                mcp_tool_call_count=0,
-            )
-        finally:
-            try:
-                output_path.unlink()
-            except FileNotFoundError:
-                pass
 
     def _execute_prompt(
         self,
@@ -25744,42 +25672,6 @@ class CodexRunner:
             ),
         )
 
-    def _analysis_package_prompt(
-        self,
-        *,
-        candidate: Candidate,
-        stage: str,
-        stage_input: Mapping[str, Any],
-        prior_reports: Mapping[str, Mapping[str, Any]],
-        processing_context: Mapping[str, Any],
-    ) -> str:
-        envelope = {
-            "contract": "study-intake-analysis-package-v1",
-            "stage": stage,
-            "subject": candidate.subject,
-            "capture_id": candidate.capture_id,
-            "study_date": candidate.study_date,
-            "captured_at": candidate.recorded_at,
-            "capture_intake_date": stage_input["capture_intake_date"],
-            "read_session": self._processing_prompt_context(
-                processing_context
-            ),
-            "prior_reports": copy.deepcopy(dict(prior_reports)),
-            "instructions": [
-                "Use only the subject-scoped read-only MCP for knowledge-base facts.",
-                "Call get_task_context exactly once with the empty JSON object {} before making claims; do not pass subject or session arguments, never repeat identical MCP arguments, and cite unique mcp-item evidence refs.",
-                "Proposals are advisory and must not be executable writer commands.",
-                "Missing fields, disagreement, duplicate candidates, and warnings remain reportable and do not reject the Capture.",
-                "Set formal_write_count to zero.",
-            ],
-        }
-        return (
-            "Produce exactly one JSON object for the Study Intake V2 raw "
-            "analysis-stage boundary. Missing advisory fields are preserved "
-            "as normalization warnings by the Host.\n"
-            + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
-        )
-
     def _new_multi_agent_branch_runner(
         self, candidate: Candidate, branch_id: str
     ) -> "CodexRunner":
@@ -25790,6 +25682,19 @@ class CodexRunner:
         # Cancellation authority remains task-scoped while every runner keeps
         # independent process, raw-output, and MCP-session maps.
         child._cancel_requested = self._cancel_requested
+        lifecycle = self._dispatch_process_lifecycle
+        if lifecycle is not None:
+            child.bind_dispatch_process_lifecycle(
+                task=lifecycle["task"],
+                lease=lifecycle["lease"],
+                lease_store=lifecycle["lease_store"],
+                task_execution_proof_reference=lifecycle.get(
+                    "task_execution_proof_reference"
+                ),
+                task_execution_proof=lifecycle.get(
+                    "task_execution_proof"
+                ),
+            )
         return child
 
     def _multi_agent_activation_id(self, subject: str) -> str:
@@ -27141,7 +27046,7 @@ class CodexRunner:
             and profile.get("enabled") is True
         ):
             return self._run_v2(candidate)
-        return self._run_v1(candidate)
+        raise PreprocessorError("legacy_analysis_route_not_available")
 
 
 def _expected_math_dynamic_schema_sha256s(

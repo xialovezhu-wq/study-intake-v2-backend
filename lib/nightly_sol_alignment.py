@@ -21,7 +21,7 @@ from analysis_package_store import (
     sha256_value,
     validate_durable_capture,
 )
-from analysis_package_v1 import (
+from historical_compatibility.analysis_package_v1 import (
     PACKAGE_SCHEMA,
     reopen_analysis_package_v1,
 )

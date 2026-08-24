@@ -102,19 +102,18 @@ class SolMCPPreflightTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(json.loads(first_path.read_text()), first)
 
-    def test_offline_runtime_gate_rejects_authorization_and_nonzero_counts(self) -> None:
+    def test_offline_runtime_gate_rejects_unsupported_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             release_id = "a" * 64
             release = root / "releases" / release_id
             release.mkdir(parents=True)
-            authorization = root / "dispatch/manual-live-authorization-v1/state.json"
             projection = root / "state/dashboard_projection.json"
             projection.parent.mkdir(parents=True)
             config = {
                 "execution_mode": "offline",
                 "live_execution_gate": {
-                    "authorization_state_path": str(authorization)
+                    "authorization_kind": "task_execution_proof_v1"
                 },
                 "dashboard": {"projection_path": str(projection)},
             }
@@ -141,8 +140,10 @@ class SolMCPPreflightTests(unittest.TestCase):
             _validate_offline_runtime(
                 runtime_root=root, central_release_id=release_id
             )
-            authorization.parent.mkdir(parents=True)
-            authorization.write_text("{}\n", encoding="utf-8")
+            config["live_execution_gate"]["authorization_kind"] = (
+                "manual_live_authorization_v1"
+            )
+            (release / "config.json").write_bytes(canonical_bytes(config))
             with self.assertRaises(SolMCPPreflightError) as caught:
                 _validate_offline_runtime(
                     runtime_root=root, central_release_id=release_id

@@ -7454,23 +7454,12 @@ def _multi_agent_v2_summary(projection: Mapping[str, Any]) -> dict[str, Any]:
     if execution_mode not in {"fixture", "offline", "live_authorized"}:
         execution_mode = "offline"
     live_gate = config.get("live_execution_gate")
-    state_path = (
-        Path(str(live_gate.get("authorization_state_path")))
-        if isinstance(live_gate, Mapping)
-        and isinstance(live_gate.get("authorization_state_path"), str)
-        else None
+    task_proof_required = bool(
+        isinstance(live_gate, Mapping)
+        and live_gate.get("authorization_kind")
+        == "task_execution_proof_v1"
     )
     authorization_present = False
-    if state_path is not None:
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            authorization_present = bool(
-                isinstance(state, Mapping)
-                and state.get("status") == "armed_once"
-                and state.get("remaining_tasks") == 1
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            authorization_present = False
     return {
         "schema_version": "study-intake-dashboard-multi-agent-v1",
         "execution_mode": execution_mode,
@@ -7480,6 +7469,8 @@ def _multi_agent_v2_summary(projection: Mapping[str, Any]) -> dict[str, Any]:
             "configured_subjects": list(SUBJECT_NAMES),
             "active_task_count": 0,
             "pending_task_count": 0,
+            "task_execution_proof_required": task_proof_required,
+            "standing_authorization_enabled": False,
         },
         "branch_level": {
             "logical_branch_count": 0,

@@ -3,7 +3,7 @@
   "agent_plugins_spec": "1.0.0",
   "plugin": {
     "name": "kaoyan-study-intake",
-    "version": "0.6.0+codex.20260818-prelive-finalization",
+    "version": "0.6.0+codex.20260824140221",
     "description": "Offline-locked Study Intake commissioning with three-subject foreground closure, capture-free Sol MCP preflight, protected validation console, and proposal-only Terra/Luna production contracts.",
     "author": {
       "name": "Xiazhibin Local Study Systems"
@@ -159,18 +159,6 @@
         "subject": "math",
         "tool_name": "math_read_bundle"
       },
-      "kaoyan-english-vocab-export": {
-        "subject": "english",
-        "tool_name": "english_read_bundle"
-      },
-      "kaoyan-english-intensive-reading": {
-        "subject": "english",
-        "tool_name": "english_read_bundle"
-      },
-      "kaoyan-english-daily-intake-curation": {
-        "subject": "english",
-        "tool_name": "english_read_bundle"
-      },
       "kaoyan-408-daily-intake-curation": {
         "subject": "cs408",
         "tool_name": "cs408_read_bundle"
@@ -249,9 +237,6 @@
     "kaoyan-math-visual-review": "2.1.0",
     "kaoyan-math-weak-edge-audit": "2.1.0",
     "kaoyan-math-nightly-qa": "2.1.0",
-    "kaoyan-english-vocab-export": "2.1.0",
-    "kaoyan-english-intensive-reading": "2.1.1",
-    "kaoyan-english-daily-intake-curation": "2.1.0",
     "kaoyan-408-daily-intake-curation": "2.1.0"
   }
 }

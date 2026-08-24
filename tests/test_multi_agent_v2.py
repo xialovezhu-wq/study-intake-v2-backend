@@ -20,7 +20,7 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from live_execution_gate import LiveExecutionDenied, assert_external_launch_allowed
-from manual_capture_admission import (
+from historical_compatibility.manual_capture_admission import (
     ManualAuthorizationStore,
     build_fixture_authorization,
     validate_authorization_for_task,

@@ -80,6 +80,10 @@ class ProductionRouteConfigTests(unittest.TestCase):
     def test_live_config_requires_v2_and_package_v4(self) -> None:
         loaded = self._load(copy.deepcopy(self.config))
         self.assertTrue(loaded["analysis_package_v2"]["enabled"])
+        self.assertEqual(
+            loaded["live_execution_gate"]["authorization_kind"],
+            "task_execution_proof_v1",
+        )
         for profile_name in (
             "math_deep_v2",
             "cs408_deep_v2",
@@ -143,6 +147,46 @@ class ProductionRouteConfigTests(unittest.TestCase):
             )
         loaded = self._load(historical)
         self.assertNotIn("analysis_package_v2", loaded)
+
+    def test_v1_execution_symbols_are_physically_retired(self) -> None:
+        core = (ROOT / "lib/preprocessor_core.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("def _run_v1(", core)
+        self.assertNotIn("def _analysis_package_prompt(", core)
+        self.assertFalse((ROOT / "lib/analysis_package_v1.py").exists())
+        self.assertFalse(
+            (ROOT / "lib/manual_capture_admission.py").exists()
+        )
+        self.assertTrue(
+            (
+                ROOT
+                / "lib/historical_compatibility/analysis_package_v1.py"
+            ).is_file()
+        )
+        self.assertTrue(
+            (
+                ROOT
+                / "lib/historical_compatibility/"
+                "manual_capture_admission.py"
+            ).is_file()
+        )
+        live_gate_source = (ROOT / "lib/live_execution_gate.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("manual_capture_admission", live_gate_source)
+        for relative in (
+            "bin/preprocess_dispatcher.py",
+            "bin/preprocess_task_runner.py",
+            "lib/core_dispatch_bridge.py",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertNotIn("analysis_package_v1", source, relative)
+            self.assertNotIn(
+                "historical_compatibility.analysis_package_v1",
+                source,
+                relative,
+            )
 
 
 if __name__ == "__main__":

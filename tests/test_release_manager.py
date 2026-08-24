@@ -84,10 +84,7 @@ class ReleaseManagerTests(unittest.TestCase):
                     "enabled": True,
                     "default_locked": True,
                     "authorization_required": True,
-                    "authorization_state_path": (
-                        "${RUNTIME_DATA_ROOT}/dispatch/"
-                        "manual-live-authorization-v1/state.json"
-                    ),
+                    "authorization_kind": "task_execution_proof_v1",
                 },
                 "fixture_execution": {
                     "allowed_executable_roots": [

@@ -2431,6 +2431,7 @@ class ProductionDispatchRuntime:
             self.config_path,
             expected_batch_authority=self._frozen_batch_authority,
             lease_store=self.dispatcher.lease_store,
+            production_canary=self.production_canary,
         )
 
     def register_controlled_replay_candidate(
