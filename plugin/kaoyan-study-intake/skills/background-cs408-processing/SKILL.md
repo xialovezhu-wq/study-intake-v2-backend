@@ -7,7 +7,7 @@ description: "Internal model-driven MCP Luna preprocessing contract for one immu
 
 Read `../../references/shared-processing-contract.md` completely before processing.
 
-Skill version `4.0.0`.
+Skill version `4.0.1`.
 
 ## Active Multi-Agent V2 route
 
@@ -25,7 +25,7 @@ The Host dynamically starts `study-read-mcp-cs408 --stdio --read-session-manifes
 
 The bootstrap contains only this Skill binding, capture ID, read-session binding, release and Schema hashes, and output instructions. It contains no question prose, images, dialogue summary, knowledge snapshot, taxonomy shortlist, historical wrong-item shortlist, direct-edge shortlist, or semantic findings. At the start of Analysis, call `get_task_context`, then read every returned artifact ID with `read_task_artifact`, following every text-artifact cursor until complete. Read bound images as MCP ImageContent. Then use at least one of the four library tools and whichever additional library tools are needed for identity, projection/event authority, knowledge, and relation judgments.
 
-Select the necessary collections yourself from `knowledge_catalog`, `knowledge_nodes`, `relationships`, `search`, `curation_inventory`, `morning_sessions`, and `review_events`. Use `ids` for exact node or review scope; optional `query` filters any collection. `page_size` must be 1..48, never 50. Follow every short opaque `next_cursor` for each selected query until `complete=true`: copy it exactly, keep all other query arguments unchanged, and never edit or synthesize a cursor. Use stable IDs, publication identity, or verified review identity first; otherwise search by content/source evidence.
+Select the necessary collections yourself from `formal_wrong_item_catalog`, `formal_nodes`, `formal_knowledge_catalog`, `knowledge_nodes`, `knowledge_safe_notes`, `curation_inventory`, `morning_sessions`, `review_events`, and `search`. Use `ids` for exact node or review scope; optional `query` filters any collection. Use `query_relations` with endpoint `ids` for relation scope. `page_size` must be 1..48, never 50. Follow every short opaque `next_cursor` for each selected query until `complete=true`: copy it exactly, keep all other query arguments unchanged, and never edit or synthesize a cursor. Use stable IDs, publication identity, or verified review identity first; otherwise search by content/source evidence.
 
 `state.json` is a projection. Its event-ledger binding must pass before any Luna call. Projection/event mismatch fails closed and is never repaired or reinterpreted by the model.
 

@@ -1730,7 +1730,7 @@ class ModelDrivenMcpArchitectureTests(unittest.TestCase):
         components = json.loads(
             (ROOT / "plugin" / "kaoyan-study-intake" / "components.json").read_text()
         )
-        self.assertEqual("4.0.0", components["skills"]["background-math-processing"])
+        self.assertEqual("4.0.1", components["skills"]["background-math-processing"])
         self.assertIn("solution image or a UTF-8 non-empty `solution_text`", math)
         self.assertIn("For an independently correct episode", math)
         self.assertIn("For a wrong-then-corrected episode", math)

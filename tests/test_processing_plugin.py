@@ -1931,6 +1931,29 @@ class ProcessingPluginHostTests(unittest.TestCase):
             )
 
     def test_processing_skills_require_model_driven_full_library_mcp(self) -> None:
+        expected_collections = {
+            "math": {
+                "formal_card_catalog", "formal_card_records", "knowledge_catalog",
+                "math_taxonomy_items", "activity", "search",
+            },
+            "cs408": {
+                "formal_wrong_item_catalog", "formal_nodes",
+                "formal_knowledge_catalog", "knowledge_nodes",
+                "knowledge_safe_notes", "curation_inventory", "morning_sessions",
+                "review_events", "search",
+            },
+            "english": {
+                "article_catalog", "articles", "sentences", "vocabulary",
+                "mastered_items", "patterns", "events", "raw_events",
+                "effective_events", "article_learning_catalog",
+                "article_learning_pages", "search",
+            },
+        }
+        stale_collections = {
+            "math": {"catalog", "formal_cards", "relationships"},
+            "cs408": {"knowledge_catalog", "relationships"},
+            "english": set(),
+        }
         for subject in ("math", "cs408", "english"):
             skill = (
                 ROOT / f"plugin/kaoyan-study-intake/skills/background-{subject}-processing/SKILL.md"
@@ -1938,6 +1961,17 @@ class ProcessingPluginHostTests(unittest.TestCase):
             self.assertIn("model-driven MCP", skill)
             self.assertIn("next_cursor", skill)
             self.assertIn("formal_write_count=0", skill)
+            self.assertIn("Skill version `4.0.1`.", skill)
+            collection_line = next(
+                line for line in skill.splitlines()
+                if line.startswith("Select the ") and " collections yourself from " in line
+            )
+            collection_clause = collection_line.split(" from ", 1)[1].split(". Use", 1)[0]
+            declared_collections = set(collection_clause.split("`")[1::2])
+            self.assertEqual(declared_collections, expected_collections[subject])
+            for collection in stale_collections[subject]:
+                self.assertNotIn(f"`{collection}`", collection_line)
+            self.assertIn("Use `query_relations` with endpoint `ids`", collection_line)
 
 
 if __name__ == "__main__":

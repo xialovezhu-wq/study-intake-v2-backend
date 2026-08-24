@@ -261,9 +261,9 @@
   },
   "skills": {
     "multi-agent-read-orchestrate": "1.0.0",
-    "background-math-processing": "4.0.0",
-    "background-cs408-processing": "4.0.0",
-    "background-english-processing": "4.0.0",
+    "background-math-processing": "4.0.1",
+    "background-cs408-processing": "4.0.1",
+    "background-english-processing": "4.0.1",
     "kaoyan-math-visual-review": "2.1.0",
     "kaoyan-math-weak-edge-audit": "2.1.0",
     "kaoyan-math-nightly-qa": "2.1.0",

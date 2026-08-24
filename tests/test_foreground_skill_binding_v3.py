@@ -204,7 +204,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
                     },
                     "skills": {
                         "background-math-processing": {
-                            "version": "4.0.0",
+                            "version": "4.0.1",
                             "sha256": "3" * 64,
                         },
                         "multi-agent-read-orchestrate": {
@@ -545,7 +545,7 @@ class ForegroundSkillBindingV3Tests(unittest.TestCase):
                             },
                             "skills": {
                                 f"background-{case['subject']}-processing": {
-                                    "version": "4.0.0",
+                                    "version": "4.0.1",
                                     "sha256": "a" * 64,
                                 },
                                 "multi-agent-read-orchestrate": {

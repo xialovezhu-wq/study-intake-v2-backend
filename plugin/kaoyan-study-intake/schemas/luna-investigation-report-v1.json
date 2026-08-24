@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/study-intake/luna-investigation-report-v1.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "report_id", "subject", "capture_id", "plan_sha256", "read_bundle_sha256", "branch_id", "branch_result_sha256", "purpose", "summary", "mcp_calls", "findings", "conflicts", "missing_evidence", "confidence", "evidence_refs", "formal_write_count", "report_sha256"],
+  "properties": {
+    "schema_version": {"const": "luna_investigation_report_v1"},
+    "report_id": {"type": "string", "minLength": 1},
+    "subject": {"enum": ["math", "cs408", "english"]},
+    "capture_id": {"type": "string", "minLength": 1},
+    "plan_sha256": {"$ref": "#/$defs/sha"}, "read_bundle_sha256": {"$ref": "#/$defs/sha"},
+    "branch_id": {"type": "string", "minLength": 1}, "branch_result_sha256": {"$ref": "#/$defs/sha"},
+    "purpose": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 16000},
+    "mcp_calls": {"type": "array", "minItems": 1}, "findings": {"type": "array"}, "conflicts": {"type": "array"}, "missing_evidence": {"type": "array"},
+    "confidence": {"enum": ["high", "medium", "low", "unknown"]},
+    "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "formal_write_count": {"const": 0}, "report_sha256": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

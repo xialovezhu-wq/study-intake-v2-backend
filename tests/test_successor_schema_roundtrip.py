@@ -365,7 +365,7 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
             "candidate_release_id": "d" * 64,
             "plugin_version": "0.6.0-test",
             "skill_id": "background-math-processing",
-            "skill_version": "4.0.0",
+            "skill_version": "4.0.1",
             "mcp_server_release": server_release,
             "generation": "generation-1",
             "authority_fingerprint": "b" * 64,
@@ -538,9 +538,9 @@ class SuccessorReleaseSchemaInventoryTests(unittest.TestCase):
             self.assertEqual(manifest["version"], SUCCESSOR_PLUGIN_VERSION)
 
         expected_skill_versions = {
-            "background-math-processing": "4.0.0",
-            "background-cs408-processing": "4.0.0",
-            "background-english-processing": "4.0.0",
+            "background-math-processing": "4.0.1",
+            "background-cs408-processing": "4.0.1",
+            "background-english-processing": "4.0.1",
             "multi-agent-read-orchestrate": "1.0.0",
         }
         for skill_name, expected_version in expected_skill_versions.items():

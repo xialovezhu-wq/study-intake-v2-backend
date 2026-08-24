@@ -172,6 +172,7 @@ REQUIRED_RUNTIME_SCHEMAS = {
     "user-sol-authorization-receipt-v2.json",
     "dashboard-multi-agent-v1.json",
     "live-execution-gate-state-v1.json",
+    "luna-investigation-report-v1.json",
     "manual-live-authorization-v1.json",
     "multi-agent-model-contract-v1.json",
     "multi-agent-event-chain-receipt-v1.json",
@@ -186,6 +187,8 @@ REQUIRED_RUNTIME_SCHEMAS = {
     "read-bundle-v1.json",
     "risk-report-v1.json",
     "sol-handoff-envelope-v1.json",
+    "sol-handoff-envelope-v2.json",
+    "terra-final-report-v1.json",
 }
 
 

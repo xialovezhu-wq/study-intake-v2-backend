@@ -7,7 +7,7 @@ description: "Internal model-driven MCP Luna preprocessing contract for one immu
 
 Read `../../references/shared-processing-contract.md` completely before processing.
 
-Skill version `4.0.0`.
+Skill version `4.0.1`.
 
 ## Active Multi-Agent V2 route
 
@@ -23,7 +23,7 @@ The Host dynamically starts `study-read-mcp-english --stdio --read-session-manif
 
 The bootstrap contains only this Skill binding, capture ID, read-session binding, release and Schema hashes, and output instructions. It contains no article prose, sentence summary, master-bank match, mastered-item match, pattern shortlist, grounding packet, or article-history shortlist. At the start of Analysis, call `get_task_context`, then read every returned artifact ID with `read_task_artifact`, following every text-artifact cursor until complete. Then use at least one of the four library tools and whichever additional library tools are needed for article identity, vocabulary, phrase, pattern, event, and relation judgments.
 
-Select the necessary collections yourself from `article_catalog`, `sentences`, `vocabulary`, `mastered_items`, `patterns`, `events`, and `search`. Use `ids` for exact item scope; optional `query` filters any collection. `page_size` must be 1..48, never 50. Query the complete safe library as needed and follow every short opaque `next_cursor` until `complete=true` by copying it exactly and keeping all other query arguments unchanged; never edit or synthesize a cursor. Ground existing/new decisions only in rows actually returned to this stage.
+Select the necessary collections yourself from `article_catalog`, `articles`, `sentences`, `vocabulary`, `mastered_items`, `patterns`, `events`, `raw_events`, `effective_events`, `article_learning_catalog`, `article_learning_pages`, and `search`. Use `ids` for exact item scope; optional `query` filters any collection. Use `query_relations` with endpoint `ids` for relation scope. `page_size` must be 1..48, never 50. Query the complete safe library as needed and follow every short opaque `next_cursor` until `complete=true` by copying it exactly and keeping all other query arguments unchanged; never edit or synthesize a cursor. Ground existing/new decisions only in rows actually returned to this stage.
 
 For this English Skill only, this subject-specific rule takes precedence over the shared contract's generic `output limit` fail-closed sentence. An `OUTPUT_LIMIT` result from a library exploration is a failed non-evidence call, but it is not terminal when the same information need is subsequently recovered by a distinct call with a smaller `page_size`. Do not repeat the identical arguments, and keep every non-size query argument unchanged. The smaller-page chain is recovered only when every returned `next_cursor` is copied exactly until `complete=true` and `next_cursor=null`, and every output judgment cites only successful current-stage calls. The failed call remains raw-transport evidence only and contributes no grounding, duplicate, coverage, or evidence ledger entry. A recovered chain must not create a blocking finding or correction resolution and must not force Critical Review to reject solely because the earlier call failed. If `page_size=1` still returns `OUTPUT_LIMIT`, a cursor remains unresolved, the smaller call changes another query argument, or required evidence remains insufficient, fail the stage closed. Starting a distinct smaller-page MCP call is not a second Provider submission and does not relax the exactly-one Analysis and exactly-one fresh Critical Review contract.
 

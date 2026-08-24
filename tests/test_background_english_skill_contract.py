@@ -31,7 +31,7 @@ class BackgroundEnglishSkillContractTests(unittest.TestCase):
 
     def test_preserves_skill_name_and_bumps_private_version(self) -> None:
         self.assertIn("name: background-english-processing", self.skill)
-        self.assertIn("Skill version `4.0.0`.", self.skill)
+        self.assertIn("Skill version `4.0.1`.", self.skill)
         self.assertNotIn("Skill version `3.1.1`.", self.skill)
         self.assertNotIn("Skill version `3.1.0`.", self.skill)
 
