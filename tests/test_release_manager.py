@@ -6379,11 +6379,19 @@ LIVE_CONFIG = Path(
         dispatch = self.base / "preview-runtime" / "dispatch"
         heartbeat = dispatch / "state" / "subject-projections" / "math.json"
         canary = dispatch / "state" / "production-canary" / "math.json"
+        readiness_latest = (
+            dispatch
+            / "state"
+            / "evidence-readiness-latest"
+            / "cs408"
+            / "CAP-TEST.json"
+        )
         queue = dispatch / "state" / "production-canary-queue" / "math.json"
         receipt = dispatch / "receipts" / "sha256" / "aa" / "receipt.json"
         for path, value in (
             (heartbeat, b"heartbeat-v1\n"),
             (canary, b"canary-age-v1\n"),
+            (readiness_latest, b"readiness-v1\n"),
             (queue, b"queue-v1\n"),
             (receipt, b"receipt-v1\n"),
         ):
@@ -6392,6 +6400,7 @@ LIVE_CONFIG = Path(
         before = release._preview_runtime_durable_snapshot(dispatch)
         heartbeat.write_bytes(b"heartbeat-v2\n")
         canary.write_bytes(b"canary-age-v2\n")
+        readiness_latest.write_bytes(b"readiness-v2\n")
         after_live_refresh = release._preview_runtime_durable_snapshot(dispatch)
         self.assertEqual(before, after_live_refresh)
         queue.write_bytes(b"queue-v2\n")

@@ -19582,14 +19582,17 @@ def _preview_runtime_durable_snapshot(root: Path) -> dict[str, Any]:
 
     The active dispatchers continuously refresh subject heartbeat projections.
     A failed/paused subject can also refresh the signed canary state's pending
-    age without changing its durable queue, lease, receipt, or task evidence.
-    Those two live projection surfaces cannot participate in a before/after
-    non-mutation comparison while the current release remains running.
+    age, while CS408 refreshes its authenticated latest-readiness pointer,
+    without changing the content-addressed readiness ledger or any durable
+    queue, lease, receipt, or task evidence.  Those live projection surfaces
+    cannot participate in a before/after non-mutation comparison while the
+    current release remains running.
     """
     snapshot = _preview_tree_snapshot(root)
     volatile_prefixes = (
         "state/subject-projections/",
         "state/production-canary/",
+        "state/evidence-readiness-latest/",
     )
     snapshot["entries"] = [
         row
