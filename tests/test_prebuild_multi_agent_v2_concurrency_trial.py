@@ -236,24 +236,28 @@ class FakeModelMcpExecutor:
         if (
             self.mutation in {
                 "diagnostic", "diagnostic_missing_binding",
-                "diagnostic_missing_mcp",
+                "diagnostic_missing_mcp", "all_diagnostic",
             }
             and subject == "math"
             and capture_id.endswith("01")
         ):
-            diagnostic = reports.pop(2)
-            digest = diagnostic.pop("report_sha256")
-            diagnostic.update({
-                "material_kind": "diagnostic",
-                "diagnostic_sha256": digest,
-                "diagnostic_status": "failed",
-                "diagnostic_error_code": "synthetic_luna_quality_failure",
-                "evidence_refs": [],
-            })
-            diagnostics.append(diagnostic)
-            binding = bindings.pop(2)
-            binding["kind"] = "diagnostic_record"
-            diagnostic_bindings.append(binding)
+            indexes = range(2, -1, -1) if self.mutation == "all_diagnostic" else (2,)
+            for report_index in indexes:
+                diagnostic = reports.pop(report_index)
+                digest = diagnostic.pop("report_sha256")
+                diagnostic.update({
+                    "material_kind": "diagnostic",
+                    "diagnostic_sha256": digest,
+                    "diagnostic_status": "failed",
+                    "diagnostic_error_code": "synthetic_luna_quality_failure",
+                    "evidence_refs": [],
+                })
+                diagnostics.append(diagnostic)
+                binding = bindings.pop(report_index)
+                binding["kind"] = "diagnostic_record"
+                diagnostic_bindings.append(binding)
+            diagnostics.sort(key=lambda row: row["branch_id"])
+            diagnostic_bindings.sort(key=lambda row: row["branch_id"])
             if self.mutation == "diagnostic_missing_binding":
                 diagnostic_bindings.clear()
             if self.mutation == "diagnostic_missing_mcp":
@@ -489,6 +493,17 @@ class PrebuildMultiAgentV2ConcurrencyTrialTests(unittest.TestCase):
             "synthetic_luna_quality_failure",
             report["content_quality_warnings"],
         )
+
+    def test_all_diagnostics_pass_as_content_warnings(self) -> None:
+        report = self.run_case("all_diagnostic")
+        task = next(
+            row for row in report["tasks"]
+            if row["subject"] == "math" and row["capture_id"].endswith("01")
+        )
+        self.assertEqual(task["luna_reports"], [])
+        self.assertEqual(len(task["luna_diagnostics"]), 3)
+        self.assertEqual(report["technical_gate"], "PASS")
+        self.assertEqual(report["status"], "PASS_WITH_CONTENT_WARNINGS")
 
     def test_diagnostic_without_package_binding_is_rejected(self) -> None:
         with self.assertRaisesRegex(

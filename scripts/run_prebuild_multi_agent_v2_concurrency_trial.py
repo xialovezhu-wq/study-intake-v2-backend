@@ -1210,7 +1210,6 @@ def validate_trial_report(report: Mapping[str, Any]) -> dict[str, Any]:
             raise TrialError("trial_capture_marker_missing")
         if (
             not isinstance(reports, list)
-            or not reports
             or not isinstance(diagnostics, list)
             or len(reports) + len(diagnostics) != 3
         ):
