@@ -3911,6 +3911,28 @@ if a.command == 'run-once':
         ):
             release.verify_rollback_release(previous_root)
 
+    def test_ce8_is_the_exact_sealed_task_proof_transition_rollback(
+        self,
+    ) -> None:
+        self.assertEqual(
+            release.HISTORICAL_CE8_ROLLBACK_RELEASE_IDS,
+            frozenset(
+                {
+                    "ce8fefdc5745920bffac1d46169112c17293efc8a13f6b8b9cbe30c01c660c12"
+                }
+            ),
+        )
+        self.assertEqual(
+            release.HISTORICAL_CE8_ROLLBACK_CONTRACT,
+            {
+                "name": "historical_ce8_multi_agent_v2",
+                "model_contract": release.REQUIRED_MODEL_CONTRACT,
+                "component_inventory_profile": "full",
+                "target_runtime_contract_required": False,
+                "release_ids": release.HISTORICAL_CE8_ROLLBACK_RELEASE_IDS,
+            },
+        )
+
     def test_da9b_release_id_does_not_allow_an_approximate_contract(self) -> None:
         approximate_contract = copy.deepcopy(
             release.HISTORICAL_DA9B_MODEL_CONTRACT

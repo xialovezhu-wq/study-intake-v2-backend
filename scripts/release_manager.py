@@ -308,6 +308,18 @@ HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS = frozenset(
         "da9b8831df0d78567bbd3edf2767ccef4f00c3e90a35a4942a016659df9a0efa",
     }
 )
+HISTORICAL_CE8_ROLLBACK_RELEASE_IDS = frozenset(
+    {
+        "ce8fefdc5745920bffac1d46169112c17293efc8a13f6b8b9cbe30c01c660c12",
+    }
+)
+HISTORICAL_CE8_ROLLBACK_CONTRACT = {
+    "name": "historical_ce8_multi_agent_v2",
+    "model_contract": REQUIRED_MODEL_CONTRACT,
+    "component_inventory_profile": "full",
+    "target_runtime_contract_required": False,
+    "release_ids": HISTORICAL_CE8_ROLLBACK_RELEASE_IDS,
+}
 HISTORICAL_TARGET_RUNTIME_ROLLBACK_RELEASE_IDS = frozenset(
     {
         "a4ff96b8932344211ca51c69edda98a06e95382bcdc4de79e2520fdcf8e343d6",
@@ -4688,6 +4700,8 @@ def verify_rollback_release(release_dir: Path) -> dict[str, Any]:
             )
         if declared_release_id in HISTORICAL_DA9B_ROLLBACK_RELEASE_IDS:
             descriptors = (HISTORICAL_DA9B_ROLLBACK_CONTRACT, *descriptors)
+        if declared_release_id in HISTORICAL_CE8_ROLLBACK_RELEASE_IDS:
+            descriptors = (HISTORICAL_CE8_ROLLBACK_CONTRACT, *descriptors)
         for descriptor in descriptors:
             descriptor_release_ids = descriptor.get("release_ids")
             if (
