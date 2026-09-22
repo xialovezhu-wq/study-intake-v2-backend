@@ -32,3 +32,13 @@ node_modules/
 build/
 dist/
 validation/source-freeze-sha256-*.txt
+
+# Local provider credentials must never be committed.
+*.secret
+**/auth.json
+**/credentials.json
+**/api-key
+**/api_key
+**/caller-secret
+**/internal-secret
+**/cursor-public-secret
